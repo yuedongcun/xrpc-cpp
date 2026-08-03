@@ -1,0 +1,19 @@
+.cache/
+__pycache__/
+*.pyc
+
+# Build directory
+build/
+build-*/
+tests/Testing/
+
+# Compiled binaries
+bin/*
+
+# Object files
+*.o
+
+# Local runtime configs
+config/local/
+*.local.conf
+.env

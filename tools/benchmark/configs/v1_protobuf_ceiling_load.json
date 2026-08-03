@@ -1,0 +1,54 @@
+{
+  "description": "XRPC typed Protobuf ceiling sweep at the per-connection inflight limit.",
+  "client_mode": "firehose",
+  "workload": "protobuf",
+  "firehose_io_threads": 3,
+  "firehose_cases": [
+    {
+      "firehose_connections": 12,
+      "firehose_inflight": 1536
+    },
+    {
+      "firehose_connections": 15,
+      "firehose_inflight": 1920
+    },
+    {
+      "firehose_connections": 18,
+      "firehose_inflight": 2304
+    },
+    {
+      "firehose_connections": 24,
+      "firehose_inflight": 3072
+    },
+    {
+      "firehose_connections": 30,
+      "firehose_inflight": 3840
+    },
+    {
+      "firehose_connections": 36,
+      "firehose_inflight": 4608
+    },
+    {
+      "firehose_connections": 48,
+      "firehose_inflight": 6144
+    },
+    {
+      "firehose_connections": 72,
+      "firehose_inflight": 9216
+    }
+  ],
+  "warmup_duration": 3,
+  "duration": 12,
+  "repetitions": 2,
+  "payload_size": 128,
+  "server_delay_us": 0,
+  "server_worker_threads": 3,
+  "server_connection_io_threads": 3,
+  "server_listen_backlog": 128,
+  "server_lifecycle": "per_case",
+  "server_cpus": "0,2,4",
+  "client_cpus": "6,8,10",
+  "host": "127.0.0.1",
+  "port": 0,
+  "run_timeout": 60
+}

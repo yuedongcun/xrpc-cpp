@@ -1,0 +1,6 @@
+*/build/*
+*.pb.h
+*.pb.cc
+*.pb.cpp
+
+*/third_party/*

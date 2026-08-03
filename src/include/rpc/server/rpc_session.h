@@ -1,0 +1,132 @@
+#pragma once
+
+#include <algorithm>
+#include <cstddef>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "protocol/frame_codec.h"
+#include "protocol/protocol_message.h"
+#include "rpc/handler.h"
+#include "rpc/raw_message.h"
+#include "transport/byte_buffer.h"
+
+namespace xrpc {
+
+/**
+ * @brief Small request batch optimized for the common one-request read.
+ *
+ * Design note:
+ * - Ownership: one `RpcSession` belongs to one connection and owns the read buffer plus protocol header cache for that
+ *   byte stream.
+ * - State: `FeedBytes()` appends bytes, drains complete request frames, and marks the session closed on protocol
+ *   errors.
+ * - Failure: protocol decode errors close the session; handler failures become `RawResponse` status values before
+ *   encoding.
+ *
+ * The first request is stored without allocating a vector. Additional requests are used only when a read contains
+ * pipelined frames.
+ */
+class RawRequestBatch final {
+ public:
+  /** @brief Adds a decoded request to the batch. */
+  void Push(RawRequest request);
+
+  /** @return true when the batch has no decoded requests. */
+  [[nodiscard]] auto empty() const -> bool { return size() == 0; }
+
+  /** @return Number of decoded requests stored in the batch. */
+  [[nodiscard]] auto size() const -> std::size_t;
+
+  /** @return Request at `index`. */
+  [[nodiscard]] auto operator[](std::size_t index) const -> const RawRequest &;
+
+  /**
+   * @brief Moves every request into `callback` until the callback returns false.
+   *
+   * @return true when every request was consumed, false when the callback stopped early.
+   */
+  template <typename Callback>
+  auto ConsumeEach(Callback &&callback) -> bool {
+    if (first_request_.has_value() && !callback(std::move(*first_request_))) {
+      return false;
+    }
+    return std::ranges::all_of(additional_requests_,
+                               [&callback](RawRequest &request) { return callback(std::move(request)); });
+  }
+
+ private:
+  /** @brief Inline storage for the common single-request read. */
+  std::optional<RawRequest> first_request_;
+
+  /** @brief Extra decoded requests from the same read buffer. */
+  std::vector<RawRequest> additional_requests_;
+};
+
+/** @brief Result of feeding bytes into one server-side RPC session. */
+struct SessionFeedResult {
+  /** @brief Complete requests decoded from the buffered stream bytes. */
+  RawRequestBatch requests_;
+
+  /** @brief True when a protocol error closed the session. */
+  bool closed_ = false;
+};
+
+/**
+ * @brief Per-connection protocol session for decoding requests and encoding responses.
+ *
+ * The session owns one byte buffer and one request-header decode cache, so callers must feed bytes from only one TCP
+ * stream. It is not synchronized; the owning `TcpConnection` keeps session access on the event-loop thread.
+ */
+class RpcSession final {
+ public:
+  /** @brief Creates a session without an attached handler, useful for protocol tests. */
+  explicit RpcSession(ProtocolLimits protocol_limits = {});
+
+  /** @brief Creates a session that can decode, dispatch, and encode request bytes. */
+  explicit RpcSession(RawHandler handler, ProtocolLimits protocol_limits = {});
+
+  /**
+   * @brief Appends stream bytes and drains all complete request frames.
+   *
+   * @param bytes Newly read TCP stream bytes.
+   * @return Decoded request batch and closed flag.
+   */
+  [[nodiscard]] auto FeedBytes(std::string_view bytes) -> SessionFeedResult;
+
+  /** @return Encoded response frame bytes. */
+  [[nodiscard]] auto EncodeResponse(const ProtocolResponse &response) const -> std::string;
+
+  /** @return Encoded response frame bytes after mapping raw status fields to protocol fields. */
+  [[nodiscard]] auto EncodeResponse(RawResponse &&response) const -> std::string;
+
+  /** @return Concatenated response frames produced by decoding and dispatching `bytes`. */
+  [[nodiscard]] auto HandleBytes(std::string_view bytes) -> std::string;
+
+  /** @return true after a non-recoverable protocol error has closed this session. */
+  [[nodiscard]] auto IsClosed() const -> bool { return closed_; }
+
+ private:
+  /** @brief Drains all complete request frames currently buffered in the session. */
+  [[nodiscard]] auto DrainReadableRequests() -> RawRequestBatch;
+
+  /** @brief Handler used by `HandleBytes()` and connection dispatch paths. */
+  RawHandler handler_;
+
+  /** @brief Buffered TCP stream bytes not yet consumed by the frame codec. */
+  ByteBuffer buffer_;
+
+  /** @brief Per-connection cache for repeated request protobuf headers. */
+  RequestHeaderDecodeCache request_header_cache_;
+
+  /** @brief Protocol limits applied to every decoded and encoded frame. */
+  ProtocolLimits protocol_limits_;
+
+  /** @brief True after a protocol error; further feed operations do not reopen the session. */
+  bool closed_ = false;
+};
+
+}  // namespace xrpc
