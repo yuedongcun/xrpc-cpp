@@ -1,4 +1,4 @@
-name: 持续集成
+name: Continuous Integration
 
 on:
   push:
@@ -14,28 +14,23 @@ concurrency:
 
 jobs:
   build-test-install:
-    name: 构建、测试与安装验证
+    name: Build, Test, and Install
     runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: 安装依赖
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends \
             build-essential \
             cmake \
-            libgtest-dev \
-            libprotobuf-dev \
-            liburing-dev \
             ninja-build \
-            nlohmann-json3-dev \
-            protobuf-compiler \
             python3
 
-      - name: 配置
+      - name: Configure
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -43,19 +38,26 @@ jobs:
             -DXRPC_BUILD_TESTS=ON \
             -DXRPC_BUILD_TOOLS=ON
 
-      - name: 构建
+      - name: Build
         run: cmake --build build --parallel
 
-      - name: 测试
+      - name: Test
         run: ctest --test-dir build/tests --output-on-failure -LE "external|tooling"
 
-      - name: 验证工具
+      - name: Validate tools
         run: ctest --test-dir build/tests --output-on-failure -L tooling
 
-      - name: 安装
+      - name: Install
         run: cmake --install build --prefix "${{ runner.temp }}/xrpc-install"
 
-      - name: 验证安装后的软件包
+      - name: Install package-consumer dependencies
+        run: |
+          sudo apt-get install --no-install-recommends \
+            libprotobuf-dev \
+            liburing-dev \
+            nlohmann-json3-dev
+
+      - name: Validate installed package
         run: |
           cmake -S tests/package_consumer -B build/package-consumer -G Ninja \
             -DCMAKE_PREFIX_PATH="${{ runner.temp }}/xrpc-install"

@@ -10,6 +10,30 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
 find_dependency(LibUring)
 list(POP_BACK CMAKE_MODULE_PATH)
 
+if(NOT TARGET xrpc_dependencies::protobuf)
+    add_library(xrpc_dependencies::protobuf INTERFACE IMPORTED)
+    set_target_properties(
+        xrpc_dependencies::protobuf
+        PROPERTIES INTERFACE_LINK_LIBRARIES protobuf::libprotobuf
+    )
+endif()
+
+if(NOT TARGET xrpc_dependencies::nlohmann_json)
+    add_library(xrpc_dependencies::nlohmann_json INTERFACE IMPORTED)
+    set_target_properties(
+        xrpc_dependencies::nlohmann_json
+        PROPERTIES INTERFACE_LINK_LIBRARIES nlohmann_json::nlohmann_json
+    )
+endif()
+
+if(NOT TARGET xrpc_dependencies::liburing)
+    add_library(xrpc_dependencies::liburing INTERFACE IMPORTED)
+    set_target_properties(
+        xrpc_dependencies::liburing
+        PROPERTIES INTERFACE_LINK_LIBRARIES LibUring::LibUring
+    )
+endif()
+
 include("${CMAKE_CURRENT_LIST_DIR}/xrpcTargets.cmake")
 
 check_required_components(xrpc)

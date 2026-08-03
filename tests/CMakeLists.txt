@@ -1,5 +1,3 @@
-find_package(GTest REQUIRED)
-
 set(XRPC_TEST_RUNTIME_DIR "${CMAKE_BINARY_DIR}/tests")
 set(XRPC_TEST_GEN_DIR "${CMAKE_BINARY_DIR}/gen/tests")
 file(MAKE_DIRECTORY "${XRPC_TEST_RUNTIME_DIR}" "${XRPC_TEST_GEN_DIR}")
@@ -18,7 +16,7 @@ target_include_directories(
 )
 target_link_libraries(xrpc_test_support PUBLIC xrpc::xrpc Threads::Threads)
 
-protobuf_generate(
+xrpc_protobuf_generate(
     TARGET xrpc_test_proto
     LANGUAGE cpp
     IMPORT_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"

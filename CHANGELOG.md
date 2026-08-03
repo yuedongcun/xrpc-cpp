@@ -12,3 +12,4 @@ XRPC 面向公开发布的重要变更都会记录在此文件中。
 - 支持 Consul 服务发现与注册。
 - 提供 Prometheus 指标与就绪检查端点。
 - 提供分层测试和性能测试工具。
+- 将 Protocol Buffers、liburing、nlohmann/json 和 GoogleTest 固定为仓库内置源码依赖。
