@@ -10,6 +10,7 @@ Run the local XRPC CI gate.
 
 Options:
   --build-dir DIR     Build directory. Default: build-ci
+  --c-compiler CC     C compiler. Default: clang-20
   --compiler CXX      C++ compiler. Default: clang++-20
   --jobs N            Build parallelism. Default: nproc
   --full              Also run the v1 benchmark smoke.
@@ -65,6 +66,7 @@ repo_root() {
 }
 
 build_dir="build-ci"
+c_compiler="clang-20"
 compiler="clang++-20"
 jobs="$(default_jobs)"
 run_full=0
@@ -87,6 +89,14 @@ while [[ $# -gt 0 ]]; do
         exit 2
       fi
       compiler="$2"
+      shift 2
+      ;;
+    --c-compiler)
+      if [[ $# -lt 2 ]]; then
+        printf '%s\n' '--c-compiler requires an argument' >&2
+        exit 2
+      fi
+      c_compiler="$2"
       shift 2
       ;;
     --jobs)
@@ -138,6 +148,7 @@ cd "$root"
 require_command cmake
 require_command ctest
 require_command git
+require_command "$c_compiler"
 require_command "$compiler"
 
 cmake_tools_flag="OFF"
@@ -149,6 +160,7 @@ start_seconds="$(date +%s)"
 
 log "configure"
 run cmake -S . -B "$build_dir" \
+  -DCMAKE_C_COMPILER="$c_compiler" \
   -DCMAKE_CXX_COMPILER="$compiler" \
   -DXRPC_BUILD_TESTS=ON \
   -DXRPC_BUILD_TOOLS="$cmake_tools_flag" \

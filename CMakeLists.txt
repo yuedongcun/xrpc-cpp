@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(xrpc VERSION 0.1.0 LANGUAGES CXX)
+project(xrpc VERSION 0.1.0 LANGUAGES C CXX)
 
 include(CMakePackageConfigHelpers)
 include(GNUInstallDirs)
@@ -10,6 +10,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 option(XRPC_BUILD_EXAMPLES "Build xrpc examples" OFF)
 option(XRPC_BUILD_TESTS "Build xrpc tests" OFF)
 option(XRPC_BUILD_TOOLS "Build xrpc tools" OFF)
+option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -104,10 +105,9 @@ endif()
 # -----------------------------------------------------------------------
 # Dependencies
 # -----------------------------------------------------------------------
-find_package(Protobuf REQUIRED)
 find_package(Threads REQUIRED)
-find_package(nlohmann_json REQUIRED)
-find_package(LibUring REQUIRED)
+add_subdirectory(third_party)
+include(cmake/XrpcProtobufGenerate.cmake)
 
 # -----------------------------------------------------------------------
 # Main library

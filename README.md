@@ -44,18 +44,17 @@ ClientChannel ── 多路复用 TCP 传输 ──► XRPC 帧协议
 - 支持 `io_uring` 的 Linux
 - 支持 C++20 的编译器（开发环境使用 Clang 20，也支持较新的 GCC）
 - CMake 3.20 或更高版本
-- Protocol Buffers
-- liburing
-- nlohmann/json
-- 启用测试时需要 GoogleTest
+- GNU Make（用于构建仓库内固定版本的 liburing）
 - 性能测试和高可用工具需要 Python 3
+
+Protocol Buffers、liburing、nlohmann/json 和 GoogleTest 的固定版本源码位于
+`third_party/`，正常构建不会从网络下载依赖，也不需要系统安装对应的开发包。
 
 Ubuntu 安装命令：
 
 ```bash
 sudo apt-get update
-sudo apt-get install build-essential cmake libgtest-dev libprotobuf-dev \
-  liburing-dev nlohmann-json3-dev protobuf-compiler python3
+sudo apt-get install build-essential cmake python3
 ```
 
 ## 构建
@@ -163,6 +162,10 @@ cmake --install build --prefix /tmp/xrpc-install
 find_package(xrpc CONFIG REQUIRED)
 target_link_libraries(my_service PRIVATE xrpc::xrpc)
 ```
+
+仓库内 vendor 依赖用于从 xrpc 源码树构建。当前安装包保持原有边界，仍由下游
+环境提供 Protocol Buffers、liburing 和 nlohmann/json；将安装包做成依赖自包含
+产物不在本次 vendor 化范围内。
 
 ## 文档
 

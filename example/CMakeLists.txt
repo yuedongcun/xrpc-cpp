@@ -8,7 +8,7 @@ add_library(xrpc_example_proto STATIC "${EXAMPLE_PROTO_ROOT}/echo.proto")
 target_link_libraries(xrpc_example_proto PUBLIC protobuf::libprotobuf)
 target_include_directories(xrpc_example_proto PUBLIC "${EXAMPLE_GEN_DIR}")
 
-protobuf_generate(
+xrpc_protobuf_generate(
     TARGET xrpc_example_proto
     LANGUAGE cpp
     IMPORT_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"

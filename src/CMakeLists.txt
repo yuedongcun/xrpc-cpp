@@ -9,7 +9,7 @@ target_link_libraries(xrpc_proto PUBLIC protobuf::libprotobuf)
 
 target_include_directories(xrpc_proto PUBLIC "${XRPC_GEN_DIR}")
 
-protobuf_generate(
+xrpc_protobuf_generate(
     TARGET xrpc_proto
     LANGUAGE cpp
     IMPORT_DIRS "${XRPC_PROTO_ROOT}"
@@ -74,8 +74,15 @@ target_include_directories(xrpc PRIVATE "${XRPC_GEN_DIR}")
 
 target_link_libraries(
     xrpc
-    PUBLIC protobuf::libprotobuf
-    PRIVATE nlohmann_json::nlohmann_json LibUring::LibUring Threads::Threads
+    PUBLIC
+        "$<BUILD_INTERFACE:protobuf::libprotobuf>"
+        "$<INSTALL_INTERFACE:xrpc_dependencies::protobuf>"
+    PRIVATE
+        "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
+        "$<INSTALL_INTERFACE:xrpc_dependencies::nlohmann_json>"
+        "$<BUILD_INTERFACE:LibUring::LibUring>"
+        "$<INSTALL_INTERFACE:xrpc_dependencies::liburing>"
+        Threads::Threads
 )
 
 target_compile_features(xrpc PUBLIC cxx_std_20)
