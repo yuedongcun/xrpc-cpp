@@ -44,7 +44,7 @@ ClientChannel ── 多路复用 TCP 传输 ──► XRPC 帧协议
 - 支持 C++20 的编译器（开发环境使用 Clang 20，也支持较新的 GCC）
 - CMake 3.20 或更高版本
 - GNU Make（用于构建仓库内固定版本的 liburing）
-- 性能测试和高可用工具需要 Python 3
+- 性能测试工具需要 Python 3
 
 Protocol Buffers、liburing、nlohmann/json 和 GoogleTest 的固定版本源码位于
 `third_party/`，正常构建不会从网络下载依赖，也不需要系统安装对应的开发包。
@@ -114,7 +114,7 @@ XRPC_ENABLE_CONSUL_TESTS=1 \
   ctest --test-dir build/tests --output-on-failure -L external
 ```
 
-CTest 标签、超时和异步测试约束见[测试规范](tests/testing_policy.md)。
+CTest 标签、测试布局和运行方法见[测试说明](tests/README.md)。
 
 ## 性能测试
 
@@ -131,7 +131,7 @@ XRPC 将性能测试拆成三个层次：
 | 低延迟 | 96,103 | 0.86 ms | 0 |
 | 饱和点 | 422,391 | 8.14 ms | 0 |
 
-每个数值均来自三轮 30 秒测试的中位数，每轮使用全新服务端。这是同机 loopback 结果，不代表跨主机网络延迟。详细方法见[当前性能测试方法与结果](docs/current_benchmark_results.md)，脱敏后的配置、汇总和逐轮 CSV 数据见 [benchmark-results/2026-07-30](benchmark-results/2026-07-30/)。
+每个数值均来自三轮测试的中位数，每轮使用全新服务端。这是同机 loopback 结果，不代表跨主机网络延迟。详细方法、复现命令和限制见[性能说明](docs/performance.md)。
 
 运行冒烟测试套件：
 
@@ -140,6 +140,24 @@ XRPC 将性能测试拆成三个层次：
   --config tools/benchmark/configs/v1_smoke.json \
   --build
 ```
+
+复现 README 中的代表性性能结果：
+
+```bash
+./tools/benchmark/run_suite.py \
+  --config tools/benchmark/configs/v1_protobuf_steady_state.json \
+  --build
+
+./tools/benchmark/run_suite.py \
+  --config tools/benchmark/configs/v1_protobuf_ceiling_verify.json \
+  --build
+
+./tools/benchmark/run_suite.py \
+  --config tools/benchmark/configs/v1_rpc_client.json \
+  --build
+```
+
+完整配置、测试环境和结果解释见[性能说明](docs/performance.md)。
 
 ## 当前边界
 
@@ -165,11 +183,9 @@ target_link_libraries(my_service PRIVATE xrpc::xrpc)
 ## 文档
 
 - [架构设计](docs/architecture.md)
-- [当前性能测试方法与结果](docs/current_benchmark_results.md)
-- [性能上限分析](docs/performance_ceiling_analysis.md)
-- [服务端性能优化历程](docs/performance_optimization_journey.md)
+- [性能说明](docs/performance.md)
 - [性能测试工具](tools/benchmark/README.md)
-- [测试规范](tests/testing_policy.md)
+- [测试说明](tests/README.md)
 
 ## 许可证
 
