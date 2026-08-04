@@ -14,12 +14,12 @@ auto main(int argc, char **argv) -> int {
 
     std::printf(
         "workload=%s client_mode=%s host=%s "
-        "port=%u metrics_host=%s metrics_port=%u "
+        "port=%u "
         "duration_s=%llu payload_size=%zu client_threads=%zu "
         "firehose_connections=%zu firehose_inflight=%zu firehose_io_threads=%zu",
-        workload.c_str(), client_mode.c_str(), config.host_.c_str(), config.port_, config.metrics_host_.c_str(),
-        config.metrics_port_, static_cast<unsigned long long>(config.duration_s_), config.payload_size_,
-        config.client_threads_, config.firehose_connections_, config.firehose_inflight_, config.firehose_io_threads_);
+        workload.c_str(), client_mode.c_str(), config.host_.c_str(), config.port_,
+        static_cast<unsigned long long>(config.duration_s_), config.payload_size_, config.client_threads_,
+        config.firehose_connections_, config.firehose_inflight_, config.firehose_io_threads_);
     std::printf("\n");
 
     const xrpc::benchmark::BenchmarkStats stats = xrpc::benchmark::RunBenchmark(config);

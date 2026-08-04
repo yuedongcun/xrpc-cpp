@@ -2,13 +2,9 @@
 
 #include <cstdint>
 #include <stdexcept>
-#include <string_view>
 #include <utility>
 
-#include <xrpc/metrics.h>
 #include <xrpc/xrpc_exception.h>
-
-#include "observability/rpc_metrics.h"
 
 namespace xrpc {
 namespace {
@@ -24,21 +20,6 @@ void ObserveMaximum(std::atomic<std::uint64_t> &maximum, std::size_t value) {
   const auto candidate = static_cast<std::uint64_t>(value);
   while (observed < candidate &&
          !maximum.compare_exchange_weak(observed, candidate, std::memory_order_relaxed, std::memory_order_relaxed)) {
-  }
-}
-
-/**
- * @brief Emits one worker-job metric per logical RPC job when metrics are enabled.
- *
- * @param state Worker state label such as `submitted`, `completed`, or `rejected`.
- * @param count Number of logical RPC jobs represented by the event.
- */
-void RecordServerWorkerJobs(std::string_view state, std::size_t count) {
-  if (!MetricsEnabled()) {
-    return;
-  }
-  for (std::size_t i = 0; i < count; ++i) {
-    RecordServerWorkerJob(state);
   }
 }
 
@@ -118,8 +99,6 @@ auto ThreadPoolExecutor::TrySubmitBatch(std::function<void()> job, std::size_t l
     const std::size_t queue_depth = queue.pending_jobs_.fetch_add(1, std::memory_order_relaxed) + 1;
     ObserveMaximum(max_observed_worker_queue_depth_, queue_depth);
     submitted_jobs_.fetch_add(logical_jobs, std::memory_order_relaxed);
-    RecordServerWorkerJobs("submitted", logical_jobs);
-    RecordServerWorkerPendingJobs(*pending_after_reservation);
   } catch (...) {
     ReleasePendingJobs(logical_jobs);
     throw;
@@ -177,7 +156,6 @@ auto ThreadPoolExecutor::TryReservePendingJobs(std::size_t logical_jobs) -> std:
   while (true) {
     if (pending > max_pending_jobs_ || logical_jobs > max_pending_jobs_ - pending) {
       rejected_jobs_.fetch_add(logical_jobs, std::memory_order_relaxed);
-      RecordServerWorkerJobs("rejected", logical_jobs);
       return std::nullopt;
     }
     if (pending_jobs_.compare_exchange_weak(pending, pending + logical_jobs, std::memory_order_acq_rel,
@@ -193,8 +171,7 @@ auto ThreadPoolExecutor::TryReservePendingJobs(std::size_t logical_jobs) -> std:
  * @param logical_jobs Number of logical RPC jobs to remove from pending accounting.
  */
 void ThreadPoolExecutor::ReleasePendingJobs(std::size_t logical_jobs) {
-  const std::size_t remaining = pending_jobs_.fetch_sub(logical_jobs, std::memory_order_release) - logical_jobs;
-  RecordServerWorkerPendingJobs(remaining);
+  pending_jobs_.fetch_sub(logical_jobs, std::memory_order_release);
 }
 
 /**
@@ -244,7 +221,6 @@ void ThreadPoolExecutor::WorkerLoop(WorkerQueue &queue) {
 
     job.run_();
     completed_jobs_.fetch_add(job.logical_jobs_, std::memory_order_relaxed);
-    RecordServerWorkerJobs("completed", job.logical_jobs_);
     queue.pending_jobs_.fetch_sub(1, std::memory_order_relaxed);
     ReleasePendingJobs(job.logical_jobs_);
   }

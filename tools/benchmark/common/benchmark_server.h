@@ -7,10 +7,6 @@
 
 #include "common/benchmark_config.h"
 
-namespace xrpc {
-class PrometheusExporter;
-}  // namespace xrpc
-
 namespace xrpc::benchmark {
 
 class BenchmarkServer final {
@@ -33,9 +29,6 @@ class BenchmarkServer final {
 
   std::unique_ptr<RpcServer> server_;
   std::unique_ptr<RawRuntime> raw_runtime_;
-  std::unique_ptr<PrometheusExporter> metrics_exporter_;
-  std::string metrics_host_;
-  std::uint16_t metrics_port_;
   std::uint64_t delay_us_;
   std::size_t listen_backlog_;
   std::jthread server_thread_;

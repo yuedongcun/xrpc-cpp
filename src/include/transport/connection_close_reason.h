@@ -7,8 +7,8 @@ namespace xrpc {
 /**
  * @brief First reason recorded when a server-side connection closes.
  *
- * The value is diagnostic. `TcpConnection` records the first reason and keeps it stable so tests and metrics can
- * distinguish protocol failures from peer EOF, socket errors, backpressure, and idle cleanup.
+ * The value is diagnostic. `TcpConnection` records the first reason and keeps it stable so tests can distinguish
+ * protocol failures from peer EOF, socket errors, backpressure, and idle cleanup.
  */
 enum class ConnectionCloseReason : std::uint8_t {
   /** @brief Connection has not been closed yet. */

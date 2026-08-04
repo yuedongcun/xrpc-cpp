@@ -9,8 +9,8 @@ namespace xrpc {
 /**
  * @brief Server I/O diagnostics used to understand queueing and send batching.
  *
- * These counters are relaxed and approximate under concurrent reads. They are intended for tests, metrics, and
- * performance analysis, not for synchronization.
+ * These counters are relaxed and approximate under concurrent reads. They are intended for tests and performance
+ * analysis, not for synchronization.
  */
 struct ServerIoStatsSnapshot {
   /** @brief Number of response frames enqueued for writing. */

@@ -7,29 +7,19 @@ XRPC 面向 Linux 和 C++20。公开 API 头文件放在 `include/xrpc/`，内�
 配置并构建全部开发目标：
 
 ```bash
-cmake -S . -B build \
-  -DXRPC_BUILD_EXAMPLES=ON \
-  -DXRPC_BUILD_TESTS=ON \
-  -DXRPC_BUILD_TOOLS=ON
-cmake --build build --parallel
+make
 ```
 
 运行默认测试集：
 
 ```bash
-ctest --test-dir build/tests --output-on-failure -LE "external|tooling"
+make test
 ```
 
-提交修改前格式化项目源码：
+提交前可以运行完整的本地检查：
 
 ```bash
-make format
-```
-
-只有安装了所需 Clang 20 工具时才运行 clang-tidy：
-
-```bash
-make check-clang-tidy
+make ci
 ```
 
 测试代码必须遵守[测试规范](tests/testing_policy.md)。不要提交生成的 Protobuf 文件、构建产物、性能测试日志或本地配置。

@@ -6,8 +6,6 @@
 #include <thread>
 #include <utility>
 
-#include <xrpc/prometheus_exporter.h>
-
 #include "common/task.h"
 #include "io/uring_context.h"
 #include "proto/echo.pb.h"
@@ -114,10 +112,7 @@ auto MakeTypedEchoHandler(std::uint64_t delay_us) {
 }
 
 BenchmarkServer::BenchmarkServer(const BenchmarkServerConfig &config)
-    : metrics_host_(config.metrics_host_),
-      metrics_port_(config.metrics_port_),
-      delay_us_(config.server_delay_us_),
-      listen_backlog_(config.server_options_.listen_backlog_) {
+    : delay_us_(config.server_delay_us_), listen_backlog_(config.server_options_.listen_backlog_) {
   if (config.workload_ == BenchmarkWorkload::Raw) {
     RawHandler handler = MakeRawEchoHandler(delay_us_);
     raw_runtime_ = std::make_unique<RawRuntime>(std::move(handler), config.server_options_);
@@ -135,31 +130,12 @@ void BenchmarkServer::Start(const std::string &host, std::uint16_t port) {
   if (started_) {
     return;
   }
-  try {
-    if (metrics_port_ != 0) {
-      xrpc::PrometheusExporterOptions metrics_options;
-      metrics_options.host_ = metrics_host_;
-      metrics_options.port_ = metrics_port_;
-      metrics_exporter_ = std::make_unique<xrpc::PrometheusExporter>(std::move(metrics_options));
-      const Status status = metrics_exporter_->Start();
-      if (!status.ok()) {
-        throw std::runtime_error("failed to start metrics exporter: " + status.message());
-      }
-    }
-
-    if (raw_runtime_) {
-      raw_runtime_->Listen(host, port);
-      server_thread_ = std::jthread([this]() { raw_runtime_->Run(); });
-    } else {
-      server_->Listen(host, port);
-      server_thread_ = std::jthread([this]() { server_->Run(); });
-    }
-  } catch (...) {
-    if (metrics_exporter_) {
-      metrics_exporter_->Stop();
-      metrics_exporter_.reset();
-    }
-    throw;
+  if (raw_runtime_) {
+    raw_runtime_->Listen(host, port);
+    server_thread_ = std::jthread([this]() { raw_runtime_->Run(); });
+  } else {
+    server_->Listen(host, port);
+    server_thread_ = std::jthread([this]() { server_->Run(); });
   }
   started_ = true;
 }
@@ -176,10 +152,6 @@ void BenchmarkServer::Stop() {
   server_thread_.request_stop();
   if (server_thread_.joinable()) {
     server_thread_.join();
-  }
-  if (metrics_exporter_) {
-    metrics_exporter_->Stop();
-    metrics_exporter_.reset();
   }
   started_ = false;
 }

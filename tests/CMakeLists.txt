@@ -28,31 +28,6 @@ set(XRPC_TEST_INTEGRATION_TIMEOUT 15)
 set(XRPC_TEST_EXTERNAL_TIMEOUT 60)
 set(XRPC_TEST_TOOLING_TIMEOUT 15)
 
-function(xrpc_set_test_metadata test_name)
-    set(one_value_args TIMEOUT)
-    set(multi_value_args LABELS)
-    cmake_parse_arguments(
-        XRPC_TEST
-        ""
-        "${one_value_args}"
-        "${multi_value_args}"
-        ${ARGN}
-    )
-
-    if(XRPC_TEST_LABELS)
-        set_tests_properties(
-            ${test_name}
-            PROPERTIES LABELS "${XRPC_TEST_LABELS}"
-        )
-    endif()
-    if(XRPC_TEST_TIMEOUT)
-        set_tests_properties(
-            ${test_name}
-            PROPERTIES TIMEOUT "${XRPC_TEST_TIMEOUT}"
-        )
-    endif()
-endfunction()
-
 function(xrpc_add_test test_name test_source)
     set(one_value_args TIMEOUT)
     set(multi_value_args LABELS)
@@ -86,10 +61,32 @@ function(xrpc_add_test test_name test_source)
             Threads::Threads
     )
     add_test(NAME ${test_name} COMMAND ${test_name})
-    xrpc_set_test_metadata(
+    set_tests_properties(
         ${test_name}
-        LABELS ${XRPC_TEST_LABELS}
-        TIMEOUT ${XRPC_TEST_TIMEOUT}
+        PROPERTIES
+            LABELS "${XRPC_TEST_LABELS}"
+            TIMEOUT "${XRPC_TEST_TIMEOUT}"
+    )
+endfunction()
+
+function(xrpc_add_tool_test test_name labels)
+    add_test(NAME ${test_name} COMMAND ${ARGN})
+    set_tests_properties(
+        ${test_name}
+        PROPERTIES
+            LABELS "${labels}"
+            TIMEOUT ${XRPC_TEST_TOOLING_TIMEOUT}
+    )
+endfunction()
+
+function(xrpc_add_benchmark_config_test test_name config_name)
+    xrpc_add_tool_test(
+        ${test_name}
+        "tooling;benchmark;config;${ARGN}"
+        "${PROJECT_SOURCE_DIR}/tools/benchmark/run_suite.py"
+        --config
+        "${PROJECT_SOURCE_DIR}/tools/benchmark/configs/${config_name}"
+        --validate-config
     )
 endfunction()
 
@@ -223,235 +220,91 @@ xrpc_add_test(
     LABELS integration runtime transport io_uring
     TIMEOUT ${XRPC_TEST_INTEGRATION_TIMEOUT}
 )
-xrpc_add_test(
-    observability_metrics_test observability/metrics_test.cpp
-    LABELS unit observability
-    TIMEOUT ${XRPC_TEST_UNIT_TIMEOUT}
-)
-xrpc_add_test(
-    prometheus_metric_sink_test observability/prometheus_metric_sink_test.cpp
-    LABELS unit observability prometheus
-    TIMEOUT ${XRPC_TEST_UNIT_TIMEOUT}
-)
-xrpc_add_test(
-    prometheus_exporter_test observability/prometheus_exporter_test.cpp
-    LABELS integration observability prometheus transport
-    TIMEOUT ${XRPC_TEST_INTEGRATION_TIMEOUT}
-)
 
-add_test(
-    NAME benchmark_v1_smoke_config_test
-    COMMAND
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/run_suite.py" --config
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/configs/v1_smoke.json"
-        --validate-config
+xrpc_add_benchmark_config_test(
+    benchmark_v1_smoke_config_test v1_smoke.json smoke
 )
-xrpc_set_test_metadata(
-    benchmark_v1_smoke_config_test
-    LABELS tooling benchmark config smoke
-    TIMEOUT ${XRPC_TEST_TOOLING_TIMEOUT}
+xrpc_add_benchmark_config_test(
+    benchmark_v1_server_capacity_config_test v1_server_capacity.json
 )
-add_test(
-    NAME benchmark_v1_server_capacity_config_test
-    COMMAND
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/run_suite.py" --config
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/configs/v1_server_capacity.json"
-        --validate-config
+xrpc_add_benchmark_config_test(
+    benchmark_v1_protobuf_smoke_config_test v1_protobuf_smoke.json protobuf smoke
 )
-xrpc_set_test_metadata(
-    benchmark_v1_server_capacity_config_test
-    LABELS tooling benchmark config
-    TIMEOUT ${XRPC_TEST_TOOLING_TIMEOUT}
+xrpc_add_benchmark_config_test(
+    benchmark_v1_protobuf_capacity_config_test v1_protobuf_capacity.json protobuf
 )
-add_test(
-    NAME benchmark_v1_protobuf_smoke_config_test
-    COMMAND
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/run_suite.py" --config
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/configs/v1_protobuf_smoke.json"
-        --validate-config
+xrpc_add_benchmark_config_test(
+    benchmark_v1_rpc_client_config_test v1_rpc_client.json client
 )
-xrpc_set_test_metadata(
-    benchmark_v1_protobuf_smoke_config_test
-    LABELS tooling benchmark config protobuf smoke
-    TIMEOUT ${XRPC_TEST_TOOLING_TIMEOUT}
+xrpc_add_benchmark_config_test(
+    benchmark_v1_raw_high_load_config_test v1_raw_high_load.json
 )
-add_test(
-    NAME benchmark_v1_protobuf_capacity_config_test
-    COMMAND
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/run_suite.py" --config
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/configs/v1_protobuf_capacity.json"
-        --validate-config
-)
-xrpc_set_test_metadata(
-    benchmark_v1_protobuf_capacity_config_test
-    LABELS tooling benchmark config protobuf
-    TIMEOUT ${XRPC_TEST_TOOLING_TIMEOUT}
-)
-add_test(
-    NAME benchmark_v1_rpc_client_config_test
-    COMMAND
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/run_suite.py" --config
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/configs/v1_rpc_client.json"
-        --validate-config
-)
-xrpc_set_test_metadata(
-    benchmark_v1_rpc_client_config_test
-    LABELS tooling benchmark config client
-    TIMEOUT ${XRPC_TEST_TOOLING_TIMEOUT}
-)
-add_test(
-    NAME benchmark_v1_raw_high_load_config_test
-    COMMAND
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/run_suite.py" --config
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/configs/v1_raw_high_load.json"
-        --validate-config
-)
-xrpc_set_test_metadata(
-    benchmark_v1_raw_high_load_config_test
-    LABELS tooling benchmark config
-    TIMEOUT ${XRPC_TEST_TOOLING_TIMEOUT}
-)
-add_test(
-    NAME benchmark_v1_protobuf_steady_state_config_test
-    COMMAND
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/run_suite.py" --config
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/configs/v1_protobuf_steady_state.json"
-        --validate-config
-)
-xrpc_set_test_metadata(
+xrpc_add_benchmark_config_test(
     benchmark_v1_protobuf_steady_state_config_test
-    LABELS tooling benchmark config protobuf
-    TIMEOUT ${XRPC_TEST_TOOLING_TIMEOUT}
+    v1_protobuf_steady_state.json
+    protobuf
 )
-add_test(
-    NAME benchmark_v1_protobuf_ceiling_connections_config_test
-    COMMAND
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/run_suite.py" --config
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/configs/v1_protobuf_ceiling_connections.json"
-        --validate-config
-)
-xrpc_set_test_metadata(
+xrpc_add_benchmark_config_test(
     benchmark_v1_protobuf_ceiling_connections_config_test
-    LABELS tooling benchmark config protobuf
-    TIMEOUT ${XRPC_TEST_TOOLING_TIMEOUT}
+    v1_protobuf_ceiling_connections.json
+    protobuf
 )
-add_test(
-    NAME benchmark_v1_protobuf_ceiling_load_config_test
-    COMMAND
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/run_suite.py" --config
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/configs/v1_protobuf_ceiling_load.json"
-        --validate-config
-)
-xrpc_set_test_metadata(
+xrpc_add_benchmark_config_test(
     benchmark_v1_protobuf_ceiling_load_config_test
-    LABELS tooling benchmark config protobuf
-    TIMEOUT ${XRPC_TEST_TOOLING_TIMEOUT}
+    v1_protobuf_ceiling_load.json
+    protobuf
 )
-add_test(
-    NAME benchmark_v1_protobuf_ceiling_boundary_config_test
-    COMMAND
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/run_suite.py" --config
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/configs/v1_protobuf_ceiling_boundary.json"
-        --validate-config
-)
-xrpc_set_test_metadata(
+xrpc_add_benchmark_config_test(
     benchmark_v1_protobuf_ceiling_boundary_config_test
-    LABELS tooling benchmark config protobuf
-    TIMEOUT ${XRPC_TEST_TOOLING_TIMEOUT}
+    v1_protobuf_ceiling_boundary.json
+    protobuf
 )
-add_test(
-    NAME benchmark_v1_protobuf_ceiling_verify_config_test
-    COMMAND
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/run_suite.py" --config
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/configs/v1_protobuf_ceiling_verify.json"
-        --validate-config
-)
-xrpc_set_test_metadata(
+xrpc_add_benchmark_config_test(
     benchmark_v1_protobuf_ceiling_verify_config_test
-    LABELS tooling benchmark config protobuf
-    TIMEOUT ${XRPC_TEST_TOOLING_TIMEOUT}
+    v1_protobuf_ceiling_verify.json
+    protobuf
 )
-add_test(
-    NAME benchmark_v1_protobuf_overload_probe_config_test
-    COMMAND
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/run_suite.py" --config
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/configs/v1_protobuf_overload_probe.json"
-        --validate-config
-)
-xrpc_set_test_metadata(
+xrpc_add_benchmark_config_test(
     benchmark_v1_protobuf_overload_probe_config_test
-    LABELS tooling benchmark config protobuf
-    TIMEOUT ${XRPC_TEST_TOOLING_TIMEOUT}
-)
-add_test(
-    NAME ha_consul_failover_smoke_dry_run_test
-    COMMAND "${PROJECT_SOURCE_DIR}/tools/ha/consul_failover_smoke.py" --dry-run
-)
-xrpc_set_test_metadata(
-    ha_consul_failover_smoke_dry_run_test
-    LABELS tooling ha dry_run consul smoke
-    TIMEOUT ${XRPC_TEST_TOOLING_TIMEOUT}
-)
-add_test(
-    NAME ha_consul_failover_smoke_invalid_args_test
-    COMMAND
-        "${PROJECT_SOURCE_DIR}/tools/ha/consul_failover_smoke.py" --dry-run
-        --client-metrics-port=19101
-)
-xrpc_set_test_metadata(
-    ha_consul_failover_smoke_invalid_args_test
-    LABELS tooling ha dry_run consul negative
-    TIMEOUT ${XRPC_TEST_TOOLING_TIMEOUT}
-)
-set_tests_properties(
-    ha_consul_failover_smoke_invalid_args_test
-    PROPERTIES WILL_FAIL TRUE
+    v1_protobuf_overload_probe.json
+    protobuf
 )
 
-add_test(
-    NAME ha_consul_fault_injection_redundant_server_kill_dry_run_test
-    COMMAND
-        "${PROJECT_SOURCE_DIR}/tools/ha/consul_fault_injection.py" --dry-run
-        --scenario=redundant-server-kill
+set(XRPC_FAULT_INJECTION_TOOL
+    "${PROJECT_SOURCE_DIR}/tools/ha/consul_fault_injection.py"
 )
-xrpc_set_test_metadata(
+xrpc_add_tool_test(
     ha_consul_fault_injection_redundant_server_kill_dry_run_test
-    LABELS tooling ha dry_run consul
-    TIMEOUT ${XRPC_TEST_TOOLING_TIMEOUT}
+    "tooling;ha;dry_run;consul"
+    "${XRPC_FAULT_INJECTION_TOOL}"
+    --dry-run
+    --scenario=redundant-server-kill
 )
-add_test(
-    NAME ha_consul_fault_injection_resolver_empty_dry_run_test
-    COMMAND
-        "${PROJECT_SOURCE_DIR}/tools/ha/consul_fault_injection.py" --dry-run
-        --scenario=resolver-empty --min-client-failures=1
-)
-xrpc_set_test_metadata(
+xrpc_add_tool_test(
     ha_consul_fault_injection_resolver_empty_dry_run_test
-    LABELS tooling ha dry_run consul
-    TIMEOUT ${XRPC_TEST_TOOLING_TIMEOUT}
+    "tooling;ha;dry_run;consul"
+    "${XRPC_FAULT_INJECTION_TOOL}"
+    --dry-run
+    --scenario=resolver-empty
+    --min-client-failures=1
 )
-add_test(
-    NAME ha_consul_fault_injection_delayed_registration_dry_run_test
-    COMMAND
-        "${PROJECT_SOURCE_DIR}/tools/ha/consul_fault_injection.py" --dry-run
-        --scenario=delayed-registration --min-client-failures=1
-)
-xrpc_set_test_metadata(
+xrpc_add_tool_test(
     ha_consul_fault_injection_delayed_registration_dry_run_test
-    LABELS tooling ha dry_run consul
-    TIMEOUT ${XRPC_TEST_TOOLING_TIMEOUT}
+    "tooling;ha;dry_run;consul"
+    "${XRPC_FAULT_INJECTION_TOOL}"
+    --dry-run
+    --scenario=delayed-registration
+    --min-client-failures=1
 )
-add_test(
-    NAME ha_consul_fault_injection_invalid_args_test
-    COMMAND
-        "${PROJECT_SOURCE_DIR}/tools/ha/consul_fault_injection.py" --dry-run
-        --scenario=delayed-registration --duration-s=2 --fault-after-s=1
-        --replacement-delay-s=2
-)
-xrpc_set_test_metadata(
+xrpc_add_tool_test(
     ha_consul_fault_injection_invalid_args_test
-    LABELS tooling ha dry_run consul negative
-    TIMEOUT ${XRPC_TEST_TOOLING_TIMEOUT}
+    "tooling;ha;dry_run;consul;negative"
+    "${XRPC_FAULT_INJECTION_TOOL}"
+    --dry-run
+    --scenario=delayed-registration
+    --duration-s=2
+    --fault-after-s=1
+    --replacement-delay-s=2
 )
 set_tests_properties(
     ha_consul_fault_injection_invalid_args_test

@@ -24,10 +24,6 @@ set(XRPC_SOURCES
     io/socket.cpp
     io/uring_awaitable.cpp
     io/uring_context.cpp
-    observability/metrics.cpp
-    observability/prometheus_exporter.cpp
-    observability/prometheus_metric_sink.cpp
-    observability/rpc_metrics.cpp
     protocol/fixed_header.cpp
     protocol/frame_codec.cpp
     rpc/xrpc_exception.cpp

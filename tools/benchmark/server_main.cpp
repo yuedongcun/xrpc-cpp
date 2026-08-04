@@ -32,13 +32,12 @@ auto main(int argc, char **argv) -> int {
     const std::string workload(xrpc::benchmark::ToString(config.workload_));
     std::printf(
         "ready host=%s port=%u workload=%s worker_threads=%zu connection_io_threads=%zu "
-        "metrics_host=%s metrics_port=%u "
         "delay_us=%llu "
         "max_inflight_per_connection=%zu "
         "max_write_queue_bytes_per_connection=%zu max_pending_jobs_global=%zu\n",
         config.host_.c_str(), server.port(), workload.c_str(), config.server_options_.worker_threads_,
-        config.server_options_.connection_io_threads_, config.metrics_host_.c_str(), config.metrics_port_,
-        static_cast<unsigned long long>(config.server_delay_us_), config.server_options_.max_inflight_per_connection_,
+        config.server_options_.connection_io_threads_, static_cast<unsigned long long>(config.server_delay_us_),
+        config.server_options_.max_inflight_per_connection_,
         config.server_options_.max_write_queue_bytes_per_connection_, config.server_options_.max_pending_jobs_global_);
     std::fflush(stdout);
 

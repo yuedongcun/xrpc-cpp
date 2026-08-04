@@ -11,8 +11,7 @@
 ## 构建
 
 ```bash
-cmake -S . -B build -DXRPC_BUILD_TOOLS=ON -DXRPC_BUILD_TESTS=OFF -DXRPC_BUILD_EXAMPLES=OFF
-cmake --build build --target xrpc_benchmark_server xrpc_benchmark_client
+make
 ```
 
 生成的可执行文件位于 `build/tools/benchmark/`。
@@ -28,8 +27,6 @@ cmake --build build --target xrpc_benchmark_server xrpc_benchmark_client
 可选参数：
 
 - `--server_delay_us=N`
-- `--metrics_host=IP`
-- `--metrics_port=N`
 - `--service_name=NAME`
 - `--service_id=ID`
 - `--service_address=IP`
@@ -44,21 +41,11 @@ cmake --build build --target xrpc_benchmark_server xrpc_benchmark_client
 服务端启动成功后会输出：
 
 ```text
-ready host=127.0.0.1 port=9010 workload=raw worker_threads=0 connection_io_threads=1 metrics_host=0.0.0.0 metrics_port=0 delay_us=0
+ready host=127.0.0.1 port=9010 workload=raw worker_threads=0 connection_io_threads=1 delay_us=0
 ```
 
 独立启动服务端时，`worker_threads=0` 表示由运行时使用 `hardware_concurrency()` 自动确定。测试套件运行器不使用隐式值，工作线程数来自配置文件。
 `connection_io_threads=1` 表示 1 个连接 I/O 事件循环，不包含接收事件循环。服务端始终使用独立的接收事件循环建立连接，再以轮询方式把文件描述符分发给连接 I/O 事件循环。
-
-`metrics_port=0` 是默认值，表示不启用 Prometheus 指标导出器，以免影响常规性能测试。需要调试或高可用指标时可显式开启：
-
-```bash
-./build/tools/benchmark/xrpc_benchmark_server \
-  --host=127.0.0.1 \
-  --port=9010 \
-  --metrics_host=0.0.0.0 \
-  --metrics_port=9101
-```
 
 ## 客户端
 
@@ -91,8 +78,6 @@ Protobuf 序列化。
 
 - `--client_mode=firehose|rpc_client`
 - `--client_threads=N`
-- `--metrics_host=IP`
-- `--metrics_port=N`
 - `--payload_size=N`
 - `--host=IP`
 - `--port=N`

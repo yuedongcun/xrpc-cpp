@@ -35,10 +35,6 @@ void ParseClientArg(BenchmarkConfig &config, std::string_view arg) {
     config.host_ = std::string(value);
   } else if (key == "port") {
     config.port_ = static_cast<std::uint16_t>(ParseUnsigned(value, "port"));
-  } else if (key == "metrics_host") {
-    config.metrics_host_ = std::string(value);
-  } else if (key == "metrics_port") {
-    config.metrics_port_ = static_cast<std::uint16_t>(ParseUnsigned(value, "metrics_port"));
   } else if (key == "client_mode") {
     config.client_mode_ = ParseBenchmarkClientMode(value);
   } else if (key == "client_threads") {
@@ -68,10 +64,6 @@ void ParseServerArg(BenchmarkServerConfig &config, std::string_view arg) {
     config.host_ = std::string(value);
   } else if (key == "port") {
     config.port_ = static_cast<std::uint16_t>(ParseUnsigned(value, "port"));
-  } else if (key == "metrics_host") {
-    config.metrics_host_ = std::string(value);
-  } else if (key == "metrics_port") {
-    config.metrics_port_ = static_cast<std::uint16_t>(ParseUnsigned(value, "metrics_port"));
   } else if (key == "service_name") {
     config.server_options_.service_name_ = std::string(value);
   } else if (key == "service_id") {
@@ -196,7 +188,6 @@ auto ParseBenchmarkServerConfig(int argc, char **argv) -> BenchmarkServerConfig 
 auto ClientUsage(const char *program) -> std::string {
   return std::string("Usage: ") + program +
          " [--payload_size=N] [--host=IP] [--port=N]"
-         " [--metrics_host=IP] [--metrics_port=N]"
          " [--duration_s=N] [--workload=protobuf|raw]"
          " [--client_mode=firehose|rpc_client] [--client_threads=N]"
          " [--firehose_connections=N] [--firehose_inflight=N] [--firehose_io_threads=N]";
@@ -205,7 +196,6 @@ auto ClientUsage(const char *program) -> std::string {
 auto ServerUsage(const char *program) -> std::string {
   return std::string("Usage: ") + program +
          " [--host=IP] [--port=N] [--server_delay_us=N]"
-         " [--metrics_host=IP] [--metrics_port=N]"
          " [--service_name=NAME] [--service_id=ID] [--service_address=IP] [--service_port=N]"
          " [--consul_address=HOST:PORT] [--consul_timeout_ms=N]"
          " [--worker_threads=N] [--connection_io_threads=N] [--listen_backlog=N] [--workload=protobuf|raw]";

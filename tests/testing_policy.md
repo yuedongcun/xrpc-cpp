@@ -41,7 +41,6 @@
 - `tests/rpc/client/`
 - `tests/rpc/server/`
 - `tests/rpc/naming/`
-- `tests/observability/`
 
 特殊测试基础设施放在 `tests/test_support/`。
 
@@ -73,7 +72,7 @@ TcpServer::ConnectionCount();
 
 ## 诊断接口规则
 
-如果只读可观测性接口在生产环境有实际意义，就可以保留：
+如果只读诊断接口在生产环境有实际意义，就可以保留：
 
 ```cpp
 ConnectionCount();
@@ -170,8 +169,6 @@ CTest 标签是可执行的测试治理层。每个注册测试至少应有一�
 - `server`
 - `naming`
 - `consul`
-- `observability`
-- `prometheus`
 - `benchmark`
 - `ha`
 - `concurrency`
@@ -183,21 +180,16 @@ CTest 标签是可执行的测试治理层。每个注册测试至少应有一�
 # 默认本地正确性测试集。
 make test
 
-# 只运行纯单元测试。
-make test-unit
-
-# 只运行运行时和事件循环测试。
-make test-runtime
-
-# 运行不依赖在线外部服务的集成和端到端测试。
-make test-integration
-make test-e2e
-
-# 运行注册到 CTest 的工具检查。
-make test-tooling
+# 按 CTest 标签筛选测试。
+ctest --test-dir build/tests --output-on-failure -L unit
+ctest --test-dir build/tests --output-on-failure -L runtime
+ctest --test-dir build/tests --output-on-failure -L integration -LE external
+ctest --test-dir build/tests --output-on-failure -L e2e -LE external
+ctest --test-dir build/tests --output-on-failure -L tooling
 
 # 运行在线 Consul 测试，需要 127.0.0.1:8500 上存在 Consul。
-make test-external
+XRPC_ENABLE_CONSUL_TESTS=1 \
+  ctest --test-dir build/tests --output-on-failure -L external
 ```
 
 超时规则：

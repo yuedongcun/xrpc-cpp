@@ -6,7 +6,6 @@
 
 #include <xrpc/xrpc_exception.h>
 
-#include "observability/rpc_metrics.h"
 #include "protocol/frame_codec.h"
 #include "protocol/protocol_error.h"
 #include "rpc/naming/consul_agent_client.h"
@@ -88,7 +87,6 @@ void RpcServer::ServerController::Listen(std::string_view host, std::uint16_t po
 
   std::lock_guard lock(lifecycle_mutex_);
   state_ = State::Listening;
-  RecordServerDraining(false);
 }
 
 /**
@@ -211,7 +209,6 @@ auto RpcServer::ServerController::Shutdown(bool run_loop_active) noexcept -> Sta
     }
     stop_from_running_context = run_loop_active && state_ == State::Running;
     state_ = State::Stopping;
-    RecordServerDraining(true);
   }
 
   Status status = TryDeregisterService();
@@ -226,7 +223,6 @@ auto RpcServer::ServerController::Shutdown(bool run_loop_active) noexcept -> Sta
   std::lock_guard lock(lifecycle_mutex_);
   shutdown_status_ = status;
   state_ = State::Stopped;
-  RecordServerDraining(false);
   return shutdown_status_;
 }
 

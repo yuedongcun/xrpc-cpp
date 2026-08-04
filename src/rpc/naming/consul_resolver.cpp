@@ -13,8 +13,6 @@
 
 #include <xrpc/xrpc_exception.h>
 
-#include "observability/rpc_metrics.h"
-
 namespace xrpc {
 
 namespace {
@@ -213,7 +211,6 @@ auto ConsulResolver::Fetch(bool blocking) -> Status {
   if (!response_result.ok()) {
     refresh_failure_count_.fetch_add(1);
     SetLastError(response_result.status().message());
-    RecordClientResolverRefreshFailed(service_name_, "consul", response_result.status().code());
     return response_result.status();
   }
 
@@ -222,7 +219,6 @@ auto ConsulResolver::Fetch(bool blocking) -> Status {
     refresh_failure_count_.fetch_add(1);
     std::string error = "Consul request failed with HTTP status " + std::to_string(response.status_code_);
     SetLastError(error);
-    RecordClientResolverRefreshFailed(service_name_, "consul", StatusCode::Unavailable);
     return {StatusCode::Unavailable, std::move(error)};
   }
 
@@ -239,7 +235,6 @@ auto ConsulResolver::Fetch(bool blocking) -> Status {
     refresh_failure_count_.fetch_add(1);
     Status status = CaughtExceptionToStatus(StatusCode::DataLoss, "failed to parse Consul response");
     SetLastError(status.message());
-    RecordClientResolverRefreshFailed(service_name_, "consul", status.code());
     return status;
   }
 }

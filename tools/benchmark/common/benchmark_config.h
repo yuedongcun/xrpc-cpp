@@ -27,8 +27,6 @@ struct BenchmarkConfig {
   std::size_t payload_size_ = 64;
   std::string host_ = "127.0.0.1";
   std::uint16_t port_ = 9010;
-  std::string metrics_host_ = "0.0.0.0";
-  std::uint16_t metrics_port_ = 0;
   BenchmarkClientMode client_mode_ = BenchmarkClientMode::Firehose;
   std::size_t client_threads_ = 1;
   std::size_t firehose_connections_ = 1;
@@ -38,13 +36,11 @@ struct BenchmarkConfig {
   std::size_t firehose_io_threads_ = 0;
 };
 
-// Server benchmark configuration mirrors RpcServerOptions but keeps benchmark
-// concerns such as artificial delay and metrics endpoint separate.
+// Server benchmark configuration mirrors RpcServerOptions while keeping
+// benchmark-only artificial delay separate.
 struct BenchmarkServerConfig {
   std::string host_ = "127.0.0.1";
   std::uint16_t port_ = 9010;
-  std::string metrics_host_ = "0.0.0.0";
-  std::uint16_t metrics_port_ = 0;
   std::uint64_t server_delay_us_ = 0;
   BenchmarkWorkload workload_ = BenchmarkWorkload::Raw;
   RpcServerOptions server_options_;

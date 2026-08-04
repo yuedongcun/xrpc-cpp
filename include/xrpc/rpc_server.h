@@ -68,7 +68,7 @@ struct RpcServerOptions {
  * @brief Snapshot of server-side resource guard and worker-pool diagnostics.
  *
  * Counters are monotonic diagnostics, except `max_*` fields which record high-water marks observed since server
- * construction. The values are intended for tests, metrics, and operational debugging; they are not synchronization
+ * construction. The values are intended for tests and operational debugging; they are not synchronization
  * primitives.
  */
 struct RpcServerStats {

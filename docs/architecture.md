@@ -2,7 +2,7 @@
 
 ## 项目边界
 
-XRPC 是一个仅支持 Linux 的一元 RPC 框架。框架负责传输、分帧、路由、handler 分发、服务发现、背压和指标链路，并使用 Protocol Buffers 完成类型化 payload 序列化。
+XRPC 是一个仅支持 Linux 的一元 RPC 框架。框架负责传输、分帧、路由、handler 分发、服务发现和背压，并使用 Protocol Buffers 完成类型化 payload 序列化。
 
 ## 服务端所有权
 
@@ -13,7 +13,7 @@ XRPC 是一个仅支持 Linux 的一元 RPC 框架。框架负责传输、分帧
 - 一个有界 handler worker pool；
 - 类型化服务注册表；
 - 可选的 Consul 注册器；
-- 运行时指标与资源保护计数器。
+- 资源保护计数器。
 
 accept loop 通过 round-robin 将新连接分配给 connection loop。一条连接始终由一个 I/O loop 独占，因此 socket 和写队列的修改由所有权串行化，不需要全局锁。解码后的请求提交到 worker pool，完成记录再把编码后的响应送回原 connection loop，由其按序排空写队列。
 
@@ -37,7 +37,7 @@ accept loop 通过 round-robin 将新连接分配给 connection loop。一条连
 2. worker pool 全局最大 pending job 数；
 3. 每条连接允许排队的最大响应字节数。
 
-请求超过请求数限制时，服务端会尽可能返回 `ResourceExhausted`。响应队列超过字节水位时，服务端关闭该连接。公开统计接口和 Prometheus 指标会暴露拒绝数和高水位计数器。
+请求超过请求数限制时，服务端会尽可能返回 `ResourceExhausted`。响应队列超过字节水位时，服务端关闭该连接。公开统计接口会暴露拒绝数和高水位计数器。
 
 ## 关闭流程
 

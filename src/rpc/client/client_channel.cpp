@@ -8,7 +8,6 @@
 #include <xrpc/xrpc_exception.h>
 
 #include "io/socket_error.h"
-#include "observability/rpc_metrics.h"
 #include "rpc/client/tcp_transport.h"
 #include "rpc/client/transport_error.h"
 
@@ -161,13 +160,7 @@ auto ClientChannel::Call(const RawRequest &request, const CallOptions &options) 
     if (last_result.MustStopRetryToAvoidDuplicateRequest()) {
       // Once a request may have been sent, failover is unsafe: another endpoint
       // could execute the same non-idempotent RPC again.
-      RecordClientRpcFailoverBlocked(request.service_name_, request.method_name_, last_result.failure().status_.code(),
-                                     last_result.failure().commit_state_);
       return last_result;
-    }
-    if (i + 1 < endpoint_count && last_result.CanRetryWithoutDuplicateRequest()) {
-      RecordClientRpcFailoverAttempt(request.service_name_, request.method_name_, last_result.failure().status_.code(),
-                                     last_result.failure().commit_state_);
     }
   }
 

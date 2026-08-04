@@ -4,13 +4,9 @@
 #include <chrono>
 #include <memory>
 #include <string>
-#include <string_view>
 #include <utility>
 #include <vector>
 
-#include <xrpc/metrics.h>
-
-#include "observability/rpc_metrics.h"
 #include "rpc/protocol_adapter.h"
 #include "transport/dispatch_completion_queue.h"
 
@@ -22,63 +18,6 @@ auto MakeReadBufferSize() -> std::size_t { return 16U * 1024U; }
 
 /** @return Maximum bytes coalesced into one asynchronous send operation. */
 auto MakeMaxWriteBatchBytes() -> std::size_t { return 64U * 1024U; }
-
-/**
- * @brief Converts a connection close reason into the metrics label value.
- *
- * @param reason Internal close reason.
- * @return Stable snake-case label.
- */
-[[nodiscard]] auto CloseReasonLabel(ConnectionCloseReason reason) -> std::string_view {
-  switch (reason) {
-    case ConnectionCloseReason::None:
-      return "none";
-    case ConnectionCloseReason::PeerClosed:
-      return "peer_closed";
-    case ConnectionCloseReason::ProtocolError:
-      return "protocol_error";
-    case ConnectionCloseReason::SocketError:
-      return "socket_error";
-    case ConnectionCloseReason::Backpressure:
-      return "backpressure";
-    case ConnectionCloseReason::IdleTimeout:
-      return "idle_timeout";
-  }
-  return "unknown";
-}
-
-/**
- * @brief RAII guard that maintains the per-method server inflight gauge.
- *
- * The guard stores string_views into local copies held by the worker lambda, so the labels remain
- * alive for the complete dispatch/metrics window.
- */
-class ServerRpcInflightGuard final {
- public:
-  /**
-   * @brief Increments the server inflight gauge for one method.
-   *
-   * @param service_name Service label value.
-   * @param method_name Method label value.
-   */
-  ServerRpcInflightGuard(std::string_view service_name, std::string_view method_name)
-      : service_name_(service_name), method_name_(method_name) {
-    IncrementServerRpcInflight(service_name_, method_name_);
-  }
-
-  /** @brief Decrements the inflight gauge that was incremented by the constructor. */
-  ~ServerRpcInflightGuard() { DecrementServerRpcInflight(service_name_, method_name_); }
-
-  ServerRpcInflightGuard(const ServerRpcInflightGuard &) = delete;
-  auto operator=(const ServerRpcInflightGuard &) -> ServerRpcInflightGuard & = delete;
-
-  ServerRpcInflightGuard(ServerRpcInflightGuard &&) noexcept = delete;
-  auto operator=(ServerRpcInflightGuard &&) noexcept -> ServerRpcInflightGuard & = delete;
-
- private:
-  std::string_view service_name_;
-  std::string_view method_name_;
-};
 
 /**
  * @brief Returns the provided completion queue or creates one bound to this context.
@@ -107,7 +46,7 @@ auto ResolveCompletionQueue(io::UringContext &context, std::shared_ptr<DispatchC
  * @param handler Raw request dispatcher.
  * @param executor Worker pool for handler execution.
  * @param socket Accepted nonblocking client socket.
- * @param options Protocol limits, backpressure limits, metrics state, and idle timeout.
+ * @param options Protocol limits, backpressure limits, and idle timeout.
  */
 TcpConnection::TcpConnection(io::UringContext &context, RawHandler handler, ThreadPoolExecutor &executor,
                              io::Socket socket, TcpConnectionOptions options)
@@ -189,7 +128,6 @@ auto TcpConnection::HandleFeedResult(SessionFeedResult &&feed) -> bool {
   const bool accepted_all = feed.requests_.ConsumeEach([this, &requests](RawRequest request) {
     if (pending_dispatch_jobs_ + requests.size() >= limits_.max_inflight_per_connection_) {
       backpressure_stats_->RecordInflightRejection();
-      RecordServerBackpressureRejected("inflight_limit");
       return RejectRequestDueToBackpressure(std::move(request), "server per-connection in-flight limit exceeded");
     }
     requests.push_back(std::move(request));
@@ -207,7 +145,7 @@ auto TcpConnection::HandleFeedResult(SessionFeedResult &&feed) -> bool {
 /**
  * @brief Closes the connection and cancels all pending socket operations.
  *
- * @param reason First close reason to record for diagnostics and metrics.
+ * @param reason First close reason to record for diagnostics.
  */
 void TcpConnection::Close(ConnectionCloseReason reason) {
   if (closed_) {
@@ -216,7 +154,6 @@ void TcpConnection::Close(ConnectionCloseReason reason) {
 
   closed_ = true;
   SetClosedReason(reason);
-  RecordServerConnectionClosed(CloseReasonLabel(close_reason_));
   write_queue_.clear();
   pending_write_bytes_ = 0;
   write_in_progress_ = false;
@@ -308,7 +245,6 @@ auto TcpConnection::TryReserveWriteBytes(std::size_t bytes) -> bool {
   if (pending_write_bytes_ > limits_.max_write_queue_bytes_per_connection_ ||
       bytes > limits_.max_write_queue_bytes_per_connection_ - pending_write_bytes_) {
     backpressure_stats_->RecordWriteQueueClosure();
-    RecordServerBackpressureRejected("write_queue");
     Close(ConnectionCloseReason::Backpressure);
     return false;
   }
@@ -400,11 +336,9 @@ auto TcpConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> boo
   }
 
   std::weak_ptr<TcpConnection> weak_self = weak_from_this();
-  const bool metrics_enabled = MetricsEnabled();
-  const auto started_at = metrics_enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   auto request_batch = std::make_shared<std::vector<RawRequest>>(std::move(requests));
   const bool accepted = executor_->TrySubmitBatch(
-      [weak_self, request_batch, request_count, started_at, metrics_enabled]() mutable {
+      [weak_self, request_batch, request_count]() mutable {
         std::shared_ptr<TcpConnection> self = weak_self.lock();
         if (!self) {
           return;
@@ -422,25 +356,7 @@ auto TcpConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> boo
         std::size_t successful_jobs = 0;
         bool encode_failed = false;
         for (RawRequest &request : *request_batch) {
-          RawResponse response;
-          if (metrics_enabled) {
-            // Keep the default no-metrics path free of per-request clock reads and
-            // label bookkeeping; metrics-enabled runs still record the full series.
-            const std::string service_name = request.service_name_;
-            const std::string method_name = request.method_name_;
-            const ServerRpcInflightGuard inflight_guard(service_name, method_name);
-            response = self->DispatchOnWorker(std::move(request));
-            if (response.status_.ok()) {
-              RecordServerRpcCompleted(service_name, method_name, response.status_.code());
-            } else {
-              RecordServerRpcFailed(service_name, method_name, response.status_.code());
-            }
-            RecordServerRpcLatency(
-                service_name, method_name, response.status_.code(),
-                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started_at));
-          } else {
-            response = self->DispatchOnWorker(std::move(request));
-          }
+          RawResponse response = self->DispatchOnWorker(std::move(request));
           try {
             batch_response_bytes.append(self->EncodeResponseOnWorker(std::move(response)));
             ++successful_jobs;
@@ -464,7 +380,6 @@ auto TcpConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> boo
   if (!accepted) {
     for (RawRequest &request : *request_batch) {
       backpressure_stats_->RecordGlobalPendingRejection();
-      RecordServerBackpressureRejected("global_pending");
       if (!RejectRequestDueToBackpressure(std::move(request), "server global pending job limit exceeded")) {
         return false;
       }

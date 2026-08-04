@@ -1,6 +1,6 @@
 # XRPC
 
-XRPC 是一个基于 `io_uring` 构建的 Linux C++20 RPC 框架，提供类型化 Protobuf 调用、多路复用客户端连接、Consul 服务发现、有界服务端背压、Prometheus 指标，以及可复现的性能测试工具。
+XRPC 是一个基于 `io_uring` 构建的 Linux C++20 RPC 框架，提供类型化 Protobuf 调用、多路复用客户端连接、Consul 服务发现、有界服务端背压，以及可复现的性能测试工具。
 
 项目重点展示 RPC 系统在传输、调度、所有权和性能工程上的完整实现，不兼容 gRPC 线协议。
 
@@ -13,7 +13,6 @@ XRPC 是一个基于 `io_uring` 构建的 Linux C++20 RPC 框架，提供类型�
 - 支持静态端点列表和 Consul 服务发现
 - 支持粘性路由、调用超时、连接复用和有界在途请求
 - 提供连接级与全局背压，并暴露拒绝计数器
-- 提供 Prometheus 指标与就绪检查端点
 - 覆盖单元、运行时、传输、集成和端到端测试
 - 分离生产客户端延迟测试与服务端容量测试
 
@@ -60,11 +59,7 @@ sudo apt-get install build-essential cmake python3
 ## 构建
 
 ```bash
-cmake -S . -B build \
-  -DXRPC_BUILD_EXAMPLES=ON \
-  -DXRPC_BUILD_TESTS=ON \
-  -DXRPC_BUILD_TOOLS=ON
-cmake --build build --parallel
+make
 ```
 
 库目标名为 `xrpc::xrpc`。示例程序位于 `build/example/`，benchmark 可执行文件位于 `build/tools/benchmark/`。
@@ -174,7 +169,6 @@ target_link_libraries(my_service PRIVATE xrpc::xrpc)
 - [性能上限分析](docs/performance_ceiling_analysis.md)
 - [服务端性能优化历程](docs/performance_optimization_journey.md)
 - [性能测试工具](tools/benchmark/README.md)
-- [可观测性环境](tools/observability/README.md)
 - [测试规范](tests/testing_policy.md)
 
 ## 许可证
