@@ -26,7 +26,6 @@ xrpc_protobuf_generate(
 set(XRPC_TEST_UNIT_TIMEOUT 5)
 set(XRPC_TEST_INTEGRATION_TIMEOUT 15)
 set(XRPC_TEST_EXTERNAL_TIMEOUT 60)
-set(XRPC_TEST_TOOLING_TIMEOUT 15)
 
 function(xrpc_add_test test_name test_source)
     set(one_value_args TIMEOUT)
@@ -66,27 +65,6 @@ function(xrpc_add_test test_name test_source)
         PROPERTIES
             LABELS "${XRPC_TEST_LABELS}"
             TIMEOUT "${XRPC_TEST_TIMEOUT}"
-    )
-endfunction()
-
-function(xrpc_add_tool_test test_name labels)
-    add_test(NAME ${test_name} COMMAND ${ARGN})
-    set_tests_properties(
-        ${test_name}
-        PROPERTIES
-            LABELS "${labels}"
-            TIMEOUT ${XRPC_TEST_TOOLING_TIMEOUT}
-    )
-endfunction()
-
-function(xrpc_add_benchmark_config_test test_name config_name)
-    xrpc_add_tool_test(
-        ${test_name}
-        "tooling;benchmark;config;${ARGN}"
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/run_suite.py"
-        --config
-        "${PROJECT_SOURCE_DIR}/tools/benchmark/configs/${config_name}"
-        --validate-config
     )
 endfunction()
 
@@ -219,11 +197,4 @@ xrpc_add_test(
     tcp_server_io_uring_test transport/tcp_server_io_uring_test.cpp
     LABELS integration runtime transport io_uring
     TIMEOUT ${XRPC_TEST_INTEGRATION_TIMEOUT}
-)
-
-xrpc_add_benchmark_config_test(
-    benchmark_v1_firehose_config_test v1_firehose.json firehose
-)
-xrpc_add_benchmark_config_test(
-    benchmark_v1_client_config_test v1_client.json client
 )

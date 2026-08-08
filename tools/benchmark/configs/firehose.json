@@ -1,0 +1,13 @@
+{
+  "type": "firehose",
+  "io_threads": 3,
+  "connections": [12],
+  "inflight": [48, 1536],
+  "warmup_duration": 3,
+  "duration": 30,
+  "repetitions": 3,
+  "payload_size": 128,
+  "server_worker_threads": 3,
+  "server_connection_io_threads": 3,
+  "run_timeout": 90
+}

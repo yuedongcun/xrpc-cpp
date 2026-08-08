@@ -7,7 +7,7 @@
 
 ### 生产 `RpcClient`
 
-`v1_client.json` 调用公开的类型化 `RpcClient::Call()` API，包含客户端
+`client.json` 调用公开的类型化 `RpcClient::Call()` API，包含客户端
 Protobuf 编码、端点选择、连接复用、请求/响应匹配、解码和唤醒同步调用者。
 它最接近真实客户端路径，但不能代表服务端最大吞吐。
 
@@ -24,25 +24,24 @@ Protobuf 编码、端点选择、连接复用、请求/响应匹配、解码和�
 - Intel Core i7-9750H，6 个物理核、12 个逻辑 CPU；
 - WSL2 Linux loopback；
 - Clang 20.1.8；
-- 服务端 CPU `0,2,4`，客户端 CPU `6,8,10`；
 - 3 个服务端 worker 线程和 3 个 connection I/O loops；
 - 128 字节 Echo message 字段；
 - 每个 case 使用全新服务端，正式测量前预热，重复 3 轮；
-- 同时记录 QPS 中位数、p99、失败数和 CPU。
+- 记录 QPS 中位数、p99 和失败数。
 
-CPU affinity 和编译器属于这次历史测量环境的一部分。换机器后应重新生成结果，
+benchmark 不做绑核、控频、NUMA 调优或 perf 编排。换机器后应重新生成结果，
 不能期待得到完全相同的数字。
 
 ## 代表性结果
 
-`v1_firehose.json` 的代表性服务端工作点：
+`firehose.json` 的代表性服务端工作点：
 
 | 工作点 | QPS 中位数 | p99 中位数 | 失败数 |
 | --- | ---: | ---: | ---: |
 | 低延迟，48 in-flight | 96,103 | 0.86 ms | 0 |
 | 饱和点，1536 in-flight | 414,743 | 8.08 ms | 0 |
 
-`v1_client.json` 在 24 个调用线程下达到 40,930 QPS，p99 为 0.96 ms，
+`client.json` 在 24 个调用线程下达到 40,930 QPS，p99 为 0.96 ms，
 失败数为 0。
 
 ## 性能工程取舍
@@ -79,33 +78,32 @@ make
 快速验证 benchmark 链路：
 
 ```bash
-./tools/benchmark/run_suite.py \
-  --config tools/benchmark/configs/v1_firehose.json \
+./tools/benchmark/runner/run_suite.py \
+  --config tools/benchmark/configs/firehose.json \
   --build
 ```
 
 复现代表性公开结果：
 
 ```bash
-./tools/benchmark/run_suite.py \
-  --config tools/benchmark/configs/v1_firehose.json \
+./tools/benchmark/runner/run_suite.py \
+  --config tools/benchmark/configs/firehose.json \
   --build
 
-./tools/benchmark/run_suite.py \
-  --config tools/benchmark/configs/v1_client.json \
+./tools/benchmark/runner/run_suite.py \
+  --config tools/benchmark/configs/client.json \
   --build
 ```
 
-每次运行会在 `build/benchmark-results/<timestamp>/` 下写入 `config.json`、
-`summary.md`、`runs.csv`、日志和环境元数据。这些结果属于本地实验产物，
-不提交到仓库；需要复现时直接重新运行相同配置。
+运行器会在 stdout 打印每轮结果和最终 summary；需要保留原始输出时，
+可自行重定向到本地文件。
 
-`--build` 路径使用文档中约定的 Clang 20。若编译器或 CPU 布局不同，应把结果
+`--build` 路径使用当前本地 CMake 配置。若编译器或 CPU 布局不同，应把结果
 作为新的测量保存，而不是把它当作参考数字的逐字复现。
 
 ## 限制
 
 - 结果是单机 loopback 测量；
 - workload 是 Echo，不代表真实业务流量；
-- CPU 频率、温度、内核和后台负载都会影响结果；
+- CPU 调度、频率、温度、内核和后台负载都会影响结果；
 - 项目不承诺生产 SLA，也不兼容 gRPC 线协议。

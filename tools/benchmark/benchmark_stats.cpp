@@ -1,4 +1,4 @@
-#include "common/benchmark_stats.h"
+#include "benchmark_stats.h"
 
 #include <algorithm>
 #include <cstdio>

@@ -17,7 +17,7 @@ all: configure
 test: all
 	ctest --test-dir $(BUILD_DIR)/tests \
 		--output-on-failure \
-		-LE "external|tooling"
+		-LE external
 
 clean:
 	rm -rf $(BUILD_DIR)

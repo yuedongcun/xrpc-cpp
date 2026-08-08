@@ -33,10 +33,7 @@ jobs:
         run: make
 
       - name: Test
-        run: ctest --test-dir build/tests --output-on-failure -LE "external|tooling"
-
-      - name: Validate tools
-        run: ctest --test-dir build/tests --output-on-failure -L tooling
+        run: ctest --test-dir build/tests --output-on-failure -LE external
 
       - name: Install
         run: cmake --install build --prefix "${{ runner.temp }}/xrpc-install"

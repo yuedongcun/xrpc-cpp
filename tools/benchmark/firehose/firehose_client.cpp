@@ -1,11 +1,10 @@
-#include "common/firehose_client.h"
-
 #include <protocol/xrpc/xrpc_header.pb.h>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -26,11 +25,11 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
-#include <sched.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "benchmark_stats.h"
 #include "proto/echo.pb.h"
 #include "protocol/fixed_header.h"
 #include "protocol/message_type.h"
@@ -44,6 +43,16 @@ constexpr std::string_view METHOD_NAME = "Echo";
 constexpr std::size_t SOCKET_BUFFER_SIZE = 64U * 1024U;
 constexpr std::size_t MAX_WRITE_BATCH_BYTES = 64U * 1024U;
 constexpr int MAX_EPOLL_EVENTS = 256;
+
+struct FirehoseConfig final {
+  std::string host_ = "127.0.0.1";
+  std::uint16_t port_ = 9010;
+  std::uint64_t duration_s_ = 0;
+  std::size_t payload_size_ = 64;
+  std::size_t firehose_connections_ = 1;
+  std::size_t firehose_inflight_ = 0;
+  std::size_t firehose_io_threads_ = 0;
+};
 
 struct FirehoseSlot final {
   std::uint64_t generation_ = 1;
@@ -71,25 +80,82 @@ auto Percentile(const std::vector<std::chrono::nanoseconds> &sorted, double rati
   return sorted[idx];
 }
 
-auto AvailableCpuCount() -> std::size_t {
-  cpu_set_t affinity;
-  CPU_ZERO(&affinity);
-  if (::sched_getaffinity(0, sizeof(affinity), &affinity) == 0) {
-    const int count = CPU_COUNT(&affinity);
-    if (count > 0) {
-      return static_cast<std::size_t>(count);
-    }
+auto ParseUnsigned(std::string_view value, const char *name) -> std::uint64_t {
+  std::uint64_t result = 0;
+  const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result);
+  if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size()) {
+    throw std::invalid_argument(std::string("invalid value for ") + name);
   }
-
-  const auto hardware_threads = std::thread::hardware_concurrency();
-  return hardware_threads == 0 ? 1U : static_cast<std::size_t>(hardware_threads);
+  return result;
 }
 
-auto ResolveFirehoseIoThreads(const BenchmarkConfig &config) -> std::size_t {
+void RequireKeyValue(std::string_view arg) {
+  if (!arg.starts_with("--") || arg.find('=') == std::string_view::npos) {
+    throw std::invalid_argument("arguments must use --key=value format");
+  }
+}
+
+void ParseArg(FirehoseConfig &config, std::string_view arg) {
+  RequireKeyValue(arg);
+  const std::size_t eq = arg.find('=');
+  const std::string_view key = arg.substr(2, eq - 2);
+  const std::string_view value = arg.substr(eq + 1);
+
+  if (key == "host") {
+    config.host_ = std::string(value);
+  } else if (key == "port") {
+    config.port_ = static_cast<std::uint16_t>(ParseUnsigned(value, "port"));
+  } else if (key == "duration_s") {
+    config.duration_s_ = ParseUnsigned(value, "duration_s");
+  } else if (key == "payload_size") {
+    config.payload_size_ = static_cast<std::size_t>(ParseUnsigned(value, "payload_size"));
+  } else if (key == "connections") {
+    config.firehose_connections_ = static_cast<std::size_t>(ParseUnsigned(value, "connections"));
+  } else if (key == "inflight") {
+    config.firehose_inflight_ = static_cast<std::size_t>(ParseUnsigned(value, "inflight"));
+  } else if (key == "io_threads") {
+    config.firehose_io_threads_ = static_cast<std::size_t>(ParseUnsigned(value, "io_threads"));
+  } else {
+    throw std::invalid_argument(std::string("unknown argument: --") + std::string(key));
+  }
+}
+
+auto ParseConfig(int argc, char **argv) -> FirehoseConfig {
+  FirehoseConfig config;
+  for (int i = 1; i < argc; ++i) {
+    ParseArg(config, argv[i]);
+  }
+  if (config.port_ == 0) {
+    throw std::invalid_argument("port must be greater than 0");
+  }
+  if (config.duration_s_ == 0) {
+    throw std::invalid_argument("duration_s must be greater than 0");
+  }
+  if (config.payload_size_ == 0) {
+    throw std::invalid_argument("payload_size must be greater than 0");
+  }
+  if (config.firehose_connections_ == 0) {
+    throw std::invalid_argument("connections must be greater than 0");
+  }
+  if (config.firehose_inflight_ == 0) {
+    throw std::invalid_argument("inflight must be greater than 0");
+  }
+  if (config.firehose_inflight_ < config.firehose_connections_) {
+    throw std::invalid_argument("inflight must be greater than or equal to connections");
+  }
+  return config;
+}
+
+auto Usage(const char *program) -> std::string {
+  return std::string("Usage: ") + program +
+         " --host=IP --port=N --duration_s=N --payload_size=N --connections=N --inflight=N [--io_threads=N]";
+}
+
+auto ResolveFirehoseIoThreads(const FirehoseConfig &config) -> std::size_t {
   if (config.firehose_io_threads_ != 0) {
     return std::max<std::size_t>(1, std::min(config.firehose_io_threads_, config.firehose_connections_));
   }
-  return std::max<std::size_t>(1, std::min(AvailableCpuCount(), config.firehose_connections_));
+  return 1;
 }
 
 auto ConnectBlocking(std::string_view host, std::uint16_t port) -> int {
@@ -149,7 +215,7 @@ auto BuildRequestHeaderBytes() -> std::string {
   return bytes;
 }
 
-auto BuildBenchmarkPayload(const BenchmarkConfig &config) -> BenchmarkPayload {
+auto BuildBenchmarkPayload(const FirehoseConfig &config) -> BenchmarkPayload {
   const std::string message(config.payload_size_, 'x');
   EchoRequest request;
   request.set_message(message);
@@ -735,14 +801,14 @@ class EpollFirehoseWorker final {
   int epoll_fd_ = -1;
 };
 
-auto PerConnectionInflight(const BenchmarkConfig &config, std::size_t connection_index) -> std::size_t {
+auto PerConnectionInflight(const FirehoseConfig &config, std::size_t connection_index) -> std::size_t {
   const std::size_t base = config.firehose_inflight_ / config.firehose_connections_;
   const std::size_t remainder = config.firehose_inflight_ % config.firehose_connections_;
   return base + (connection_index < remainder ? 1 : 0);
 }
 
 template <typename Runner>
-void ReportFirehoseProgress(const BenchmarkConfig &config, const std::vector<std::unique_ptr<Runner>> &runners,
+void ReportFirehoseProgress(const FirehoseConfig &config, const std::vector<std::unique_ptr<Runner>> &runners,
                             std::atomic<bool> &done, std::condition_variable &done_cv, std::mutex &done_mu,
                             std::chrono::steady_clock::time_point start_time) {
   std::unique_lock lock(done_mu);
@@ -795,7 +861,7 @@ auto FinalizeFirehoseStats(const std::vector<std::unique_ptr<Runner>> &runners, 
   return stats;
 }
 
-auto RunEpollFirehoseBenchmark(const BenchmarkConfig &config) -> BenchmarkStats {
+auto RunEpollFirehoseBenchmark(const FirehoseConfig &config) -> BenchmarkStats {
   const std::size_t io_threads = ResolveFirehoseIoThreads(config);
   std::vector<std::unique_ptr<EpollFirehoseWorker>> workers;
   workers.reserve(io_threads);
@@ -859,6 +925,23 @@ auto RunEpollFirehoseBenchmark(const BenchmarkConfig &config) -> BenchmarkStats 
 
 }  // namespace
 
-auto RunFirehoseBenchmark(const BenchmarkConfig &config) -> BenchmarkStats { return RunEpollFirehoseBenchmark(config); }
+auto RunFirehoseBenchmark(const FirehoseConfig &config) -> BenchmarkStats { return RunEpollFirehoseBenchmark(config); }
 
 }  // namespace xrpc::benchmark
+
+auto main(int argc, char **argv) -> int {
+  try {
+    const xrpc::benchmark::FirehoseConfig config = xrpc::benchmark::ParseConfig(argc, argv);
+    std::printf(
+        "client=firehose host=%s port=%u duration_s=%llu payload_size=%zu connections=%zu inflight=%zu "
+        "io_threads=%zu\n",
+        config.host_.c_str(), config.port_, static_cast<unsigned long long>(config.duration_s_), config.payload_size_,
+        config.firehose_connections_, config.firehose_inflight_, config.firehose_io_threads_);
+    const xrpc::benchmark::BenchmarkStats stats = xrpc::benchmark::RunFirehoseBenchmark(config);
+    xrpc::benchmark::PrintStats(stats);
+    return 0;
+  } catch (const std::exception &ex) {
+    std::fprintf(stderr, "%s\n%s\n", ex.what(), xrpc::benchmark::Usage(argv[0]).c_str());
+    return 1;
+  }
+}

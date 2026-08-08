@@ -21,14 +21,13 @@ test_support/仅供测试使用的辅助代码
 make test
 ```
 
-默认测试集不包含在线 Consul 测试和 tooling 检查。常用 CTest 筛选命令：
+默认测试集不包含在线 Consul 测试。常用 CTest 筛选命令：
 
 ```bash
 ctest --test-dir build/tests --output-on-failure -L unit
 ctest --test-dir build/tests --output-on-failure -L runtime
 ctest --test-dir build/tests --output-on-failure -L integration -LE external
 ctest --test-dir build/tests --output-on-failure -L e2e -LE external
-ctest --test-dir build/tests --output-on-failure -L tooling
 ```
 
 在线 Consul 测试要求 `127.0.0.1:8500` 上运行 Consul：
@@ -46,4 +45,4 @@ XRPC_ENABLE_CONSUL_TESTS=1 \
 - 生产 API 不暴露只为测试存在的生命周期方法；
 - 外部测试必须显式启用，普通本地 CI 不依赖运行中的 Consul。
 
-CTest 使用以下层次标签：`unit`、`runtime`、`integration`、`e2e`、`external` 和 `tooling`。
+CTest 使用以下层次标签：`unit`、`runtime`、`integration`、`e2e` 和 `external`。

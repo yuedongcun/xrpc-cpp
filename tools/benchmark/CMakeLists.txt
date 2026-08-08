@@ -15,29 +15,8 @@ xrpc_protobuf_generate(
     PROTOC_OUT_DIR "${BENCHMARK_GEN_DIR}"
 )
 
-add_library(
-    xrpc_benchmark_common
-    STATIC
-    common/benchmark_config.cpp
-    common/benchmark_stats.cpp
-    common/benchmark_client.cpp
-    common/firehose_client.cpp
-    common/rpc_client_benchmark.cpp
-    common/benchmark_server.cpp
-)
-target_include_directories(
-    xrpc_benchmark_common
-    PUBLIC
-        "${PROJECT_SOURCE_DIR}/src/include"
-        "${PROJECT_SOURCE_DIR}/src"
-        "${CMAKE_CURRENT_SOURCE_DIR}"
-)
-target_link_libraries(
-    xrpc_benchmark_common
-    PUBLIC xrpc::xrpc xrpc_benchmark_proto Threads::Threads
-)
-function(xrpc_add_benchmark target source)
-    add_executable(${target} ${source})
+function(xrpc_add_benchmark target)
+    add_executable(${target} ${ARGN})
     target_include_directories(
         ${target}
         PRIVATE
@@ -47,7 +26,7 @@ function(xrpc_add_benchmark target source)
     )
     target_link_libraries(
         ${target}
-        PRIVATE xrpc_benchmark_common xrpc_benchmark_proto Threads::Threads
+        PRIVATE xrpc::xrpc xrpc_benchmark_proto Threads::Threads
     )
     set_target_properties(
         ${target}
@@ -55,5 +34,17 @@ function(xrpc_add_benchmark target source)
     )
 endfunction()
 
-xrpc_add_benchmark(xrpc_benchmark_client client_main.cpp)
-xrpc_add_benchmark(xrpc_benchmark_server server_main.cpp)
+xrpc_add_benchmark(
+    xrpc_benchmark_server
+    server/benchmark_server.cpp
+)
+xrpc_add_benchmark(
+    xrpc_benchmark_firehose
+    firehose/firehose_client.cpp
+    benchmark_stats.cpp
+)
+xrpc_add_benchmark(
+    xrpc_benchmark_client
+    rpc_client/rpc_client_benchmark.cpp
+    benchmark_stats.cpp
+)
