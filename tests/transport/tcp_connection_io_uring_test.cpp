@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <future>
 #include <memory>
 #include <string>
@@ -17,7 +18,6 @@
 #include "protocol/protocol_error.h"
 #include "protocol/protocol_message.h"
 #include "rpc/protobuf_codec.h"
-#include "test_support/runtime_util.h"
 #include "transport/tcp_connection.h"
 #include "transport/thread_pool_executor.h"
 
@@ -101,6 +101,65 @@ auto RecvFrame(xrpc::io::Socket &socket, std::string &buffer) -> std::string {
   return buffer;
 }
 
+class UringContextRunner final {
+ public:
+  UringContextRunner() = default;
+  ~UringContextRunner() {
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+  }
+
+  UringContextRunner(const UringContextRunner &) = delete;
+  auto operator=(const UringContextRunner &) -> UringContextRunner & = delete;
+
+  UringContextRunner(UringContextRunner &&) = delete;
+  auto operator=(UringContextRunner &&) -> UringContextRunner & = delete;
+
+  void Start(xrpc::io::UringContext &context) {
+    if (thread_.joinable()) {
+      throw xrpc::LifecycleException("UringContextRunner already started");
+    }
+
+    error_ = nullptr;
+    thread_ = std::jthread([&context, this]() {
+      try {
+        context.Run();
+      } catch (...) {
+        error_ = std::current_exception();
+      }
+    });
+  }
+
+  void StopAndJoin(xrpc::io::UringContext &context) {
+    context.Stop();
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+    if (error_) {
+      std::rethrow_exception(error_);
+    }
+  }
+
+ private:
+  std::jthread thread_;
+  std::exception_ptr error_;
+};
+
+template <typename T>
+void StartTaskOnContext(xrpc::io::UringContext &context, xrpc::runtime::Task<T> &task) {
+  context.Post([&task]() { task.Start(); });
+}
+
+auto WaitTaskDone(xrpc::runtime::Task<void> &task, std::chrono::milliseconds timeout,
+                  std::chrono::milliseconds poll_interval) -> bool {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (!task.Done() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(poll_interval);
+  }
+  return task.Done();
+}
+
 auto DecodeEchoMessage(std::string_view frame, std::uint64_t expected_request_id) -> std::string {
   xrpc::FrameCodec codec;
   const xrpc::DecodeResult decoded = codec.TryDecode(frame);
@@ -141,8 +200,8 @@ auto MakeConnectedPair() -> ConnectedPair {
 }
 
 auto WaitForConnectionTask(xrpc::runtime::Task<void> &task, xrpc::io::UringContext &context,
-                           xrpc::testsupport::UringContextRunner &runner) -> bool {
-  const bool done = xrpc::testsupport::WaitTaskDone(task, WaitTimeout, PollInterval);
+                           UringContextRunner &runner) -> bool {
+  const bool done = WaitTaskDone(task, WaitTimeout, PollInterval);
   runner.StopAndJoin(context);
   return done;
 }
@@ -156,8 +215,8 @@ TEST(CoroutineTcpConnectionTest, EchoesSingleFrameAndClosesAfterPeerShutdown) {
   auto connection = std::make_shared<xrpc::TcpConnection>(context, MakeEchoHandler(), executor,
                                                           std::move(pair.server_socket_), xrpc::TcpConnectionOptions{});
   xrpc::runtime::Task<void> task = connection->Run();
-  xrpc::testsupport::UringContextRunner runner;
-  xrpc::testsupport::StartTaskOnContext(context, task);
+  UringContextRunner runner;
+  StartTaskOnContext(context, task);
   runner.Start(context);
 
   std::string received_buffer;
@@ -182,8 +241,8 @@ TEST(CoroutineTcpConnectionTest, ClosesIdleConnectionAfterTimeout) {
   auto connection = std::make_shared<xrpc::TcpConnection>(context, MakeEchoHandler(), executor,
                                                           std::move(pair.server_socket_), std::move(options));
   xrpc::runtime::Task<void> task = connection->Run();
-  xrpc::testsupport::UringContextRunner runner;
-  xrpc::testsupport::StartTaskOnContext(context, task);
+  UringContextRunner runner;
+  StartTaskOnContext(context, task);
   runner.Start(context);
 
   ASSERT_TRUE(WaitForConnectionTask(task, context, runner));
@@ -200,8 +259,8 @@ TEST(CoroutineTcpConnectionTest, HandlesHalfPacketsAndStickyPackets) {
   auto connection = std::make_shared<xrpc::TcpConnection>(context, MakeSlowEchoHandler(), executor,
                                                           std::move(pair.server_socket_), xrpc::TcpConnectionOptions{});
   xrpc::runtime::Task<void> task = connection->Run();
-  xrpc::testsupport::UringContextRunner runner;
-  xrpc::testsupport::StartTaskOnContext(context, task);
+  UringContextRunner runner;
+  StartTaskOnContext(context, task);
   runner.Start(context);
 
   const std::string first_request = MakeRequestFrame("first", 11);
@@ -233,8 +292,8 @@ TEST(CoroutineTcpConnectionTest, HandlesPipelinedRequestsOnOneConnection) {
   auto connection = std::make_shared<xrpc::TcpConnection>(context, MakeEchoHandler(), executor,
                                                           std::move(pair.server_socket_), xrpc::TcpConnectionOptions{});
   xrpc::runtime::Task<void> task = connection->Run();
-  xrpc::testsupport::UringContextRunner runner;
-  xrpc::testsupport::StartTaskOnContext(context, task);
+  UringContextRunner runner;
+  StartTaskOnContext(context, task);
   runner.Start(context);
 
   const std::string first_request = MakeRequestFrame("first", 21);
@@ -262,8 +321,8 @@ TEST(CoroutineTcpConnectionTest, ClosesOnInvalidFrame) {
   auto connection = std::make_shared<xrpc::TcpConnection>(context, MakeEchoHandler(), executor,
                                                           std::move(pair.server_socket_), xrpc::TcpConnectionOptions{});
   xrpc::runtime::Task<void> task = connection->Run();
-  xrpc::testsupport::UringContextRunner runner;
-  xrpc::testsupport::StartTaskOnContext(context, task);
+  UringContextRunner runner;
+  StartTaskOnContext(context, task);
   runner.Start(context);
 
   std::string invalid_request = MakeRequestFrame("hello", 42);
@@ -284,8 +343,8 @@ TEST(CoroutineTcpConnectionTest, HandlesConcurrentResponsesWithThreadPoolExecuto
   auto connection = std::make_shared<xrpc::TcpConnection>(context, MakeEchoHandler(), executor,
                                                           std::move(pair.server_socket_), xrpc::TcpConnectionOptions{});
   xrpc::runtime::Task<void> task = connection->Run();
-  xrpc::testsupport::UringContextRunner runner;
-  xrpc::testsupport::StartTaskOnContext(context, task);
+  UringContextRunner runner;
+  StartTaskOnContext(context, task);
   runner.Start(context);
 
   xrpc::test::EchoRequest slow_request;
@@ -358,8 +417,8 @@ TEST(CoroutineTcpConnectionTest, KeepsReadingWhileWorkerHandlerIsPending) {
   auto connection = std::make_shared<xrpc::TcpConnection>(context, std::move(blocking_handler), executor,
                                                           std::move(pair.server_socket_), std::move(options));
   xrpc::runtime::Task<void> task = connection->Run();
-  xrpc::testsupport::UringContextRunner runner;
-  xrpc::testsupport::StartTaskOnContext(context, task);
+  UringContextRunner runner;
+  StartTaskOnContext(context, task);
   runner.Start(context);
 
   pair.client_socket_.WriteAll(MakeRequestFrame("first", 81));
@@ -373,13 +432,13 @@ TEST(CoroutineTcpConnectionTest, KeepsReadingWhileWorkerHandlerIsPending) {
     const xrpc::Status rejection_status = DecodeResponseStatus(rejection_response, 82);
     EXPECT_EQ(rejection_status.code(), xrpc::StatusCode::ResourceExhausted);
     task_done_before_handler_release =
-        xrpc::testsupport::WaitTaskDone(task, std::chrono::milliseconds(20), PollInterval);
+        WaitTaskDone(task, std::chrono::milliseconds(20), PollInterval);
   }
   release_handler.set_value();
 
   pair.client_socket_.ShutdownWrite();
   pair.client_socket_.Close();
-  ASSERT_TRUE(xrpc::testsupport::WaitTaskDone(task, WaitTimeout, PollInterval));
+  ASSERT_TRUE(WaitTaskDone(task, WaitTimeout, PollInterval));
   runner.StopAndJoin(context);
 
   EXPECT_EQ(handler_started_status, std::future_status::ready);
@@ -404,8 +463,8 @@ TEST(CoroutineTcpConnectionTest, ReturnsResourceExhaustedWhenPerConnectionInflig
   auto connection = std::make_shared<xrpc::TcpConnection>(context, MakeSlowEchoHandler(), executor,
                                                           std::move(pair.server_socket_), std::move(options));
   xrpc::runtime::Task<void> task = connection->Run();
-  xrpc::testsupport::UringContextRunner runner;
-  xrpc::testsupport::StartTaskOnContext(context, task);
+  UringContextRunner runner;
+  StartTaskOnContext(context, task);
   runner.Start(context);
 
   xrpc::test::EchoRequest request;
@@ -426,7 +485,7 @@ TEST(CoroutineTcpConnectionTest, ReturnsResourceExhaustedWhenPerConnectionInflig
   EXPECT_EQ(rejection_status.code(), xrpc::StatusCode::ResourceExhausted);
 
   pair.client_socket_.ShutdownWrite();
-  ASSERT_TRUE(xrpc::testsupport::WaitTaskDone(task, WaitTimeout, PollInterval));
+  ASSERT_TRUE(WaitTaskDone(task, WaitTimeout, PollInterval));
   pair.client_socket_.Close();
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
   runner.StopAndJoin(context);
@@ -449,13 +508,13 @@ TEST(CoroutineTcpConnectionTest, ClosesWhenWriteQueueByteLimitIsReached) {
   auto connection = std::make_shared<xrpc::TcpConnection>(context, MakeEchoHandler(), executor,
                                                           std::move(pair.server_socket_), std::move(options));
   xrpc::runtime::Task<void> task = connection->Run();
-  xrpc::testsupport::UringContextRunner runner;
-  xrpc::testsupport::StartTaskOnContext(context, task);
+  UringContextRunner runner;
+  StartTaskOnContext(context, task);
   runner.Start(context);
 
   pair.client_socket_.WriteAll(MakeRequestFrame("response-is-larger-than-one-byte", 71));
 
-  ASSERT_TRUE(xrpc::testsupport::WaitTaskDone(task, WaitTimeout, PollInterval));
+  ASSERT_TRUE(WaitTaskDone(task, WaitTimeout, PollInterval));
   pair.client_socket_.Close();
   runner.StopAndJoin(context);
 

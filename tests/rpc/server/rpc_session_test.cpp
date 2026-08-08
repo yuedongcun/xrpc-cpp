@@ -1,8 +1,10 @@
 #include "rpc/server/rpc_session.h"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -13,8 +15,11 @@
 #include "protocol/frame_codec.h"
 #include "protocol/protocol_error.h"
 #include "protocol/protocol_message.h"
+#include "rpc/handler.h"
+#include "rpc/server/service_registry.h"
 #include "rpc/protobuf_codec.h"
-#include "test_support/rpc_server_handler.h"
+
+#include <xrpc/method_registration.h>
 
 namespace {
 
@@ -22,6 +27,28 @@ auto Echo(const xrpc::test::EchoRequest &req) -> xrpc::test::EchoResponse {
   xrpc::test::EchoResponse resp;
   resp.set_message("echo: " + req.message());
   return resp;
+}
+
+auto MakeRegisteredHandler(std::vector<xrpc::MethodRegistration> registrations) -> xrpc::RawHandler {
+  auto registry = std::make_shared<xrpc::ServiceRegistry>();
+  for (xrpc::MethodRegistration &registration : registrations) {
+    auto invoke = std::move(registration.invoke_);
+    registry->RegisterRaw(registration.service_name_, registration.method_name_,
+                          [invoke = std::move(invoke)](xrpc::RawRequest request) -> xrpc::RawResponse {
+                            xrpc::RawResponse response;
+                            response.request_id_ = request.request_id_;
+                            response.payload_ = invoke(request.payload_);
+                            return response;
+                          });
+  }
+  return [registry = std::move(registry)](xrpc::RawRequest request) { return registry->Dispatch(std::move(request)); };
+}
+
+template <typename Request, typename Response, typename Func>
+auto MakeRegisteredHandler(std::string service_name, std::string method_name, Func func) -> xrpc::RawHandler {
+  return MakeRegisteredHandler(
+      {xrpc::MakeMethodRegistration<Request, Response>(std::move(service_name), std::move(method_name),
+                                                       std::move(func))});
 }
 
 auto MakeRequestFrame(std::string message, std::uint64_t request_id) -> std::string {
@@ -53,7 +80,7 @@ TEST(RpcSessionTest, FeedBytesCollectsRequestsWithoutDispatching) {
   xrpc::RpcServer server;
   server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>("EchoService", "Echo", Echo);
 
-  xrpc::RpcSession session(xrpc::testsupport::MakeRegisteredHandler<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
+  xrpc::RpcSession session(MakeRegisteredHandler<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
       "EchoService", "Echo", Echo));
   const std::string frame_one = MakeRequestFrame("hello-1", 101);
   const std::string frame_two = MakeRequestFrame("hello-2", 102);
@@ -69,7 +96,7 @@ TEST(RpcSessionTest, FeedBytesHandlesRepeatedAndChangedRequestHeaders) {
   xrpc::RpcServer server;
   server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>("EchoService", "Echo", Echo);
 
-  xrpc::RpcSession session(xrpc::testsupport::MakeRegisteredHandler<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
+  xrpc::RpcSession session(MakeRegisteredHandler<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
       "EchoService", "Echo", Echo));
   const std::string repeated_one = MakeRequestFrame("hello-1", 101);
   const std::string repeated_two = MakeRequestFrame("hello-2", 102);
@@ -98,7 +125,7 @@ TEST(RpcSessionTest, FeedBytesRejectsCorruptedHeaderAfterCacheWarmup) {
   xrpc::RpcServer server;
   server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>("EchoService", "Echo", Echo);
 
-  xrpc::RpcSession session(xrpc::testsupport::MakeRegisteredHandler<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
+  xrpc::RpcSession session(MakeRegisteredHandler<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
       "EchoService", "Echo", Echo));
   const xrpc::SessionFeedResult first = session.FeedBytes(MakeRequestFrame("hello", 101));
   EXPECT_FALSE(first.closed_);
@@ -125,7 +152,7 @@ TEST(RpcSessionTest, FeedBytesKeepsHalfPacketUntilComplete) {
   xrpc::RpcServer server;
   server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>("EchoService", "Echo", Echo);
 
-  xrpc::RpcSession session(xrpc::testsupport::MakeRegisteredHandler<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
+  xrpc::RpcSession session(MakeRegisteredHandler<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
       "EchoService", "Echo", Echo));
   const std::string frame = MakeRequestFrame("half", 201);
   const std::string first_half = frame.substr(0, frame.size() / 2);
@@ -143,7 +170,7 @@ TEST(RpcSessionTest, FeedBytesKeepsHalfPacketUntilComplete) {
 
 TEST(RpcSessionTest, FeedBytesClosesSessionWhenDeclaredPayloadExceedsDefaultLimit) {
   xrpc::RpcServer server;
-  xrpc::RpcSession session(xrpc::testsupport::MakeRegisteredHandler<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
+  xrpc::RpcSession session(MakeRegisteredHandler<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
       "EchoService", "Echo", Echo));
   xrpc::FixedHeader header;
   header.payload_len_ = static_cast<std::uint32_t>(xrpc::ProtocolLimits::DEFAULT_MAX_PAYLOAD_SIZE + 1U);
@@ -156,7 +183,7 @@ TEST(RpcSessionTest, FeedBytesClosesSessionWhenDeclaredPayloadExceedsDefaultLimi
 
 TEST(RpcSessionTest, FeedBytesClosesSessionWhenPayloadExceedsConfiguredLimit) {
   xrpc::RpcServer server;
-  xrpc::RpcSession session(xrpc::testsupport::MakeRegisteredHandler<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
+  xrpc::RpcSession session(MakeRegisteredHandler<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
                                "EchoService", "Echo", Echo),
                            xrpc::MakeProtocolLimits(3));
 
@@ -175,7 +202,7 @@ TEST(RpcSessionTest, FeedBytesClosesSessionWhenPayloadExceedsConfiguredLimit) {
 
 TEST(RpcSessionTest, EncodeResponseBuildsResponseFrame) {
   xrpc::RpcServer server;
-  xrpc::RpcSession session(xrpc::testsupport::MakeRegisteredHandler<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
+  xrpc::RpcSession session(MakeRegisteredHandler<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
       "EchoService", "Echo", Echo));
 
   xrpc::ProtocolResponse response;
@@ -195,7 +222,7 @@ TEST(RpcSessionTest, HandleBytesRemainsCompatible) {
   xrpc::RpcServer server;
   server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>("EchoService", "Echo", Echo);
 
-  xrpc::RpcSession session(xrpc::testsupport::MakeRegisteredHandler<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
+  xrpc::RpcSession session(MakeRegisteredHandler<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
       "EchoService", "Echo", Echo));
   const std::string request_frame = MakeRequestFrame("compat", 401);
   const std::string response_frame = session.HandleBytes(request_frame);

@@ -73,5 +73,3 @@ Firehose 客户端：
 ## 结果
 
 套件运行器直接在 stdout 打印每轮结果和最终 summary，不写入结果文件。
-
-性能结论和解释见 [docs/performance.md](../../docs/performance.md)。

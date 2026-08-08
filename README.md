@@ -65,14 +65,30 @@ auto response = client.Call<EchoResponse>("EchoService", "Echo", request);
 
 ## 性能
 
-在 Intel Core i7-9750H、WSL2 loopback 环境中，服务端与发压器各绑定三个物理核，使用 128 字节 Protobuf Echo 消息时：
+在 Intel Core i7-9750H、WSL2 loopback 环境中，使用 128 字节 Protobuf Echo 消息时：
 
 | 工作点 | QPS 中位数 | p99 中位数 | 失败数 |
 | --- | ---: | ---: | ---: |
 | 低延迟 | 96,103 | 0.86 ms | 0 |
 | 饱和点 | 422,391 | 8.14 ms | 0 |
 
-这是单机 loopback 结果，不代表跨主机网络延迟；完整测试方法和复现命令见[性能测试](docs/performance.md)。
+这是单机 loopback 结果，不代表跨主机网络延迟。benchmark 不做绑核、控频、NUMA 调优或 perf 编排，只固定负载参数。
+
+复现服务端容量测试：
+
+```bash
+./tools/benchmark/runner/run_suite.py \
+  --config tools/benchmark/configs/firehose.json \
+  --build
+```
+
+复现正式客户端路径测试：
+
+```bash
+./tools/benchmark/runner/run_suite.py \
+  --config tools/benchmark/configs/client.json \
+  --build
+```
 
 ## 项目边界
 
@@ -83,7 +99,6 @@ xRPC 当前面向 Linux，提供基于 TCP 的请求—响应式 RPC：每次调
 ## 文档
 
 - [架构设计](docs/architecture.md)
-- [性能测试](docs/performance.md)
 - [测试说明](tests/README.md)
 - [Benchmark 工具](tools/benchmark/README.md)
 

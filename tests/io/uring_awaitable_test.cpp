@@ -13,7 +13,6 @@
 #include "common/task.h"
 #include "io/socket.h"
 #include "io/uring_context.h"
-#include "test_support/runtime_util.h"
 
 namespace {
 
@@ -21,8 +20,13 @@ constexpr auto PollInterval = std::chrono::milliseconds(1);
 constexpr auto WaitTimeout = std::chrono::milliseconds(1000);
 
 template <typename T>
+void StartTaskOnContext(xrpc::io::UringContext &context, xrpc::runtime::Task<T> &task) {
+  context.Post([&task]() { task.Start(); });
+}
+
+template <typename T>
 auto WaitTaskWithContext(xrpc::runtime::Task<T> task, xrpc::io::UringContext &context) -> T {
-  xrpc::testsupport::StartTaskOnContext(context, task);
+  StartTaskOnContext(context, task);
 
   std::exception_ptr context_error;
   std::jthread context_thread([&]() {
@@ -103,7 +107,7 @@ TEST(IoUringAwaitableTest, SleepForResumesCoroutine) {
 TEST(IoUringAwaitableTest, StopCancelsPendingSleepFor) {
   xrpc::io::UringContext context;
   xrpc::runtime::Task<xrpc::io::IoResult> task = SleepFor(context, std::chrono::hours(1));
-  xrpc::testsupport::StartTaskOnContext(context, task);
+  StartTaskOnContext(context, task);
 
   std::exception_ptr context_error;
   std::jthread context_thread([&]() {

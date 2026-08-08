@@ -1,48 +1,45 @@
 # 测试说明
 
-## 目录
+`tests/` 只保留最少但够用的测试集：默认测试覆盖核心 contract、协议边界、真实 TCP / io_uring 主路径、RpcClient 调用链路和服务端生命周期；`external` 只保留一个真实 Consul 联调。
 
-测试目录与生产源码模块对应：
+## 保留范围
 
-```text
-common/      status 和 task 等纯逻辑
-io/          io_uring 和 socket 行为
-transport/   buffer、executor 和 TCP transport
-protocol/    frame 和协议行为
-rpc/         client、server 和 naming 行为
-test_support/仅供测试使用的辅助代码
-```
+默认测试：
 
-## 运行测试
+- `common/task_test.cpp`
+- `io/uring_awaitable_test.cpp`
+- `protocol/protocol_test.cpp`
+- `transport/tcp_connection_io_uring_test.cpp`
+- `rpc/server/rpc_session_test.cpp`
+- `rpc/server/rpc_server_lifecycle_test.cpp`
+- `rpc/client/endpoint_selector_test.cpp`
+- `rpc/client/rpc_client_endpoint_test.cpp`
+- `rpc/client/rpc_client_thread_safety_test.cpp`
 
-构建并运行默认测试集：
+外部测试：
+
+- `rpc/naming/consul_resolver_integration_test.cpp`
+
+`tests/package_consumer/` 保留为安装后 `find_package(xrpc CONFIG REQUIRED)` 的消费验证，不算入默认测试集。
+
+## 运行方式
+
+默认测试：
 
 ```bash
-make test
+ctest --test-dir build/tests --output-on-failure -LE external
 ```
 
-默认测试集不包含在线 Consul 测试。常用 CTest 筛选命令：
-
-```bash
-ctest --test-dir build/tests --output-on-failure -L unit
-ctest --test-dir build/tests --output-on-failure -L runtime
-ctest --test-dir build/tests --output-on-failure -L integration -LE external
-ctest --test-dir build/tests --output-on-failure -L e2e -LE external
-```
-
-在线 Consul 测试要求 `127.0.0.1:8500` 上运行 Consul：
+外部 Consul 测试：
 
 ```bash
 XRPC_ENABLE_CONSUL_TESTS=1 \
   ctest --test-dir build/tests --output-on-failure -L external
 ```
 
-## 测试规则
+## 原则
 
-- 优先测试公开行为，不依赖内部实现顺序；
-- 长时间运行的异步测试必须确定性关闭并设置超时；
-- 仅测试使用的 helper 放在 `tests/test_support/`；
-- 生产 API 不暴露只为测试存在的生命周期方法；
-- 外部测试必须显式启用，普通本地 CI 不依赖运行中的 Consul。
-
-CTest 使用以下层次标签：`unit`、`runtime`、`integration`、`e2e` 和 `external`。
+- 测公开 contract，不测内部实现细节；
+- 上层测试覆盖主链路，下层测试只保留真正独立的边界；
+- 异步和网络测试用明确事件同步，不依赖固定 sleep；
+- 测试名直接表达行为，例如 `RejectsOversizedPayload`。
