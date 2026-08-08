@@ -17,12 +17,12 @@
 #include "io/socket_error.h"
 #include "proto/echo.pb.h"
 #include "protocol/frame_codec.h"
+#include "protocol/protocol_error.h"
 #include "protocol/protocol_message.h"
 #include "rpc/protobuf_codec.h"
 
 namespace {
 
-constexpr auto PollInterval = std::chrono::milliseconds(1);
 constexpr auto WaitTimeout = std::chrono::milliseconds(1000);
 
 auto Echo(const xrpc::test::EchoRequest &request) -> xrpc::test::EchoResponse {
@@ -45,16 +45,26 @@ auto MakeRequestFrame(std::string message, std::uint64_t request_id) -> std::str
   return codec.EncodeRequest(protocol_request);
 }
 
-template <typename Predicate>
-auto WaitUntil(Predicate predicate) -> bool {
-  const auto deadline = std::chrono::steady_clock::now() + WaitTimeout;
-  while (std::chrono::steady_clock::now() < deadline) {
-    if (predicate()) {
-      return true;
+auto RecvFrame(xrpc::io::Socket &socket) -> std::string {
+  std::string buffer;
+  char chunk[4096];
+  xrpc::FrameCodec codec;
+
+  while (true) {
+    const xrpc::DecodeResult decoded = codec.TryDecode(buffer);
+    if (decoded.error_ == xrpc::ProtocolError::Ok && decoded.response_.has_value()) {
+      std::string frame = buffer.substr(0, decoded.consumed_);
+      buffer.erase(0, decoded.consumed_);
+      return frame;
     }
-    std::this_thread::sleep_for(PollInterval);
+
+    EXPECT_EQ(decoded.error_, xrpc::ProtocolError::NeedMoreData);
+    const ssize_t received = socket.Read(chunk, sizeof(chunk));
+    if (received <= 0) {
+      throw std::runtime_error("failed to receive frame");
+    }
+    buffer.append(chunk, static_cast<std::size_t>(received));
   }
-  return predicate();
 }
 
 }  // namespace
@@ -69,18 +79,16 @@ TEST(RpcServerLifecycleTest, StopUnblocksBlockingRun) {
   server.Listen("127.0.0.1", 0);
 
   bool run_returned = false;
+  std::promise<void> run_started;
+  std::future<void> run_started_future = run_started.get_future();
   std::jthread run_thread([&]() {
+    run_started.set_value();
     server.Run();
     run_returned = true;
   });
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  ASSERT_EQ(run_started_future.wait_for(WaitTimeout), std::future_status::ready);
   server.Stop();
-
-  const auto deadline = std::chrono::steady_clock::now() + WaitTimeout;
-  while (!run_returned && std::chrono::steady_clock::now() < deadline) {
-    std::this_thread::sleep_for(PollInterval);
-  }
 
   if (run_thread.joinable()) {
     run_thread.join();
@@ -242,10 +250,17 @@ TEST(RpcServerLifecycleTest, PublicStatsExposePerConnectionInflightBackpressure)
   EXPECT_TRUE(handler_started_before_timeout);
   if (handler_started_before_timeout) {
     client_socket.WriteAll(MakeRequestFrame("second", 2));
+    const std::string rejection_frame = RecvFrame(client_socket);
+    xrpc::FrameCodec codec;
+    const xrpc::DecodeResult decoded = codec.TryDecode(rejection_frame);
+    ASSERT_EQ(decoded.error_, xrpc::ProtocolError::Ok);
+    ASSERT_TRUE(decoded.response_.has_value());
+    EXPECT_EQ(decoded.response_->request_id_, 2U);
+    EXPECT_EQ(decoded.response_->error_code_, static_cast<std::int32_t>(xrpc::StatusCode::ResourceExhausted));
+    const xrpc::RpcServerStats stats = server.stats();
+    EXPECT_EQ(stats.rejected_by_inflight_limit_, 1U);
+    EXPECT_EQ(stats.rejected_by_global_pending_limit_, 0U);
   }
-
-  const bool backpressure_recorded = WaitUntil([&server]() { return server.stats().rejected_by_inflight_limit_ == 1; });
-  EXPECT_TRUE(backpressure_recorded);
 
   release_handler.set_value();
   client_socket.Close();

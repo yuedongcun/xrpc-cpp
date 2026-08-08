@@ -37,10 +37,7 @@ auto WaitTaskWithContext(xrpc::runtime::Task<T> task, xrpc::io::UringContext &co
     }
   });
 
-  const auto deadline = std::chrono::steady_clock::now() + WaitTimeout;
-  while (!task.Done() && std::chrono::steady_clock::now() < deadline) {
-    std::this_thread::sleep_for(PollInterval);
-  }
+  const bool completed = task.WaitFor(WaitTimeout);
 
   context.Stop();
   context_thread.join();
@@ -48,7 +45,7 @@ auto WaitTaskWithContext(xrpc::runtime::Task<T> task, xrpc::io::UringContext &co
     std::rethrow_exception(context_error);
   }
 
-  if (!task.Done()) {
+  if (!completed) {
     throw std::runtime_error("timed out waiting for task completion");
   }
 
@@ -118,7 +115,7 @@ TEST(IoUringAwaitableTest, StopCancelsPendingSleepFor) {
     }
   });
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  EXPECT_FALSE(task.WaitFor(std::chrono::milliseconds(5)));
   context.Stop();
   context_thread.join();
   if (context_error) {

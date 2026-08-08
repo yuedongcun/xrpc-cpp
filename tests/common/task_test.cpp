@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -50,13 +51,16 @@ TEST(RuntimeTaskTest, WaitBlocksUntilStartedTaskCompletes) {
   bool called = false;
   Task<void> task = ReturnNothing(called);
   std::atomic<bool> wait_returned = false;
+  std::promise<void> waiter_ready;
+  std::future<void> waiter_ready_future = waiter_ready.get_future();
 
-  std::jthread waiter([&task, &wait_returned]() {
+  std::jthread waiter([&task, &wait_returned, &waiter_ready]() {
+    waiter_ready.set_value();
     task.Wait();
     wait_returned.store(true, std::memory_order_release);
   });
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  ASSERT_EQ(waiter_ready_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
   EXPECT_FALSE(wait_returned.load(std::memory_order_acquire));
 
   task.Start();
