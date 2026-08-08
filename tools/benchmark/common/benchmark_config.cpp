@@ -108,10 +108,7 @@ auto ParseBenchmarkWorkload(std::string_view value) -> BenchmarkWorkload {
   if (value == "protobuf") {
     return BenchmarkWorkload::Protobuf;
   }
-  if (value == "raw") {
-    return BenchmarkWorkload::Raw;
-  }
-  throw std::invalid_argument("workload must be one of: protobuf, raw");
+  throw std::invalid_argument("workload must be protobuf");
 }
 
 auto ToString(BenchmarkClientMode mode) -> std::string_view {
@@ -128,8 +125,6 @@ auto ToString(BenchmarkWorkload workload) -> std::string_view {
   switch (workload) {
     case BenchmarkWorkload::Protobuf:
       return "protobuf";
-    case BenchmarkWorkload::Raw:
-      return "raw";
   }
   throw std::logic_error("unknown benchmark workload");
 }
@@ -162,8 +157,6 @@ auto ParseBenchmarkClientConfig(int argc, char **argv) -> BenchmarkConfig {
     if (config.firehose_inflight_ < config.firehose_connections_) {
       throw std::invalid_argument("firehose_inflight must be greater than or equal to firehose_connections");
     }
-  } else if (config.workload_ != BenchmarkWorkload::Protobuf) {
-    throw std::invalid_argument("rpc_client mode requires protobuf workload");
   }
 
   return config;
@@ -188,7 +181,7 @@ auto ParseBenchmarkServerConfig(int argc, char **argv) -> BenchmarkServerConfig 
 auto ClientUsage(const char *program) -> std::string {
   return std::string("Usage: ") + program +
          " [--payload_size=N] [--host=IP] [--port=N]"
-         " [--duration_s=N] [--workload=protobuf|raw]"
+         " [--duration_s=N] [--workload=protobuf]"
          " [--client_mode=firehose|rpc_client] [--client_threads=N]"
          " [--firehose_connections=N] [--firehose_inflight=N] [--firehose_io_threads=N]";
 }
@@ -198,7 +191,7 @@ auto ServerUsage(const char *program) -> std::string {
          " [--host=IP] [--port=N] [--server_delay_us=N]"
          " [--service_name=NAME] [--service_id=ID] [--service_address=IP] [--service_port=N]"
          " [--consul_address=HOST:PORT] [--consul_timeout_ms=N]"
-         " [--worker_threads=N] [--connection_io_threads=N] [--listen_backlog=N] [--workload=protobuf|raw]";
+         " [--worker_threads=N] [--connection_io_threads=N] [--listen_backlog=N] [--workload=protobuf]";
 }
 
 }  // namespace xrpc::benchmark

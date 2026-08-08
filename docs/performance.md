@@ -7,7 +7,7 @@
 
 ### 生产 `RpcClient`
 
-`v1_rpc_client.json` 调用公开的类型化 `RpcClient::Call()` API，包含客户端
+`v1_client.json` 调用公开的类型化 `RpcClient::Call()` API，包含客户端
 Protobuf 编码、端点选择、连接复用、请求/响应匹配、解码和唤醒同步调用者。
 它最接近真实客户端路径，但不能代表服务端最大吞吐。
 
@@ -16,11 +16,6 @@ Protobuf 编码、端点选择、连接复用、请求/响应匹配、解码和�
 类型化 Firehose 发送预序列化的 Echo request frame，并校验完整响应。服务端
 仍然执行分帧、方法查找、Protobuf 解析、handler 分发、响应序列化和组帧。
 它用于隔离服务端容量和生产客户端开销。
-
-### Raw Firehose
-
-raw workload 不解释 payload，用于分离 frame、socket、调度、背压和写队列成本。
-raw 结果只是运行时上界，不是类型化 RPC 容量结论。
 
 ## 测试环境与口径
 
@@ -40,30 +35,15 @@ CPU affinity 和编译器属于这次历史测量环境的一部分。换机器�
 
 ## 代表性结果
 
-`v1_protobuf_capacity.json` 的类型化服务端容量：
-
-| 总在途请求 | QPS 中位数 | p99 中位数 | 失败数 |
-| ---: | ---: | ---: | ---: |
-| 12 | 23,508 | 0.88 ms | 0 |
-| 48 | 92,009 | 0.90 ms | 0 |
-| 192 | 166,923 | 2.03 ms | 0 |
-| 768 | 336,027 | 5.76 ms | 0 |
-| 1536 | 399,078 | 8.55 ms | 0 |
-
-`v1_protobuf_steady_state.json` 的代表性稳态点：
+`v1_firehose.json` 的代表性服务端工作点：
 
 | 工作点 | QPS 中位数 | p99 中位数 | 失败数 |
 | --- | ---: | ---: | ---: |
 | 低延迟，48 in-flight | 96,103 | 0.86 ms | 0 |
 | 饱和点，1536 in-flight | 414,743 | 8.08 ms | 0 |
 
-`v1_protobuf_ceiling_verify.json` 在 12 条连接、1536 个在途请求下达到
-422,391 QPS，p99 为 8.14 ms，失败数为 0。更深的队列达到约 467,000 QPS，
-但 p99 上升到 35.83 ms；它是吞吐观测点，不是推荐工作点。
-
-`v1_rpc_client.json` 在 24 个调用线程下达到 40,930 QPS，p99 为 0.96 ms，
-失败数为 0。`v1_raw_high_load.json` 达到约 606,000 QPS，但不包含类型化
-序列化和服务分发。
+`v1_client.json` 在 24 个调用线程下达到 40,930 QPS，p99 为 0.96 ms，
+失败数为 0。
 
 ## 性能工程取舍
 
@@ -100,7 +80,7 @@ make
 
 ```bash
 ./tools/benchmark/run_suite.py \
-  --config tools/benchmark/configs/v1_smoke.json \
+  --config tools/benchmark/configs/v1_firehose.json \
   --build
 ```
 
@@ -108,19 +88,11 @@ make
 
 ```bash
 ./tools/benchmark/run_suite.py \
-  --config tools/benchmark/configs/v1_protobuf_steady_state.json \
+  --config tools/benchmark/configs/v1_firehose.json \
   --build
 
 ./tools/benchmark/run_suite.py \
-  --config tools/benchmark/configs/v1_protobuf_ceiling_verify.json \
-  --build
-
-./tools/benchmark/run_suite.py \
-  --config tools/benchmark/configs/v1_rpc_client.json \
-  --build
-
-./tools/benchmark/run_suite.py \
-  --config tools/benchmark/configs/v1_raw_high_load.json \
+  --config tools/benchmark/configs/v1_client.json \
   --build
 ```
 
@@ -136,5 +108,4 @@ make
 - 结果是单机 loopback 测量；
 - workload 是 Echo，不代表真实业务流量；
 - CPU 频率、温度、内核和后台负载都会影响结果；
-- Raw Firehose 不代表类型化生产 RPC 容量；
 - 项目不承诺生产 SLA，也不兼容 gRPC 线协议。

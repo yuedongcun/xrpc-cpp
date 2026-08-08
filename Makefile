@@ -2,7 +2,7 @@ BUILD_DIR ?= build
 CMAKE_ARGS ?=
 
 .DEFAULT_GOAL := all
-.PHONY: all configure test ci clean
+.PHONY: all configure test clean
 
 configure:
 	cmake -S . -B $(BUILD_DIR) \
@@ -18,9 +18,6 @@ test: all
 	ctest --test-dir $(BUILD_DIR)/tests \
 		--output-on-failure \
 		-LE "external|tooling"
-
-ci:
-	./tools/ci/local_ci.sh
 
 clean:
 	rm -rf $(BUILD_DIR)

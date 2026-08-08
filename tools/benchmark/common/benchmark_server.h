@@ -23,12 +23,7 @@ class BenchmarkServer final {
   [[nodiscard]] auto stats() const -> RpcServerStats;
 
  private:
-  // RawRuntime is benchmark-only glue for the raw protocol workload. It avoids
-  // restoring broader production abstractions just to run capacity tests.
-  struct RawRuntime;
-
   std::unique_ptr<RpcServer> server_;
-  std::unique_ptr<RawRuntime> raw_runtime_;
   std::uint64_t delay_us_;
   std::size_t listen_backlog_;
   std::jthread server_thread_;

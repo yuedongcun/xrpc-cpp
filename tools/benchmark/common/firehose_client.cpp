@@ -151,10 +151,6 @@ auto BuildRequestHeaderBytes() -> std::string {
 
 auto BuildBenchmarkPayload(const BenchmarkConfig &config) -> BenchmarkPayload {
   const std::string message(config.payload_size_, 'x');
-  if (config.workload_ == BenchmarkWorkload::Raw) {
-    return {.request_ = message, .expected_response_ = message};
-  }
-
   EchoRequest request;
   request.set_message(message);
   EchoResponse response;

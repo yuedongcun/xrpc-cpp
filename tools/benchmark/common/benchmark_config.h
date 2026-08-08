@@ -13,7 +13,6 @@ namespace xrpc::benchmark {
 // Workload controls the server/client serialization path under test.
 enum class BenchmarkWorkload : std::uint8_t {
   Protobuf,
-  Raw,
 };
 
 // Client mode separates server-capacity load generation from the production client path.
@@ -31,7 +30,7 @@ struct BenchmarkConfig {
   std::size_t client_threads_ = 1;
   std::size_t firehose_connections_ = 1;
   std::uint64_t duration_s_ = 0;
-  BenchmarkWorkload workload_ = BenchmarkWorkload::Raw;
+  BenchmarkWorkload workload_ = BenchmarkWorkload::Protobuf;
   std::size_t firehose_inflight_ = 0;
   std::size_t firehose_io_threads_ = 0;
 };
@@ -42,7 +41,7 @@ struct BenchmarkServerConfig {
   std::string host_ = "127.0.0.1";
   std::uint16_t port_ = 9010;
   std::uint64_t server_delay_us_ = 0;
-  BenchmarkWorkload workload_ = BenchmarkWorkload::Raw;
+  BenchmarkWorkload workload_ = BenchmarkWorkload::Protobuf;
   RpcServerOptions server_options_;
 };
 

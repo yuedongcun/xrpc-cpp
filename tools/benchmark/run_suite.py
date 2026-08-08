@@ -206,62 +206,62 @@ def require_str_or_none(config, name):
 def load_benchmark_config(config_path):
     try:
         with config_path.open("r", encoding="utf-8") as config_file:
-            raw_config = json.load(config_file)
+            config_json = json.load(config_file)
     except OSError as error:
         raise RuntimeError(f"failed to read config file {config_path}: {error}") from error
     except json.JSONDecodeError as error:
         raise RuntimeError(f"invalid JSON config file {config_path}: {error}") from error
 
-    if not isinstance(raw_config, dict):
+    if not isinstance(config_json, dict):
         raise RuntimeError("benchmark config must be a JSON object")
 
     allowed_keys = REQUIRED_CONFIG_KEYS | OPTIONAL_CONFIG_KEYS
-    unknown_keys = sorted(set(raw_config) - allowed_keys)
-    missing_keys = sorted(REQUIRED_CONFIG_KEYS - set(raw_config))
+    unknown_keys = sorted(set(config_json) - allowed_keys)
+    missing_keys = sorted(REQUIRED_CONFIG_KEYS - set(config_json))
     if unknown_keys:
         raise RuntimeError("unknown benchmark config keys: " + ", ".join(unknown_keys))
     if missing_keys:
         raise RuntimeError("missing benchmark config keys: " + ", ".join(missing_keys))
 
     try:
-        description = raw_config.get("description", "")
+        description = config_json.get("description", "")
         if not isinstance(description, str):
             raise ValueError("description must be a string")
 
-        workload = raw_config.get("workload", "raw")
-        if workload not in ("protobuf", "raw"):
-            raise ValueError("workload must be one of: protobuf, raw")
+        workload = config_json.get("workload", "protobuf")
+        if workload != "protobuf":
+            raise ValueError("workload must be protobuf")
 
-        client_mode = raw_config.get("client_mode", "firehose")
+        client_mode = config_json.get("client_mode", "firehose")
         if client_mode not in ("firehose", "rpc_client"):
             raise ValueError("client_mode must be one of: firehose, rpc_client")
 
-        server_lifecycle = raw_config.get("server_lifecycle", "per_case")
+        server_lifecycle = config_json.get("server_lifecycle", "per_case")
         if server_lifecycle not in ("per_case", "per_suite"):
             raise ValueError("server_lifecycle must be one of: per_case, per_suite")
 
         normalized = BenchmarkConfig(
             client_mode=client_mode,
             workload=workload,
-            duration=require_int(raw_config, "duration"),
-            warmup_duration=raw_config.get("warmup_duration", 0),
-            repetitions=raw_config.get("repetitions", 1),
-            payload_size=require_int(raw_config, "payload_size"),
-            server_delay_us=require_int(raw_config, "server_delay_us"),
-            server_worker_threads=require_int(raw_config, "server_worker_threads"),
-            server_connection_io_threads=require_int(raw_config, "server_connection_io_threads"),
-            server_listen_backlog=require_int(raw_config, "server_listen_backlog"),
+            duration=require_int(config_json, "duration"),
+            warmup_duration=config_json.get("warmup_duration", 0),
+            repetitions=config_json.get("repetitions", 1),
+            payload_size=require_int(config_json, "payload_size"),
+            server_delay_us=require_int(config_json, "server_delay_us"),
+            server_worker_threads=require_int(config_json, "server_worker_threads"),
+            server_connection_io_threads=require_int(config_json, "server_connection_io_threads"),
+            server_listen_backlog=require_int(config_json, "server_listen_backlog"),
             server_lifecycle=server_lifecycle,
-            server_cpus=require_str_or_none(raw_config, "server_cpus"),
-            client_cpus=require_str_or_none(raw_config, "client_cpus"),
-            host=raw_config["host"],
-            port=require_int(raw_config, "port"),
-            run_timeout=require_int(raw_config, "run_timeout"),
-            client_threads=raw_config.get("client_threads", [1]),
-            firehose_cases=raw_config.get("firehose_cases"),
-            firehose_connections=raw_config.get("firehose_connections", [1]),
-            firehose_inflight=raw_config.get("firehose_inflight", [1]),
-            firehose_io_threads=raw_config.get("firehose_io_threads", 0),
+            server_cpus=require_str_or_none(config_json, "server_cpus"),
+            client_cpus=require_str_or_none(config_json, "client_cpus"),
+            host=config_json["host"],
+            port=require_int(config_json, "port"),
+            run_timeout=require_int(config_json, "run_timeout"),
+            client_threads=config_json.get("client_threads", [1]),
+            firehose_cases=config_json.get("firehose_cases"),
+            firehose_connections=config_json.get("firehose_connections", [1]),
+            firehose_inflight=config_json.get("firehose_inflight", [1]),
+            firehose_io_threads=config_json.get("firehose_io_threads", 0),
             description=description,
         )
         validate_benchmark_config(normalized)
@@ -319,8 +319,6 @@ def validate_benchmark_config(config):
     else:
         if config.firehose_cases is not None:
             raise ValueError("firehose_cases is only valid in firehose mode")
-        if config.workload != "protobuf":
-            raise ValueError("rpc_client mode requires workload=protobuf")
         positive_int_or_list(config.client_threads, "client_threads")
 
     if (config.server_cpus is None) != (config.client_cpus is None):
@@ -1306,7 +1304,7 @@ def write_summary(output_dir, config, rows, affinity, server_worker_threads):
             "## Audit Notes",
             "",
             "- `Success QPS` excludes failed calls from the benchmark-reported total QPS.",
-            "- Payload size means raw payload bytes for `raw` and Echo message bytes before Protobuf encoding for `protobuf`.",
+            "- Payload size means Echo message bytes before Protobuf encoding.",
             "- Inspect `runs.csv` and `logs/` before accepting a performance conclusion.",
             "- This suite starts external benchmark server process(es) according to `server_lifecycle`.",
             "- Perf runs generate `.data`, `.report.txt`, `.script.txt`, `.folded`, `.flamegraph.svg`, and `.artifacts.log` when the local tools are available.",

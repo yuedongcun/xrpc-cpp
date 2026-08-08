@@ -222,50 +222,8 @@ xrpc_add_test(
 )
 
 xrpc_add_benchmark_config_test(
-    benchmark_v1_smoke_config_test v1_smoke.json smoke
+    benchmark_v1_firehose_config_test v1_firehose.json firehose
 )
 xrpc_add_benchmark_config_test(
-    benchmark_v1_server_capacity_config_test v1_server_capacity.json
-)
-xrpc_add_benchmark_config_test(
-    benchmark_v1_protobuf_smoke_config_test v1_protobuf_smoke.json protobuf smoke
-)
-xrpc_add_benchmark_config_test(
-    benchmark_v1_protobuf_capacity_config_test v1_protobuf_capacity.json protobuf
-)
-xrpc_add_benchmark_config_test(
-    benchmark_v1_rpc_client_config_test v1_rpc_client.json client
-)
-xrpc_add_benchmark_config_test(
-    benchmark_v1_raw_high_load_config_test v1_raw_high_load.json
-)
-xrpc_add_benchmark_config_test(
-    benchmark_v1_protobuf_steady_state_config_test
-    v1_protobuf_steady_state.json
-    protobuf
-)
-xrpc_add_benchmark_config_test(
-    benchmark_v1_protobuf_ceiling_connections_config_test
-    v1_protobuf_ceiling_connections.json
-    protobuf
-)
-xrpc_add_benchmark_config_test(
-    benchmark_v1_protobuf_ceiling_load_config_test
-    v1_protobuf_ceiling_load.json
-    protobuf
-)
-xrpc_add_benchmark_config_test(
-    benchmark_v1_protobuf_ceiling_boundary_config_test
-    v1_protobuf_ceiling_boundary.json
-    protobuf
-)
-xrpc_add_benchmark_config_test(
-    benchmark_v1_protobuf_ceiling_verify_config_test
-    v1_protobuf_ceiling_verify.json
-    protobuf
-)
-xrpc_add_benchmark_config_test(
-    benchmark_v1_protobuf_overload_probe_config_test
-    v1_protobuf_overload_probe.json
-    protobuf
+    benchmark_v1_client_config_test v1_client.json client
 )
