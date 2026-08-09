@@ -3,7 +3,7 @@
 #include <string>
 #include <string_view>
 
-#include <xrpc/xrpc_exception.h>
+#include "rpc/xrpc_exception.h"
 
 namespace xrpc {
 

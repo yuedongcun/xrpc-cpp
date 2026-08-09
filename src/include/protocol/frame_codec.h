@@ -25,7 +25,7 @@ struct ProtocolLimits {
   static constexpr std::size_t DEFAULT_MAX_HEADER_SIZE = 64U * 1024U;
 
   /** @brief Default cap for opaque request or response payloads. */
-  static constexpr std::size_t DEFAULT_MAX_PAYLOAD_SIZE = DefaultMaxPayloadSize;
+  static constexpr std::size_t DEFAULT_MAX_PAYLOAD_SIZE = xrpc::DEFAULT_MAX_PAYLOAD_SIZE;
 
   /** @brief Default cap for a full wire frame, including fixed prefix, metadata, and payload. */
   static constexpr std::size_t DEFAULT_MAX_FRAME_SIZE =

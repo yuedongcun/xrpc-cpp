@@ -45,22 +45,29 @@ make
 服务端：
 
 ```cpp
-xrpc::RpcServer server;
-server.RegisterMethod<EchoRequest, EchoResponse>(
+auto server_result = xrpc::RpcServer::Create();
+if (!server_result.ok()) return 1;
+
+auto server = std::move(server_result).value();
+auto status = server.RegisterMethod<EchoRequest, EchoResponse>(
     "EchoService", "Echo", [](const EchoRequest &request) {
       EchoResponse response;
       response.set_message("echo: " + request.message());
       return response;
     });
-server.Listen("127.0.0.1", 9000);
-server.Run();
+if (status.ok()) status = server.Listen("127.0.0.1", 9000);
+if (status.ok()) status = server.Run();
 ```
 
 客户端：
 
 ```cpp
-xrpc::RpcClient client("127.0.0.1", 9000);
+auto client_result = xrpc::RpcClient::Create("127.0.0.1", 9000);
+if (!client_result.ok()) return 1;
+
+auto client = std::move(client_result).value();
 auto response = client.Call<EchoResponse>("EchoService", "Echo", request);
+if (!response.ok()) return 1;
 ```
 
 ## 性能

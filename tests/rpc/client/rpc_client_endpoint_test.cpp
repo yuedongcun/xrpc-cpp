@@ -12,7 +12,6 @@
 #include <vector>
 
 #include <xrpc/rpc_client.h>
-#include <xrpc/xrpc_exception.h>
 
 #include "io/socket.h"
 #include "proto/echo.pb.h"
@@ -156,7 +155,9 @@ TEST(RpcClientEndpointTest, CallFallsBackToNextEndpointOnConnectFailure) {
   request.set_message("hello");
 
   {
-    xrpc::RpcClient client(std::move(options));
+    xrpc::StatusOr<xrpc::RpcClient> client_result = xrpc::RpcClient::Create(options);
+    ASSERT_TRUE(client_result.ok()) << client_result.status().message();
+    xrpc::RpcClient client = std::move(client_result).value();
     const xrpc::StatusOr<xrpc::test::EchoResponse> response =
         client.Call<xrpc::test::EchoResponse>("EchoService", "Echo", request);
     ASSERT_TRUE(response.ok()) << response.status().message();
@@ -185,7 +186,9 @@ TEST(RpcClientEndpointTest, InitUsesDefaultMultiplexedConnection) {
   xrpc::RpcClientOptions options;
   options.target_ = "list://127.0.0.1:" + std::to_string(server.port());
 
-  xrpc::RpcClient client(std::move(options));
+  xrpc::StatusOr<xrpc::RpcClient> client_result = xrpc::RpcClient::Create(options);
+  ASSERT_TRUE(client_result.ok()) << client_result.status().message();
+  xrpc::RpcClient client = std::move(client_result).value();
   const xrpc::Status status = client.Init();
 
   EXPECT_TRUE(status.ok()) << status.message();
@@ -237,7 +240,9 @@ TEST(RpcClientEndpointTest, MultiplexedConnectionRoutesByStickyKeyAndReusesPerEn
   options_b.sticky_key_ = StickyKeyForEndpoint(MakeLoopbackEndpointId(endpoint1_server.port()), endpoint_ids);
 
   {
-    xrpc::RpcClient client(std::move(options));
+    xrpc::StatusOr<xrpc::RpcClient> client_result = xrpc::RpcClient::Create(options);
+    ASSERT_TRUE(client_result.ok()) << client_result.status().message();
+    xrpc::RpcClient client = std::move(client_result).value();
 
     const xrpc::StatusOr<xrpc::test::EchoResponse> first_response =
         client.Call<xrpc::test::EchoResponse>("EchoService", "Echo", request, options_a);
@@ -265,18 +270,22 @@ TEST(RpcClientEndpointTest, MultiplexedConnectionRoutesByStickyKeyAndReusesPerEn
   }
 }
 
-TEST(RpcClientEndpointTest, RejectsEmptyTargetAtConstruction) {
+TEST(RpcClientEndpointTest, RejectsEmptyTargetAtCreation) {
   xrpc::RpcClientOptions options;
 
-  EXPECT_THROW(static_cast<void>(xrpc::RpcClient(std::move(options))), xrpc::ConfigException);
+  const xrpc::StatusOr<xrpc::RpcClient> result = xrpc::RpcClient::Create(options);
+  ASSERT_FALSE(result.ok());
+  EXPECT_EQ(result.status().code(), xrpc::StatusCode::InvalidArgument);
 }
 
-TEST(RpcClientEndpointTest, RejectsZeroMaxPayloadSizeAtConstruction) {
+TEST(RpcClientEndpointTest, RejectsZeroMaxPayloadSizeAtCreation) {
   xrpc::RpcClientOptions options;
   options.target_ = "list://127.0.0.1:9000";
   options.max_payload_size_ = 0;
 
-  EXPECT_THROW(static_cast<void>(xrpc::RpcClient(std::move(options))), xrpc::ConfigException);
+  const xrpc::StatusOr<xrpc::RpcClient> result = xrpc::RpcClient::Create(options);
+  ASSERT_FALSE(result.ok());
+  EXPECT_EQ(result.status().code(), xrpc::StatusCode::InvalidArgument);
 }
 
 TEST(RpcClientEndpointTest, CallPayloadRejectsPayloadLargerThanConfiguredLimitBeforeConnect) {
@@ -284,7 +293,9 @@ TEST(RpcClientEndpointTest, CallPayloadRejectsPayloadLargerThanConfiguredLimitBe
   options.target_ = "list://127.0.0.1:1";
   options.max_payload_size_ = 3;
 
-  xrpc::RpcClient client(std::move(options));
+  xrpc::StatusOr<xrpc::RpcClient> client_result = xrpc::RpcClient::Create(options);
+  ASSERT_TRUE(client_result.ok()) << client_result.status().message();
+  xrpc::RpcClient client = std::move(client_result).value();
   const xrpc::StatusOr<std::string> response = client.CallPayload("EchoService", "Echo", "1234");
 
   ASSERT_FALSE(response.ok());
@@ -295,7 +306,9 @@ TEST(RpcClientEndpointTest, CallRejectsNegativeTimeout) {
   xrpc::RpcClientOptions options;
   options.target_ = "list://127.0.0.1:9000";
 
-  xrpc::RpcClient client(std::move(options));
+  xrpc::StatusOr<xrpc::RpcClient> client_result = xrpc::RpcClient::Create(options);
+  ASSERT_TRUE(client_result.ok()) << client_result.status().message();
+  xrpc::RpcClient client = std::move(client_result).value();
   xrpc::CallOptions call_options;
   call_options.timeout_ = std::chrono::milliseconds(-1);
 

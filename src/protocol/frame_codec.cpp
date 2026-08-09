@@ -10,7 +10,7 @@
 #include <string_view>
 #include <utility>
 
-#include <xrpc/xrpc_exception.h>
+#include "rpc/xrpc_exception.h"
 
 namespace xrpc {
 namespace {

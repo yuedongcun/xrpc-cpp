@@ -3,7 +3,7 @@
 #include <string>
 #include <utility>
 
-#include <xrpc/xrpc_exception.h>
+#include "rpc/xrpc_exception.h"
 
 #include "rpc/client/client_config.h"
 

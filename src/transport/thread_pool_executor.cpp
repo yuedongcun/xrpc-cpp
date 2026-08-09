@@ -4,7 +4,7 @@
 #include <stdexcept>
 #include <utility>
 
-#include <xrpc/xrpc_exception.h>
+#include "rpc/xrpc_exception.h"
 
 namespace xrpc {
 namespace {

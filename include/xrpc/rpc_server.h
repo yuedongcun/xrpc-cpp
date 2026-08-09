@@ -10,6 +10,7 @@
 
 #include <xrpc/method_registration.h>
 #include <xrpc/protocol_options.h>
+#include <xrpc/status_or.h>
 
 namespace xrpc {
 
@@ -43,7 +44,7 @@ struct RpcServerOptions {
   std::chrono::milliseconds connection_idle_timeout_{0};
 
   /** @brief Maximum accepted request or response payload size. */
-  std::size_t max_payload_size_ = DefaultMaxPayloadSize;
+  std::size_t max_payload_size_ = DEFAULT_MAX_PAYLOAD_SIZE;
 
   /** @brief Optional service name to register in Consul. Empty means no Consul registration. */
   std::string service_name_;
@@ -103,15 +104,14 @@ struct RpcServerStats {
  */
 class RpcServer final {
  public:
-  /** @brief Creates a server with default runtime and protocol limits. */
-  RpcServer();
-
   /**
-   * @brief Creates a server with explicit runtime, resource, and registration options.
+   * @brief Creates a server with validated runtime, resource, and registration options.
    *
-   * @param options Server options copied into the controller at construction time.
+   * @param options Server options copied into the controller at construction time. Defaults are suitable for a basic
+   * server.
+   * @return A server, or a status describing configuration or runtime initialization failure.
    */
-  explicit RpcServer(const RpcServerOptions &options);
+  [[nodiscard]] static auto Create(const RpcServerOptions &options = {}) -> StatusOr<RpcServer>;
 
   /** @brief Stops the server runtime if it is still active. */
   ~RpcServer();
@@ -136,9 +136,13 @@ class RpcServer final {
    * @param func Callable that accepts a `Request` and returns a `Response`.
    */
   template <typename Request, typename Response, typename Func>
-  void RegisterMethod(std::string service_name, std::string method_name, Func func) {
-    RegisterMethodRegistration(
-        MakeMethodRegistration<Request, Response>(std::move(service_name), std::move(method_name), std::move(func)));
+  [[nodiscard]] auto RegisterMethod(std::string service_name, std::string method_name, Func func) -> Status {
+    StatusOr<MethodRegistration> registration =
+        MakeMethodRegistration<Request, Response>(std::move(service_name), std::move(method_name), std::move(func));
+    if (!registration.ok()) {
+      return registration.status();
+    }
+    return RegisterMethodRegistration(std::move(registration).value());
   }
 
   /**
@@ -147,7 +151,7 @@ class RpcServer final {
    * @param host Local address to bind.
    * @param port Local TCP port. A zero port lets the OS choose an available port.
    */
-  void Listen(std::string_view host, std::uint16_t port);
+  [[nodiscard]] auto Listen(std::string_view host, std::uint16_t port) -> Status;
 
   /**
    * @brief Runs the server event loop until `Stop()` or an unrecoverable runtime error.
@@ -155,7 +159,7 @@ class RpcServer final {
    * `Run()` is a blocking call and is not reentrant. Handler execution happens on the worker pool while connection I/O
    * remains on the connection event-loop threads.
    */
-  void Run();
+  [[nodiscard]] auto Run() -> Status;
 
   /**
    * @brief Requests server shutdown.
@@ -166,7 +170,7 @@ class RpcServer final {
   void Stop();
 
   /** @return The bound TCP port after `Listen()` succeeds. */
-  [[nodiscard]] auto port() const -> std::uint16_t;
+  [[nodiscard]] auto port() const -> StatusOr<std::uint16_t>;
 
   /** @return A point-in-time snapshot of server resource guard diagnostics. */
   [[nodiscard]] auto stats() const -> RpcServerStats;
@@ -174,8 +178,11 @@ class RpcServer final {
  private:
   class ServerController;
 
+  /** @brief Creates a facade from a successfully constructed private controller. */
+  explicit RpcServer(std::unique_ptr<ServerController> controller);
+
   /** @brief Registers one type-erased method descriptor with the private controller. */
-  void RegisterMethodRegistration(MethodRegistration registration);
+  [[nodiscard]] auto RegisterMethodRegistration(MethodRegistration registration) -> Status;
 
   std::unique_ptr<ServerController> controller_;
 };

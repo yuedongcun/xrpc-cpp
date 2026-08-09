@@ -1,6 +1,6 @@
 #include "transport/byte_buffer.h"
 
-#include <xrpc/xrpc_exception.h>
+#include "rpc/xrpc_exception.h"
 
 namespace xrpc {
 

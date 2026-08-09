@@ -164,7 +164,9 @@ TEST(RpcClientThreadSafetyTest, ConnectionSupportsConcurrentCallsOnSharedConnect
   options.timeout_ = std::chrono::milliseconds(2000);
 
   {
-    xrpc::RpcClient client(std::move(options));
+    xrpc::StatusOr<xrpc::RpcClient> client_result = xrpc::RpcClient::Create(options);
+    ASSERT_TRUE(client_result.ok()) << client_result.status().message();
+    xrpc::RpcClient client = std::move(client_result).value();
     RunConcurrentCalls(client, 4);
   }
 
@@ -197,7 +199,9 @@ TEST(RpcClientThreadSafetyTest, MaxInflightPerEndpointFailsFastWithoutSendingSec
   options.timeout_ = std::chrono::milliseconds(2000);
   options.max_inflight_per_endpoint_ = 1;
 
-  xrpc::RpcClient client(std::move(options));
+  xrpc::StatusOr<xrpc::RpcClient> client_result = xrpc::RpcClient::Create(options);
+  ASSERT_TRUE(client_result.ok()) << client_result.status().message();
+  xrpc::RpcClient client = std::move(client_result).value();
   xrpc::StatusOr<xrpc::test::EchoResponse> first_response(xrpc::Status{xrpc::StatusCode::Internal, "not set"});
   std::jthread first_call_thread([&]() {
     xrpc::test::EchoRequest request;

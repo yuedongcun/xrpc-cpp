@@ -1,9 +1,11 @@
 #include <xrpc/rpc_client.h>
 
 #include <memory>
+#include <string>
 #include <utility>
 
 #include "rpc/client/rpc_client_runtime.h"
+#include "rpc/xrpc_exception.h"
 
 namespace xrpc {
 
@@ -16,15 +18,28 @@ namespace xrpc {
  * @param host Server host name or numeric address.
  * @param port Server TCP port.
  */
-RpcClient::RpcClient(std::string host, std::uint16_t port)
-    : RpcClient(RpcClientOptions{.target_ = "list://" + std::move(host) + ":" + std::to_string(port)}) {}
+auto RpcClient::Create(std::string host, std::uint16_t port) -> StatusOr<RpcClient> {
+  try {
+    return Create(RpcClientOptions{.target_ = "list://" + std::move(host) + ":" + std::to_string(port)});
+  } catch (...) {
+    return StatusOr<RpcClient>(CaughtExceptionToStatus("failed to create RPC client"));
+  }
+}
 
 /**
  * @brief Creates the private client runtime from explicit public options.
  *
  * @param options Target, resolver, protocol, timeout, and concurrency settings.
  */
-RpcClient::RpcClient(const RpcClientOptions &options) : runtime_(std::make_unique<ClientRuntime>(options)) {}
+auto RpcClient::Create(const RpcClientOptions &options) -> StatusOr<RpcClient> {
+  try {
+    return StatusOr<RpcClient>(RpcClient(std::make_unique<ClientRuntime>(options)));
+  } catch (...) {
+    return StatusOr<RpcClient>(CaughtExceptionToStatus("failed to create RPC client"));
+  }
+}
+
+RpcClient::RpcClient(std::unique_ptr<ClientRuntime> runtime) : runtime_(std::move(runtime)) {}
 
 /** @brief Stops resolver and transport state through `ClientRuntime` destruction. */
 RpcClient::~RpcClient() = default;
@@ -40,7 +55,13 @@ auto RpcClient::operator=(RpcClient &&) noexcept -> RpcClient & = default;
  *
  * @return `Status::Ok()` when the client can issue calls, otherwise a resolver/configuration status.
  */
-auto RpcClient::Init() -> Status { return runtime_->Init(); }
+auto RpcClient::Init() -> Status {
+  try {
+    return runtime_->Init();
+  } catch (...) {
+    return CaughtExceptionToStatus("failed to initialize RPC client");
+  }
+}
 
 /**
  * @brief Sends a raw payload request through the private runtime and returns only the response body.
@@ -53,17 +74,21 @@ auto RpcClient::Init() -> Status { return runtime_->Init(); }
  */
 auto RpcClient::CallPayload(std::string service_name, std::string method_name, std::string payload,
                             const CallOptions &options) -> StatusOr<std::string> {
-  PayloadRequest request;
-  request.request_id_ = NextRequestId();
-  request.service_name_ = std::move(service_name);
-  request.method_name_ = std::move(method_name);
-  request.payload_ = std::move(payload);
+  try {
+    PayloadRequest request;
+    request.request_id_ = NextRequestId();
+    request.service_name_ = std::move(service_name);
+    request.method_name_ = std::move(method_name);
+    request.payload_ = std::move(payload);
 
-  StatusOr<PayloadResponse> result = CallPayloadRequest(request, options);
-  if (!result.ok()) {
-    return StatusOr<std::string>(result.status());
+    StatusOr<PayloadResponse> result = CallPayloadRequest(request, options);
+    if (!result.ok()) {
+      return StatusOr<std::string>(result.status());
+    }
+    return StatusOr<std::string>(std::move(result.value().payload_));
+  } catch (...) {
+    return StatusOr<std::string>(CaughtExceptionToStatus("RPC call failed"));
   }
-  return StatusOr<std::string>(std::move(result.value().payload_));
 }
 
 /**

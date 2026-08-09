@@ -107,23 +107,39 @@ auto MakeEchoHandler(std::uint64_t delay_us) {
 auto main(int argc, char **argv) -> int {
   try {
     xrpc::benchmark::ServerConfig config = xrpc::benchmark::ParseConfig(argc, argv);
-    xrpc::RpcServer server(config.options_);
-    server.RegisterMethod<xrpc::benchmark::EchoRequest, xrpc::benchmark::EchoResponse>(
+    xrpc::StatusOr<xrpc::RpcServer> server_result = xrpc::RpcServer::Create(config.options_);
+    if (!server_result.ok()) {
+      throw std::runtime_error(server_result.status().message());
+    }
+    xrpc::RpcServer server = std::move(server_result).value();
+    xrpc::Status status = server.RegisterMethod<xrpc::benchmark::EchoRequest, xrpc::benchmark::EchoResponse>(
         std::string(xrpc::benchmark::SERVICE_NAME), std::string(xrpc::benchmark::METHOD_NAME),
         xrpc::benchmark::MakeEchoHandler(config.delay_us_));
+    if (!status.ok()) {
+      throw std::runtime_error(status.message());
+    }
 
     std::signal(SIGINT, xrpc::benchmark::HandleSignal);
     std::signal(SIGTERM, xrpc::benchmark::HandleSignal);
 
-    server.Listen(config.host_, config.port_);
-    std::jthread server_thread([&server]() { server.Run(); });
+    status = server.Listen(config.host_, config.port_);
+    if (!status.ok()) {
+      throw std::runtime_error(status.message());
+    }
+    std::jthread server_thread([&server]() { (void)server.Run(); });
+
+    const xrpc::StatusOr<std::uint16_t> port_result = server.port();
+    if (!port_result.ok()) {
+      throw std::runtime_error(port_result.status().message());
+    }
 
     std::printf(
         "ready host=%s port=%u worker_threads=%zu connection_io_threads=%zu delay_us=%llu "
         "max_inflight_per_connection=%zu max_write_queue_bytes_per_connection=%zu max_pending_jobs_global=%zu\n",
-        config.host_.c_str(), server.port(), config.options_.worker_threads_, config.options_.connection_io_threads_,
-        static_cast<unsigned long long>(config.delay_us_), config.options_.max_inflight_per_connection_,
-        config.options_.max_write_queue_bytes_per_connection_, config.options_.max_pending_jobs_global_);
+        config.host_.c_str(), port_result.value(), config.options_.worker_threads_,
+        config.options_.connection_io_threads_, static_cast<unsigned long long>(config.delay_us_),
+        config.options_.max_inflight_per_connection_, config.options_.max_write_queue_bytes_per_connection_,
+        config.options_.max_pending_jobs_global_);
     std::fflush(stdout);
 
     while (!xrpc::benchmark::stop_requested.load(std::memory_order_relaxed)) {

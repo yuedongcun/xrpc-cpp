@@ -105,7 +105,11 @@ auto MakeClient(const ClientConfig &config) -> std::unique_ptr<RpcClient> {
   options.timeout_ = std::chrono::duration_cast<std::chrono::milliseconds>(CALL_TIMEOUT);
   options.max_inflight_per_endpoint_ = std::max<std::size_t>(1024, config.threads_);
 
-  auto client = std::make_unique<RpcClient>(options);
+  StatusOr<RpcClient> client_result = RpcClient::Create(options);
+  if (!client_result.ok()) {
+    throw std::runtime_error("RpcClient creation failed: " + client_result.status().message());
+  }
+  auto client = std::make_unique<RpcClient>(std::move(client_result).value());
   const Status init_status = client->Init();
   if (!init_status.ok()) {
     throw std::runtime_error("RpcClient initialization failed: " + init_status.message());

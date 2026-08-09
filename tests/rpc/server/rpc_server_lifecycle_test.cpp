@@ -11,7 +11,6 @@
 
 #include <xrpc/rpc_client.h>
 #include <xrpc/rpc_server.h>
-#include <xrpc/xrpc_exception.h>
 
 #include "io/socket.h"
 #include "io/socket_error.h"
@@ -29,6 +28,14 @@ auto Echo(const xrpc::test::EchoRequest &request) -> xrpc::test::EchoResponse {
   xrpc::test::EchoResponse response;
   response.set_message(request.message());
   return response;
+}
+
+auto MakeServer() -> xrpc::RpcServer {
+  xrpc::StatusOr<xrpc::RpcServer> result = xrpc::RpcServer::Create();
+  if (!result.ok()) {
+    throw std::runtime_error(result.status().message());
+  }
+  return std::move(result).value();
 }
 
 auto MakeRequestFrame(std::string message, std::uint64_t request_id) -> std::string {
@@ -69,21 +76,22 @@ auto RecvFrame(xrpc::io::Socket &socket) -> std::string {
 
 }  // namespace
 
-TEST(RpcServerLifecycleTest, RunBeforeListenThrows) {
-  xrpc::RpcServer server;
-  EXPECT_THROW(server.Run(), xrpc::LifecycleException);
+TEST(RpcServerLifecycleTest, RunBeforeListenReturnsFailedPrecondition) {
+  xrpc::RpcServer server = MakeServer();
+  const xrpc::Status status = server.Run();
+  EXPECT_EQ(status.code(), xrpc::StatusCode::FailedPrecondition);
 }
 
 TEST(RpcServerLifecycleTest, StopUnblocksBlockingRun) {
-  xrpc::RpcServer server;
-  server.Listen("127.0.0.1", 0);
+  xrpc::RpcServer server = MakeServer();
+  ASSERT_TRUE(server.Listen("127.0.0.1", 0).ok());
 
   bool run_returned = false;
   std::promise<void> run_started;
   std::future<void> run_started_future = run_started.get_future();
   std::jthread run_thread([&]() {
     run_started.set_value();
-    server.Run();
+    EXPECT_TRUE(server.Run().ok());
     run_returned = true;
   });
 
@@ -100,121 +108,131 @@ TEST(RpcServerLifecycleTest, StopUnblocksBlockingRun) {
 TEST(RpcServerLifecycleTest, DestructorClosesListeningRuntime) {
   std::uint16_t port = 0;
   {
-    xrpc::RpcServer server;
-    server.Listen("127.0.0.1", 0);
-    port = server.port();
+    xrpc::RpcServer server = MakeServer();
+    ASSERT_TRUE(server.Listen("127.0.0.1", 0).ok());
+    const xrpc::StatusOr<std::uint16_t> port_result = server.port();
+    ASSERT_TRUE(port_result.ok()) << port_result.status().message();
+    port = port_result.value();
   }
 
   xrpc::io::Socket socket;
   EXPECT_THROW(socket.Connect("127.0.0.1", port, std::chrono::milliseconds(100)), xrpc::io::SocketError);
 }
 
-TEST(RpcServerLifecycleTest, ListenTwiceThrows) {
-  xrpc::RpcServer server;
-  server.Listen("127.0.0.1", 0);
-  EXPECT_THROW(server.Listen("127.0.0.1", 0), xrpc::LifecycleException);
+TEST(RpcServerLifecycleTest, ListenTwiceReturnsFailedPrecondition) {
+  xrpc::RpcServer server = MakeServer();
+  ASSERT_TRUE(server.Listen("127.0.0.1", 0).ok());
+  EXPECT_EQ(server.Listen("127.0.0.1", 0).code(), xrpc::StatusCode::FailedPrecondition);
 }
 
-TEST(RpcServerLifecycleTest, RegisterMethodAfterListenThrows) {
-  xrpc::RpcServer server;
-  server.Listen("127.0.0.1", 0);
+TEST(RpcServerLifecycleTest, RegisterMethodAfterListenReturnsFailedPrecondition) {
+  xrpc::RpcServer server = MakeServer();
+  ASSERT_TRUE(server.Listen("127.0.0.1", 0).ok());
 
-  EXPECT_THROW((server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>("EchoService", "Echo", Echo)),
-               xrpc::LifecycleException);
+  const xrpc::Status status =
+      server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>("EchoService", "Echo", Echo);
+  EXPECT_EQ(status.code(), xrpc::StatusCode::FailedPrecondition);
 }
 
-TEST(RpcServerLifecycleTest, RegisterMethodAfterStopThrows) {
-  xrpc::RpcServer server;
+TEST(RpcServerLifecycleTest, RegisterMethodAfterStopReturnsFailedPrecondition) {
+  xrpc::RpcServer server = MakeServer();
   server.Stop();
 
-  EXPECT_THROW((server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>("EchoService", "Echo", Echo)),
-               xrpc::LifecycleException);
+  const xrpc::Status status =
+      server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>("EchoService", "Echo", Echo);
+  EXPECT_EQ(status.code(), xrpc::StatusCode::FailedPrecondition);
 }
 
 TEST(RpcServerLifecycleTest, ConcurrentListenAndRegisterMethodAreSerialized) {
-  xrpc::RpcServer server;
+  xrpc::RpcServer server = MakeServer();
   std::atomic<bool> start = false;
-  std::exception_ptr listen_error;
-  std::exception_ptr register_error;
+  xrpc::Status listen_status;
+  xrpc::Status register_status;
 
   std::jthread listen_thread([&]() {
     while (!start.load(std::memory_order_acquire)) {
       std::this_thread::yield();
     }
-    try {
-      server.Listen("127.0.0.1", 0);
-    } catch (...) {
-      listen_error = std::current_exception();
-    }
+    listen_status = server.Listen("127.0.0.1", 0);
   });
   std::jthread register_thread([&]() {
     while (!start.load(std::memory_order_acquire)) {
       std::this_thread::yield();
     }
-    try {
-      server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>("EchoService", "Echo", Echo);
-    } catch (...) {
-      register_error = std::current_exception();
-    }
+    register_status =
+        server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>("EchoService", "Echo", Echo);
   });
 
   start.store(true, std::memory_order_release);
   listen_thread.join();
   register_thread.join();
 
-  EXPECT_EQ(listen_error == nullptr, true);
-  if (register_error != nullptr) {
-    EXPECT_THROW(std::rethrow_exception(register_error), xrpc::LifecycleException);
-  }
+  EXPECT_TRUE(listen_status.ok()) << listen_status.message();
+  EXPECT_TRUE(register_status.ok() || register_status.code() == xrpc::StatusCode::FailedPrecondition)
+      << register_status.message();
 }
 
 TEST(RpcServerLifecycleTest, WildcardListenRequiresServiceAddressWhenRegistrationEnabled) {
   xrpc::RpcServerOptions options;
   options.service_name_ = "EchoService";
-  xrpc::RpcServer server(options);
-  EXPECT_THROW(server.Listen("0.0.0.0", 0), xrpc::ConfigException);
+  xrpc::StatusOr<xrpc::RpcServer> server_result = xrpc::RpcServer::Create(options);
+  ASSERT_TRUE(server_result.ok()) << server_result.status().message();
+  xrpc::RpcServer server = std::move(server_result).value();
+  EXPECT_EQ(server.Listen("0.0.0.0", 0).code(), xrpc::StatusCode::InvalidArgument);
 }
 
 TEST(RpcServerLifecycleTest, RejectsZeroListenBacklogAtConstruction) {
   xrpc::RpcServerOptions options;
   options.listen_backlog_ = 0;
 
-  EXPECT_THROW(static_cast<void>(xrpc::RpcServer(options)), xrpc::ConfigException);
+  const xrpc::StatusOr<xrpc::RpcServer> result = xrpc::RpcServer::Create(options);
+  ASSERT_FALSE(result.ok());
+  EXPECT_EQ(result.status().code(), xrpc::StatusCode::InvalidArgument);
 }
 
 TEST(RpcServerLifecycleTest, RejectsZeroConnectionIoThreadsAtConstruction) {
   xrpc::RpcServerOptions options;
   options.connection_io_threads_ = 0;
 
-  EXPECT_THROW(static_cast<void>(xrpc::RpcServer(options)), xrpc::ConfigException);
+  const xrpc::StatusOr<xrpc::RpcServer> result = xrpc::RpcServer::Create(options);
+  ASSERT_FALSE(result.ok());
+  EXPECT_EQ(result.status().code(), xrpc::StatusCode::InvalidArgument);
 }
 
 TEST(RpcServerLifecycleTest, RejectsServiceAddressWithoutServiceNameAtConstruction) {
   xrpc::RpcServerOptions options;
   options.service_address_ = "127.0.0.1";
 
-  EXPECT_THROW(static_cast<void>(xrpc::RpcServer(options)), xrpc::ConfigException);
+  const xrpc::StatusOr<xrpc::RpcServer> result = xrpc::RpcServer::Create(options);
+  ASSERT_FALSE(result.ok());
+  EXPECT_EQ(result.status().code(), xrpc::StatusCode::InvalidArgument);
 }
 
 TEST(RpcServerLifecycleTest, RejectsZeroBackpressureLimitsAtConstruction) {
   xrpc::RpcServerOptions options;
   options.max_pending_jobs_global_ = 0;
 
-  EXPECT_THROW(static_cast<void>(xrpc::RpcServer(options)), xrpc::ConfigException);
+  const xrpc::StatusOr<xrpc::RpcServer> result = xrpc::RpcServer::Create(options);
+  ASSERT_FALSE(result.ok());
+  EXPECT_EQ(result.status().code(), xrpc::StatusCode::InvalidArgument);
 }
 
 TEST(RpcServerLifecycleTest, RejectsZeroMaxPayloadSizeAtConstruction) {
   xrpc::RpcServerOptions options;
   options.max_payload_size_ = 0;
 
-  EXPECT_THROW(static_cast<void>(xrpc::RpcServer(options)), xrpc::ConfigException);
+  const xrpc::StatusOr<xrpc::RpcServer> result = xrpc::RpcServer::Create(options);
+  ASSERT_FALSE(result.ok());
+  EXPECT_EQ(result.status().code(), xrpc::StatusCode::InvalidArgument);
 }
 
 TEST(RpcServerLifecycleTest, RejectsNegativeConnectionIdleTimeoutAtConstruction) {
   xrpc::RpcServerOptions options;
   options.connection_idle_timeout_ = std::chrono::milliseconds(-1);
 
-  EXPECT_THROW(static_cast<void>(xrpc::RpcServer(options)), xrpc::ConfigException);
+  const xrpc::StatusOr<xrpc::RpcServer> result = xrpc::RpcServer::Create(options);
+  ASSERT_FALSE(result.ok());
+  EXPECT_EQ(result.status().code(), xrpc::StatusCode::InvalidArgument);
 }
 
 TEST(RpcServerLifecycleTest, PublicStatsExposePerConnectionInflightBackpressure) {
@@ -222,7 +240,9 @@ TEST(RpcServerLifecycleTest, PublicStatsExposePerConnectionInflightBackpressure)
   options.worker_threads_ = 1;
   options.max_inflight_per_connection_ = 1;
 
-  xrpc::RpcServer server(options);
+  xrpc::StatusOr<xrpc::RpcServer> server_result = xrpc::RpcServer::Create(options);
+  ASSERT_TRUE(server_result.ok()) << server_result.status().message();
+  xrpc::RpcServer server = std::move(server_result).value();
 
   std::atomic<bool> first_handler_started = false;
   std::promise<void> handler_started;
@@ -230,7 +250,7 @@ TEST(RpcServerLifecycleTest, PublicStatsExposePerConnectionInflightBackpressure)
   std::promise<void> release_handler;
   std::shared_future<void> release_handler_future = release_handler.get_future().share();
 
-  server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
+  const xrpc::Status registration_status = server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
       "EchoService", "Echo", [&](const xrpc::test::EchoRequest &request) {
         if (!first_handler_started.exchange(true, std::memory_order_acq_rel)) {
           handler_started.set_value();
@@ -238,12 +258,15 @@ TEST(RpcServerLifecycleTest, PublicStatsExposePerConnectionInflightBackpressure)
         release_handler_future.wait();
         return Echo(request);
       });
+  ASSERT_TRUE(registration_status.ok()) << registration_status.message();
 
-  server.Listen("127.0.0.1", 0);
-  std::jthread run_thread([&server]() { server.Run(); });
+  ASSERT_TRUE(server.Listen("127.0.0.1", 0).ok());
+  const xrpc::StatusOr<std::uint16_t> port_result = server.port();
+  ASSERT_TRUE(port_result.ok()) << port_result.status().message();
+  std::jthread run_thread([&server]() { EXPECT_TRUE(server.Run().ok()); });
 
   xrpc::io::Socket client_socket;
-  client_socket.Connect("127.0.0.1", server.port(), WaitTimeout);
+  client_socket.Connect("127.0.0.1", port_result.value(), WaitTimeout);
   client_socket.WriteAll(MakeRequestFrame("first", 1));
 
   const bool handler_started_before_timeout = handler_started_future.wait_for(WaitTimeout) == std::future_status::ready;
@@ -279,7 +302,9 @@ TEST(RpcServerLifecycleTest, RpcClientReceivesResourceExhaustedWhenInflightLimit
   options.worker_threads_ = 1;
   options.max_inflight_per_connection_ = 1;
 
-  xrpc::RpcServer server(options);
+  xrpc::StatusOr<xrpc::RpcServer> server_result = xrpc::RpcServer::Create(options);
+  ASSERT_TRUE(server_result.ok()) << server_result.status().message();
+  xrpc::RpcServer server = std::move(server_result).value();
 
   std::atomic<bool> first_handler_started = false;
   std::promise<void> handler_started;
@@ -287,7 +312,7 @@ TEST(RpcServerLifecycleTest, RpcClientReceivesResourceExhaustedWhenInflightLimit
   std::promise<void> release_handler;
   std::shared_future<void> release_handler_future = release_handler.get_future().share();
 
-  server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
+  const xrpc::Status registration_status = server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
       "EchoService", "Echo", [&](const xrpc::test::EchoRequest &request) {
         if (!first_handler_started.exchange(true, std::memory_order_acq_rel)) {
           handler_started.set_value();
@@ -295,14 +320,19 @@ TEST(RpcServerLifecycleTest, RpcClientReceivesResourceExhaustedWhenInflightLimit
         release_handler_future.wait();
         return Echo(request);
       });
+  ASSERT_TRUE(registration_status.ok()) << registration_status.message();
 
-  server.Listen("127.0.0.1", 0);
-  std::jthread run_thread([&server]() { server.Run(); });
+  ASSERT_TRUE(server.Listen("127.0.0.1", 0).ok());
+  const xrpc::StatusOr<std::uint16_t> port_result = server.port();
+  ASSERT_TRUE(port_result.ok()) << port_result.status().message();
+  std::jthread run_thread([&server]() { EXPECT_TRUE(server.Run().ok()); });
 
   xrpc::RpcClientOptions client_options;
-  client_options.target_ = "list://127.0.0.1:" + std::to_string(server.port());
+  client_options.target_ = "list://127.0.0.1:" + std::to_string(port_result.value());
   client_options.timeout_ = WaitTimeout;
-  xrpc::RpcClient client(client_options);
+  xrpc::StatusOr<xrpc::RpcClient> client_result = xrpc::RpcClient::Create(client_options);
+  ASSERT_TRUE(client_result.ok()) << client_result.status().message();
+  xrpc::RpcClient client = std::move(client_result).value();
   const xrpc::Status init_status = client.Init();
   ASSERT_TRUE(init_status.ok()) << init_status.message();
 

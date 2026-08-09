@@ -4,7 +4,7 @@
 #include <thread>
 #include <utility>
 
-#include <xrpc/xrpc_exception.h>
+#include "rpc/xrpc_exception.h"
 
 #include "protocol/frame_codec.h"
 #include "protocol/protocol_error.h"
@@ -52,7 +52,12 @@ void RpcServer::ServerController::RegisterMethodRegistration(MethodRegistration 
   RawHandler handler = [invoke = std::move(invoke)](RawRequest request) -> RawResponse {
     RawResponse response;
     response.request_id_ = request.request_id_;
-    response.payload_ = invoke(request.payload_);
+    StatusOr<std::string> result = invoke(request.payload_);
+    if (!result.ok()) {
+      response.status_ = result.status();
+      return response;
+    }
+    response.payload_ = std::move(result).value();
     return response;
   };
 

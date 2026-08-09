@@ -5,7 +5,7 @@
 #include <utility>
 #include <vector>
 
-#include <xrpc/xrpc_exception.h>
+#include "rpc/xrpc_exception.h"
 
 #include <sys/socket.h>
 #include <sys/time.h>

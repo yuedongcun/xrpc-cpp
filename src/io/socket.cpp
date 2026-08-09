@@ -17,7 +17,7 @@
 
 #include "io/socket_error.h"
 
-#include <xrpc/xrpc_exception.h>
+#include "rpc/xrpc_exception.h"
 
 namespace xrpc::io {
 namespace {

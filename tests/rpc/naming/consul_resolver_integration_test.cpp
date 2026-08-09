@@ -41,8 +41,8 @@ class EchoTestServer final {
     while (true) {
       const xrpc::DecodeResult decoded = codec.TryDecode(buffer);
       if (decoded.error_ == xrpc::ProtocolError::Ok && decoded.request_.has_value()) {
-        const xrpc::test::EchoRequest request = xrpc::ProtobufCodec::Decode<xrpc::test::EchoRequest>(
-            decoded.request_->payload_);
+        const xrpc::test::EchoRequest request =
+            xrpc::ProtobufCodec::Decode<xrpc::test::EchoRequest>(decoded.request_->payload_);
 
         xrpc::test::EchoResponse response;
         response.set_message("echo: " + request.message());
@@ -147,7 +147,9 @@ TEST(ConsulResolverIntegrationTest, DiscoversRegisteredEndpointAndCallsEcho) {
   options.discovery_refresh_interval_ = std::chrono::milliseconds(200);
   options.timeout_ = std::chrono::milliseconds(1000);
 
-  xrpc::RpcClient client(std::move(options));
+  xrpc::StatusOr<xrpc::RpcClient> client_result = xrpc::RpcClient::Create(options);
+  ASSERT_TRUE(client_result.ok()) << client_result.status().message();
+  xrpc::RpcClient client = std::move(client_result).value();
   xrpc::test::EchoRequest request;
   request.set_message("hello");
 

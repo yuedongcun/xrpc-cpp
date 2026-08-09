@@ -3,11 +3,17 @@
 
 #include <cstdint>
 #include <iostream>
+#include <utility>
 
 auto main() -> int {
   constexpr std::uint16_t port = 9000;
 
-  xrpc::RpcClient client("127.0.0.1", port);
+  auto client_result = xrpc::RpcClient::Create("127.0.0.1", port);
+  if (!client_result.ok()) {
+    std::cerr << "create failed: " << client_result.status().message() << '\n';
+    return 1;
+  }
+  xrpc::RpcClient client = std::move(client_result).value();
   const xrpc::Status init_status = client.Init();
   if (!init_status.ok()) {
     std::cerr << "init failed: " << init_status.message() << '\n';

@@ -11,7 +11,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include <xrpc/xrpc_exception.h>
+#include "rpc/xrpc_exception.h"
 
 namespace xrpc {
 

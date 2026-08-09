@@ -5,7 +5,7 @@
 #include <string>
 #include <utility>
 
-#include <xrpc/xrpc_exception.h>
+#include "rpc/xrpc_exception.h"
 
 #include "io/socket_error.h"
 #include "rpc/client/tcp_transport.h"

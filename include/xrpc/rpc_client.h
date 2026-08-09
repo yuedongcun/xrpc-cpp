@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <string>
 #include <utility>
@@ -11,7 +12,6 @@
 #include <xrpc/protocol_options.h>
 #include <xrpc/status.h>
 #include <xrpc/status_or.h>
-#include <xrpc/xrpc_exception.h>
 
 namespace xrpc {
 
@@ -54,7 +54,7 @@ struct RpcClientOptions {
   std::chrono::milliseconds timeout_{0};
 
   /** @brief Maximum accepted request or response payload size for this client. */
-  std::size_t max_payload_size_ = DefaultMaxPayloadSize;
+  std::size_t max_payload_size_ = DEFAULT_MAX_PAYLOAD_SIZE;
 
   /** @brief Per-endpoint limit for outstanding calls waiting on a transport response. */
   std::size_t max_inflight_per_endpoint_ = 1024;
@@ -75,7 +75,7 @@ class RpcClient final {
    * @param host DNS name or numeric address of the server.
    * @param port TCP port in host byte order.
    */
-  RpcClient(std::string host, std::uint16_t port);
+  [[nodiscard]] static auto Create(std::string host, std::uint16_t port) -> StatusOr<RpcClient>;
 
   /**
    * @brief Creates a client from explicit options.
@@ -85,7 +85,7 @@ class RpcClient final {
    *
    * @param options Client runtime, discovery, and protocol configuration.
    */
-  explicit RpcClient(const RpcClientOptions &options);
+  [[nodiscard]] static auto Create(const RpcClientOptions &options) -> StatusOr<RpcClient>;
 
   /** @brief Stops owned transports and resolver work before destroying the runtime. */
   ~RpcClient();
@@ -175,8 +175,10 @@ class RpcClient final {
     std::string payload;
     try {
       payload = request.SerializeAsString();
+    } catch (const std::exception &exception) {
+      return StatusOr<Resp>(Status{StatusCode::Internal, exception.what()});
     } catch (...) {
-      return StatusOr<Resp>(CaughtExceptionToStatus("failed to serialize typed request"));
+      return StatusOr<Resp>(Status{StatusCode::Internal, "failed to serialize typed request"});
     }
 
     StatusOr<std::string> payload_result =
@@ -185,11 +187,17 @@ class RpcClient final {
       return StatusOr<Resp>(payload_result.status());
     }
 
-    Resp response;
-    if (!response.ParseFromString(payload_result.value())) {
-      return StatusOr<Resp>(Status(StatusCode::DataLoss, "failed to decode typed response"));
+    try {
+      Resp response;
+      if (!response.ParseFromString(payload_result.value())) {
+        return StatusOr<Resp>(Status(StatusCode::DataLoss, "failed to decode typed response"));
+      }
+      return StatusOr<Resp>(std::move(response));
+    } catch (const std::exception &exception) {
+      return StatusOr<Resp>(Status{StatusCode::Internal, exception.what()});
+    } catch (...) {
+      return StatusOr<Resp>(Status{StatusCode::Internal, "failed to decode typed response"});
     }
-    return StatusOr<Resp>(std::move(response));
   }
 
  private:
@@ -206,6 +214,9 @@ class RpcClient final {
   };
 
   class ClientRuntime;
+
+  /** @brief Creates a facade from a successfully constructed private runtime. */
+  explicit RpcClient(std::unique_ptr<ClientRuntime> runtime);
 
   /** @brief Sends a fully prepared payload request through the private runtime. */
   [[nodiscard]] auto CallPayloadRequest(const PayloadRequest &request, const CallOptions &options)

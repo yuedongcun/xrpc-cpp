@@ -21,7 +21,7 @@
 
 #include <liburing.h>
 
-#include <xrpc/xrpc_exception.h>
+#include "rpc/xrpc_exception.h"
 
 #include "io/operation.h"
 

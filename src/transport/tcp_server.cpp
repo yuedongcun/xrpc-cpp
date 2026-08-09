@@ -6,7 +6,7 @@
 
 #include <unistd.h>
 
-#include <xrpc/xrpc_exception.h>
+#include "rpc/xrpc_exception.h"
 
 #include "transport/connection_io_loop.h"
 

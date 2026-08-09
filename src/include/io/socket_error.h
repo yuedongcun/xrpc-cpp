@@ -5,7 +5,7 @@
 #include <system_error>
 #include <utility>
 
-#include <xrpc/xrpc_exception.h>
+#include "rpc/xrpc_exception.h"
 
 namespace xrpc::io {
 
