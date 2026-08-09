@@ -74,20 +74,24 @@ auto response = client.Call<EchoResponse>("EchoService", "Echo", request);
 
 这是单机 loopback 结果，不代表跨主机网络延迟。benchmark 不做绑核、控频、NUMA 调优或 perf 编排，只固定负载参数。
 
+先构建 Release 版本：
+
+```bash
+make release
+```
+
 复现服务端容量测试：
 
 ```bash
 ./tools/benchmark/runner/run_suite.py \
-  --config tools/benchmark/configs/firehose.json \
-  --build
+  --config tools/benchmark/configs/firehose.json
 ```
 
 复现正式客户端路径测试：
 
 ```bash
 ./tools/benchmark/runner/run_suite.py \
-  --config tools/benchmark/configs/client.json \
-  --build
+  --config tools/benchmark/configs/client.json
 ```
 
 ## 项目边界

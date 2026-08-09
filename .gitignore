@@ -4,6 +4,7 @@ __pycache__/
 
 # Build directory
 build/
+build-release/
 build-*/
 tests/Testing/
 

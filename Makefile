@@ -1,8 +1,9 @@
 BUILD_DIR ?= build
+RELEASE_BUILD_DIR ?= build-release
 CMAKE_ARGS ?=
 
 .DEFAULT_GOAL := all
-.PHONY: all configure test clangd-db dev clean
+.PHONY: all configure release test clangd-db dev clean
 
 configure:
 	cmake -S . -B $(BUILD_DIR) \
@@ -10,10 +11,21 @@ configure:
 		-DXRPC_BUILD_EXAMPLES=ON \
 		-DXRPC_BUILD_TOOLS=ON \
 		-DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-		$(CMAKE_ARGS)
+		$(CMAKE_ARGS) \
+		-DCMAKE_BUILD_TYPE=Debug
 
 all: configure
 	cmake --build $(BUILD_DIR) --parallel
+
+release:
+	cmake -S . -B $(RELEASE_BUILD_DIR) \
+		-DXRPC_BUILD_TESTS=ON \
+		-DXRPC_BUILD_EXAMPLES=ON \
+		-DXRPC_BUILD_TOOLS=ON \
+		-DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+		$(CMAKE_ARGS) \
+		-DCMAKE_BUILD_TYPE=Release
+	cmake --build $(RELEASE_BUILD_DIR) --parallel
 
 test: all
 	ctest --test-dir $(BUILD_DIR)/tests \
@@ -38,4 +50,3 @@ dev: all
 
 clean:
 	rm -rf $(BUILD_DIR)
-

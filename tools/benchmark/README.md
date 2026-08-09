@@ -10,10 +10,10 @@ Firehose 是发压工具，不是生产客户端模型。生产客户端路径�
 ## 构建
 
 ```bash
-make
+make release
 ```
 
-生成的可执行文件位于 `build/tools/benchmark/`：
+生成的可执行文件位于 `build-release/tools/benchmark/`：
 
 - `xrpc_benchmark_server`
 - `xrpc_benchmark_firehose`
@@ -21,20 +21,24 @@ make
 
 ## 运行套件
 
+benchmark 必须使用 Release 构建。日常开发使用 `build/`，性能测试使用独立的 `build-release/`。
+
+```bash
+make release
+```
+
 服务端容量测试：
 
 ```bash
 ./tools/benchmark/runner/run_suite.py \
-  --config tools/benchmark/configs/firehose.json \
-  --build
+  --config tools/benchmark/configs/firehose.json
 ```
 
 正式客户端路径测试：
 
 ```bash
 ./tools/benchmark/runner/run_suite.py \
-  --config tools/benchmark/configs/client.json \
-  --build
+  --config tools/benchmark/configs/client.json
 ```
 
 ## 单独启动
@@ -42,7 +46,7 @@ make
 服务端：
 
 ```bash
-./build/tools/benchmark/xrpc_benchmark_server \
+./build-release/tools/benchmark/xrpc_benchmark_server \
   --host=127.0.0.1 \
   --port=9010
 ```
@@ -50,7 +54,7 @@ make
 Firehose 客户端：
 
 ```bash
-./build/tools/benchmark/xrpc_benchmark_firehose \
+./build-release/tools/benchmark/xrpc_benchmark_firehose \
   --duration_s=30 \
   --payload_size=128 \
   --connections=12 \
@@ -62,7 +66,7 @@ Firehose 客户端：
 正式 `RpcClient` 客户端：
 
 ```bash
-./build/tools/benchmark/xrpc_benchmark_client \
+./build-release/tools/benchmark/xrpc_benchmark_client \
   --threads=24 \
   --duration_s=10 \
   --payload_size=128 \

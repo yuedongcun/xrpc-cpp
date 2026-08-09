@@ -20,25 +20,22 @@ LATENCY_PATTERN = re.compile(
     r"p95_us=([0-9.]+) p99_us=([0-9.]+)"
 )
 READY_PORT_PATTERN = re.compile(r"\bport=(\d+)\b")
+BENCHMARK_HOST = "127.0.0.1"
+PROCESS_TIMEOUT_MARGIN = 30
 
 
 @dataclass(frozen=True)
 class Config:
-    type: str
+    benchmark_type: str
     duration: int
     payload_size: int
     server_worker_threads: int
     server_connection_io_threads: int
-    run_timeout: int
     warmup_duration: int = 0
     repetitions: int = 1
-    host: str = "127.0.0.1"
-    port: int = 0
-    server_delay_us: int = 0
-    server_listen_backlog: int = 128
-    threads: int | list[int] = 1
-    connections: int | list[int] = 1
-    inflight: int | list[int] = 1
+    threads: int | list[int] = 0
+    connections: int | list[int] = 0
+    inflight: int | list[int] = 0
     io_threads: int = 0
 
 
@@ -78,7 +75,7 @@ def values(value, name):
 
 def load_config(path):
     data = json.loads(path.read_text(encoding="utf-8"))
-    allowed = {
+    common = {
         "type",
         "duration",
         "warmup_duration",
@@ -86,47 +83,37 @@ def load_config(path):
         "payload_size",
         "server_worker_threads",
         "server_connection_io_threads",
-        "run_timeout",
-        "host",
-        "port",
-        "server_delay_us",
-        "server_listen_backlog",
-        "threads",
-        "connections",
-        "inflight",
-        "io_threads",
     }
+    benchmark_type = data.get("type")
+    if benchmark_type == "client":
+        allowed = common | {"threads"}
+    elif benchmark_type == "firehose":
+        allowed = common | {"connections", "inflight", "io_threads"}
+    else:
+        raise RuntimeError("type must be firehose or client")
+
     unknown = sorted(set(data) - allowed)
     if unknown:
         raise RuntimeError("unknown config keys: " + ", ".join(unknown))
 
-    benchmark_type = data.get("type")
-    if benchmark_type not in ("firehose", "client"):
-        raise RuntimeError("type must be firehose or client")
-
     config = Config(
-        type=benchmark_type,
+        benchmark_type=benchmark_type,
         duration=require_int(data, "duration"),
         warmup_duration=optional_int(data, "warmup_duration", 0),
         repetitions=optional_int(data, "repetitions", 1),
         payload_size=require_int(data, "payload_size"),
         server_worker_threads=require_int(data, "server_worker_threads"),
         server_connection_io_threads=require_int(data, "server_connection_io_threads"),
-        run_timeout=require_int(data, "run_timeout"),
-        host=data.get("host", "127.0.0.1"),
-        port=optional_int(data, "port", 0),
-        server_delay_us=optional_int(data, "server_delay_us", 0),
-        server_listen_backlog=optional_int(data, "server_listen_backlog", 128),
-        threads=data.get("threads", 1),
-        connections=data.get("connections", 1),
-        inflight=data.get("inflight", 1),
-        io_threads=optional_int(data, "io_threads", 0),
+        threads=data.get("threads", 0),
+        connections=data.get("connections", 0),
+        inflight=data.get("inflight", 0),
+        io_threads=require_int(data, "io_threads") if benchmark_type == "firehose" else 0,
     )
     return config
 
 
 def cases(config):
-    if config.type == "client":
+    if config.benchmark_type == "client":
         return [Case(name=f"threads={threads}", threads=threads) for threads in values(config.threads, "threads")]
 
     result = []
@@ -136,15 +123,6 @@ def cases(config):
                 raise RuntimeError("inflight must be greater than or equal to connections")
             result.append(Case(name=f"connections={connections} inflight={inflight}", connections=connections, inflight=inflight))
     return result
-
-
-def build(repo_root, build_dir, benchmark_type):
-    client_target = "xrpc_benchmark_firehose" if benchmark_type == "firehose" else "xrpc_benchmark_client"
-    subprocess.run(
-        ["cmake", "--build", str(build_dir), "--target", "xrpc_benchmark_server", client_target, "--parallel"],
-        cwd=repo_root,
-        check=True,
-    )
 
 
 def stop(process):
@@ -161,12 +139,9 @@ def stop(process):
 def start_server(repo_root, server_bin, config):
     command = [
         str(server_bin),
-        f"--host={config.host}",
-        f"--port={config.port}",
-        f"--delay_us={config.server_delay_us}",
+        "--port=0",
         f"--worker_threads={config.server_worker_threads}",
         f"--io_threads={config.server_connection_io_threads}",
-        f"--listen_backlog={config.server_listen_backlog}",
     ]
     process = subprocess.Popen(
         command,
@@ -203,12 +178,12 @@ def start_server(repo_root, server_bin, config):
 def client_command(client_bin, config, case, port, duration):
     command = [
         str(client_bin),
-        f"--host={config.host}",
+        f"--host={BENCHMARK_HOST}",
         f"--port={port}",
         f"--duration_s={duration}",
         f"--payload_size={config.payload_size}",
     ]
-    if config.type == "client":
+    if config.benchmark_type == "client":
         command.append(f"--threads={case.threads}")
     else:
         command += [
@@ -244,14 +219,20 @@ def run_client(command, timeout):
 def run_case(repo_root, build_dir, config, case):
     server_bin = build_dir / "tools" / "benchmark" / "xrpc_benchmark_server"
     client_bin = build_dir / "tools" / "benchmark" / (
-        "xrpc_benchmark_firehose" if config.type == "firehose" else "xrpc_benchmark_client"
+        "xrpc_benchmark_firehose" if config.benchmark_type == "firehose" else "xrpc_benchmark_client"
     )
     server, port = start_server(repo_root, server_bin, config)
     try:
         if config.warmup_duration > 0:
             print(f"warmup: {case.name}")
-            run_client(client_command(client_bin, config, case, port, config.warmup_duration), config.warmup_duration + 30)
-        return run_client(client_command(client_bin, config, case, port, config.duration), config.run_timeout)
+            run_client(
+                client_command(client_bin, config, case, port, config.warmup_duration),
+                config.warmup_duration + PROCESS_TIMEOUT_MARGIN,
+            )
+        return run_client(
+            client_command(client_bin, config, case, port, config.duration),
+            config.duration + PROCESS_TIMEOUT_MARGIN,
+        )
     finally:
         stop(server)
 
@@ -271,8 +252,7 @@ def summarize(rows):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Run XRPC benchmark cases.")
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--build", action="store_true")
-    parser.add_argument("--build-dir", type=Path, default=Path("build"))
+    parser.add_argument("--build-dir", type=Path, default=Path("build-release"))
     return parser.parse_args(argv)
 
 
@@ -282,9 +262,6 @@ def main(argv=None):
     build_dir = args.build_dir if args.build_dir.is_absolute() else repo_root / args.build_dir
     config = load_config(args.config)
     case_list = cases(config)
-
-    if args.build:
-        build(repo_root, build_dir, config.type)
 
     rows = []
     total = len(case_list) * config.repetitions

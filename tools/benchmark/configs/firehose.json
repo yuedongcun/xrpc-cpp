@@ -8,6 +8,5 @@
   "repetitions": 3,
   "payload_size": 128,
   "server_worker_threads": 3,
-  "server_connection_io_threads": 3,
-  "run_timeout": 90
+  "server_connection_io_threads": 3
 }
