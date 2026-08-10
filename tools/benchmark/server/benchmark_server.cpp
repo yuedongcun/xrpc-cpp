@@ -161,8 +161,7 @@ auto main(int argc, char **argv) -> int {
         static_cast<unsigned long long>(stats.closed_by_write_queue_high_watermark_),
         static_cast<unsigned long long>(stats.max_observed_inflight_),
         static_cast<unsigned long long>(stats.max_observed_write_queue_bytes_));
-    std::printf("worker_queue rejected=%llu max_depth=%llu\n",
-                static_cast<unsigned long long>(stats.worker_jobs_rejected_),
+    std::printf("worker_queue max_depth=%llu\n",
                 static_cast<unsigned long long>(stats.max_observed_worker_queue_depth_));
     std::fflush(stdout);
     return 0;

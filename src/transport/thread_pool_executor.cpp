@@ -101,7 +101,7 @@ auto ThreadPoolExecutor::TrySubmitBatch(std::function<void()> job, std::size_t l
 /** @return Snapshot of worker-pool counters used by server diagnostics. */
 auto ThreadPoolExecutor::stats() const -> ThreadPoolExecutorSnapshot {
   return ThreadPoolExecutorSnapshot{
-      .rejected_jobs_ = rejected_jobs_.load(std::memory_order_relaxed),
+      .rejected_by_pending_limit_ = rejected_by_pending_limit_.load(std::memory_order_relaxed),
       .max_observed_worker_queue_depth_ = max_observed_worker_queue_depth_.load(std::memory_order_relaxed),
   };
 }
@@ -144,7 +144,7 @@ auto ThreadPoolExecutor::TryReservePendingJobs(std::size_t logical_jobs) -> std:
   std::size_t pending = pending_jobs_.load(std::memory_order_relaxed);
   while (true) {
     if (pending > max_pending_jobs_ || logical_jobs > max_pending_jobs_ - pending) {
-      rejected_jobs_.fetch_add(logical_jobs, std::memory_order_relaxed);
+      rejected_by_pending_limit_.fetch_add(logical_jobs, std::memory_order_relaxed);
       return std::nullopt;
     }
     if (pending_jobs_.compare_exchange_weak(pending, pending + logical_jobs, std::memory_order_acq_rel,

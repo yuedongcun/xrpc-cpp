@@ -305,10 +305,10 @@ TEST(RpcServerLifecycleTest, PublicStatsExposePerConnectionInflightBackpressure)
   EXPECT_GE(stats.max_observed_inflight_, 1U);
 }
 
-TEST(RpcServerLifecycleTest, RpcClientReceivesResourceExhaustedWhenInflightLimitIsReached) {
+TEST(RpcServerLifecycleTest, PublicStatsExposeGlobalPendingBackpressure) {
   xrpc::RpcServerOptions options;
   options.worker_threads_ = 1;
-  options.max_inflight_per_connection_ = 1;
+  options.max_pending_jobs_global_ = 1;
 
   xrpc::StatusOr<xrpc::RpcServer> server_result = xrpc::RpcServer::Create(options);
   ASSERT_TRUE(server_result.ok()) << server_result.status().message();
@@ -370,4 +370,8 @@ TEST(RpcServerLifecycleTest, RpcClientReceivesResourceExhaustedWhenInflightLimit
 
   server.Stop();
   run_thread.join();
+
+  const xrpc::RpcServerStats stats = server.stats();
+  EXPECT_EQ(stats.rejected_by_inflight_limit_, 0U);
+  EXPECT_EQ(stats.rejected_by_global_pending_limit_, 1U);
 }

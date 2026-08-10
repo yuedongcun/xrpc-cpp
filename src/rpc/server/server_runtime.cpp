@@ -125,18 +125,17 @@ void RpcServer::ServerRuntime::Stop() { ShutdownBestEffort(); }
 auto RpcServer::ServerRuntime::port() const -> std::uint16_t { return server_.port(); }
 
 /**
- * @brief Combines TCP backpressure and worker-pool diagnostics for the public stats API.
+ * @brief Combines connection backpressure and worker-pool diagnostics for the public stats API.
  */
 auto RpcServer::ServerRuntime::stats() const -> RpcServerStats {
   const ServerBackpressureSnapshot backpressure_snapshot = server_.stats();
   const ThreadPoolExecutorSnapshot executor_snapshot = executor_.stats();
   return RpcServerStats{
       .rejected_by_inflight_limit_ = backpressure_snapshot.rejected_by_inflight_limit_,
-      .rejected_by_global_pending_limit_ = backpressure_snapshot.rejected_by_global_pending_limit_,
+      .rejected_by_global_pending_limit_ = executor_snapshot.rejected_by_pending_limit_,
       .closed_by_write_queue_high_watermark_ = backpressure_snapshot.closed_by_write_queue_high_watermark_,
       .max_observed_inflight_ = backpressure_snapshot.max_observed_inflight_,
       .max_observed_write_queue_bytes_ = backpressure_snapshot.max_observed_write_queue_bytes_,
-      .worker_jobs_rejected_ = executor_snapshot.rejected_jobs_,
       .max_observed_worker_queue_depth_ = executor_snapshot.max_observed_worker_queue_depth_,
   };
 }

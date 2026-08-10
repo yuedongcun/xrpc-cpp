@@ -76,7 +76,7 @@ struct RpcServerStats {
   /** @brief Requests rejected because one connection exceeded its in-flight job limit. */
   std::uint64_t rejected_by_inflight_limit_ = 0;
 
-  /** @brief Requests rejected because the worker pool exceeded its global pending-job limit. */
+  /** @brief Logical RPC jobs rejected because the worker pool exceeded its global pending-job limit. */
   std::uint64_t rejected_by_global_pending_limit_ = 0;
 
   /** @brief Connections closed after their queued response bytes exceeded the configured watermark. */
@@ -88,10 +88,7 @@ struct RpcServerStats {
   /** @brief Highest queued response byte count observed on one connection. */
   std::uint64_t max_observed_write_queue_bytes_ = 0;
 
-  /** @brief Worker jobs rejected by the global worker-pool queue limit. */
-  std::uint64_t worker_jobs_rejected_ = 0;
-
-  /** @brief Highest global worker queue depth observed. */
+  /** @brief Highest physical task depth observed on one worker queue. */
   std::uint64_t max_observed_worker_queue_depth_ = 0;
 };
 

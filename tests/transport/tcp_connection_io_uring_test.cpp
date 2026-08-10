@@ -459,7 +459,6 @@ TEST(CoroutineTcpConnectionTest, KeepsReadingWhileWorkerHandlerIsPending) {
 
   const xrpc::ServerBackpressureSnapshot snapshot = stats.Snapshot();
   EXPECT_EQ(snapshot.rejected_by_inflight_limit_, 1U);
-  EXPECT_EQ(snapshot.rejected_by_global_pending_limit_, 0U);
   EXPECT_EQ(snapshot.max_observed_inflight_, 1U);
 }
 
@@ -503,7 +502,6 @@ TEST(CoroutineTcpConnectionTest, ReturnsResourceExhaustedWhenPerConnectionInflig
   EXPECT_NE(connection->close_reason(), xrpc::ConnectionCloseReason::Backpressure);
   const xrpc::ServerBackpressureSnapshot snapshot = stats.Snapshot();
   EXPECT_EQ(snapshot.rejected_by_inflight_limit_, 1U);
-  EXPECT_EQ(snapshot.rejected_by_global_pending_limit_, 0U);
   EXPECT_EQ(snapshot.max_observed_inflight_, 1U);
 }
 

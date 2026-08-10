@@ -364,7 +364,6 @@ auto TcpConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> boo
       request_count);
   if (!accepted) {
     for (RawRequest &request : *request_batch) {
-      backpressure_stats_->RecordGlobalPendingRejection();
       if (!RejectRequestDueToBackpressure(std::move(request), "server global pending job limit exceeded")) {
         return false;
       }

@@ -18,12 +18,12 @@ namespace xrpc {
 /**
  * @brief Worker-pool diagnostics copied from relaxed atomic counters.
  *
- * `rejected_jobs_` counts logical jobs. A batch of N RPCs submitted as one physical worker task contributes N logical
- * jobs. `max_observed_worker_queue_depth_` tracks queued physical tasks.
+ * `rejected_by_pending_limit_` counts logical jobs. A batch of N RPCs submitted as one physical worker task contributes
+ * N logical jobs. `max_observed_worker_queue_depth_` tracks queued physical tasks.
  */
 struct ThreadPoolExecutorSnapshot {
   /** @brief Logical jobs rejected by the global pending-job limit. */
-  std::uint64_t rejected_jobs_ = 0;
+  std::uint64_t rejected_by_pending_limit_ = 0;
 
   /** @brief Highest physical queue depth observed on any worker queue. */
   std::uint64_t max_observed_worker_queue_depth_ = 0;
@@ -104,7 +104,7 @@ class ThreadPoolExecutor final {
   std::size_t max_pending_jobs_ = 0;
   std::atomic<std::size_t> pending_jobs_{0};
   std::atomic_bool stopped_{false};
-  std::atomic<std::uint64_t> rejected_jobs_{0};
+  std::atomic<std::uint64_t> rejected_by_pending_limit_{0};
   std::atomic<std::uint64_t> max_observed_worker_queue_depth_{0};
 };
 

@@ -26,7 +26,6 @@ struct ConnectionBackpressureLimits {
  */
 struct ServerBackpressureSnapshot {
   std::uint64_t rejected_by_inflight_limit_ = 0;
-  std::uint64_t rejected_by_global_pending_limit_ = 0;
   std::uint64_t closed_by_write_queue_high_watermark_ = 0;
   std::uint64_t max_observed_inflight_ = 0;
   std::uint64_t max_observed_write_queue_bytes_ = 0;
@@ -43,9 +42,6 @@ class ServerBackpressureStats final {
   /** @brief Records a request rejected by the per-connection in-flight limit. */
   void RecordInflightRejection() { rejected_by_inflight_limit_.fetch_add(1, std::memory_order_relaxed); }
 
-  /** @brief Records a request rejected by the global worker pending-job limit. */
-  void RecordGlobalPendingRejection() { rejected_by_global_pending_limit_.fetch_add(1, std::memory_order_relaxed); }
-
   /** @brief Records a connection closed by write-queue high watermark. */
   void RecordWriteQueueClosure() { closed_by_write_queue_high_watermark_.fetch_add(1, std::memory_order_relaxed); }
 
@@ -59,7 +55,6 @@ class ServerBackpressureStats final {
   [[nodiscard]] auto Snapshot() const -> ServerBackpressureSnapshot {
     return ServerBackpressureSnapshot{
         .rejected_by_inflight_limit_ = rejected_by_inflight_limit_.load(std::memory_order_relaxed),
-        .rejected_by_global_pending_limit_ = rejected_by_global_pending_limit_.load(std::memory_order_relaxed),
         .closed_by_write_queue_high_watermark_ = closed_by_write_queue_high_watermark_.load(std::memory_order_relaxed),
         .max_observed_inflight_ = max_observed_inflight_.load(std::memory_order_relaxed),
         .max_observed_write_queue_bytes_ = max_observed_write_queue_bytes_.load(std::memory_order_relaxed),
@@ -77,7 +72,6 @@ class ServerBackpressureStats final {
   }
 
   std::atomic<std::uint64_t> rejected_by_inflight_limit_{0};
-  std::atomic<std::uint64_t> rejected_by_global_pending_limit_{0};
   std::atomic<std::uint64_t> closed_by_write_queue_high_watermark_{0};
   std::atomic<std::uint64_t> max_observed_inflight_{0};
   std::atomic<std::uint64_t> max_observed_write_queue_bytes_{0};
