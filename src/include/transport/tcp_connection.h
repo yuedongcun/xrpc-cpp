@@ -14,7 +14,7 @@
 #include "io/uring_context.h"
 #include "protocol/frame_codec.h"
 #include "rpc/handler.h"
-#include "rpc/server/rpc_session.h"
+#include "rpc/server/rpc_frame_stream.h"
 #include "transport/connection_close_reason.h"
 #include "transport/server_backpressure.h"
 #include "transport/server_io_stats.h"
@@ -43,7 +43,7 @@ struct TcpConnectionOptions final {
   /** @brief Completion queue used by worker threads to return encoded responses. */
   std::shared_ptr<DispatchCompletionQueue> completion_queue_;
 
-  /** @brief Frame limits applied by the connection's `RpcSession`. */
+  /** @brief Frame limits applied by the connection's `RpcFrameStream`. */
   ProtocolLimits protocol_limits_;
 
   /** @brief Idle timeout for this connection. Zero disables idle cleanup. */
@@ -54,10 +54,10 @@ struct TcpConnectionOptions final {
  * @brief Event-loop-owned server-side TCP connection.
  *
  * Design note:
- * - Ownership: one shared `TcpConnection` owns its socket, session, write queue, idle timer task, and outstanding
+ * - Ownership: one shared `TcpConnection` owns its socket, frame stream, write queue, idle timer task, and outstanding
  *   dispatch accounting.
- * - Threading: socket/session/write state stays on the `UringContext` thread; handlers run on `ThreadPoolExecutor` and
- *   return through `DispatchCompletionQueue`.
+ * - Threading: socket/framing/write state stays on the `UringContext` thread; handlers run on `ThreadPoolExecutor`
+ *   and return through `DispatchCompletionQueue`.
  * - Backpressure: reads can continue only while inflight jobs and queued writes stay within `TcpConnectionOptions`
  *   limits.
  * - Shutdown: `Close()` records one reason, drains or rejects pending work, and lets the coroutine finish on the
@@ -122,7 +122,7 @@ class TcpConnection final : public std::enable_shared_from_this<TcpConnection> {
   [[nodiscard]] auto DrainWriteQueue() -> runtime::Task<void>;
 
   /** @brief Dispatches decoded requests or closes the connection after protocol failure. */
-  [[nodiscard]] auto HandleFeedResult(SessionFeedResult &&feed) -> bool;
+  [[nodiscard]] auto HandleFeedResult(FrameStreamFeedResult &&feed) -> bool;
 
   /** @brief Submits a batch of decoded requests to the worker pool. */
   [[nodiscard]] auto SubmitDispatchBatch(std::vector<RawRequest> requests) -> bool;
@@ -166,8 +166,8 @@ class TcpConnection final : public std::enable_shared_from_this<TcpConnection> {
   /** @brief Raw handler dispatched for decoded requests. */
   RawHandler handler_;
 
-  /** @brief Per-connection protocol session and decode buffer owner. */
-  RpcSession session_;
+  /** @brief Per-connection RPC framing state and decode buffer owner. */
+  RpcFrameStream frame_stream_;
 
   /** @brief Protocol frame limits copied into worker encode paths. */
   ProtocolLimits protocol_limits_;

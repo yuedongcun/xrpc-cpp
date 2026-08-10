@@ -56,25 +56,25 @@ class RawRequestBatch final {
   std::vector<RawRequest> additional_requests_;
 };
 
-/** @brief Result of feeding bytes into one server-side RPC session. */
-struct SessionFeedResult {
+/** @brief Result of feeding bytes into one server-side RPC frame stream. */
+struct FrameStreamFeedResult {
   /** @brief Complete requests decoded from the buffered stream bytes. */
   RawRequestBatch requests_;
 
-  /** @brief True when a protocol error closed the session. */
+  /** @brief True when a protocol error closed the frame stream. */
   bool closed_ = false;
 };
 
 /**
- * @brief Per-connection protocol session for decoding requests and encoding responses.
+ * @brief Per-connection framing state for decoding requests and encoding responses over a TCP byte stream.
  *
- * The session owns one byte buffer and one request-header decode cache, so callers must feed bytes from only one TCP
- * stream. It is not synchronized; the owning `TcpConnection` keeps session access on the event-loop thread.
+ * The frame stream owns one byte buffer and one request-header decode cache, so callers must feed bytes from only one
+ * TCP stream. It is not synchronized; the owning `TcpConnection` keeps access on the event-loop thread.
  */
-class RpcSession final {
+class RpcFrameStream final {
  public:
-  /** @brief Creates a session with the frame limits for one TCP byte stream. */
-  explicit RpcSession(ProtocolLimits protocol_limits = {});
+  /** @brief Creates framing state with the frame limits for one TCP byte stream. */
+  explicit RpcFrameStream(ProtocolLimits protocol_limits = {});
 
   /**
    * @brief Appends stream bytes and drains all complete request frames.
@@ -82,16 +82,16 @@ class RpcSession final {
    * @param bytes Newly read TCP stream bytes.
    * @return Decoded request batch and closed flag.
    */
-  [[nodiscard]] auto FeedBytes(std::string_view bytes) -> SessionFeedResult;
+  [[nodiscard]] auto FeedBytes(std::string_view bytes) -> FrameStreamFeedResult;
 
   /** @return Encoded response frame bytes after mapping raw status fields to protocol fields. */
   [[nodiscard]] auto EncodeResponse(RawResponse &&response) const -> std::string;
 
-  /** @return true after a non-recoverable protocol error has closed this session. */
+  /** @return true after a non-recoverable protocol error has closed this frame stream. */
   [[nodiscard]] auto IsClosed() const -> bool { return closed_; }
 
  private:
-  /** @brief Drains all complete request frames currently buffered in the session. */
+  /** @brief Drains all complete request frames currently buffered in the frame stream. */
   [[nodiscard]] auto DrainReadableRequests() -> RawRequestBatch;
 
   /** @brief Buffered TCP stream bytes not yet consumed by the frame codec. */
@@ -103,7 +103,7 @@ class RpcSession final {
   /** @brief Protocol limits applied to every decoded and encoded frame. */
   ProtocolLimits protocol_limits_;
 
-  /** @brief True after a protocol error; further feed operations do not reopen the session. */
+  /** @brief True after a protocol error; further feed operations do not reopen the frame stream. */
   bool closed_ = false;
 };
 

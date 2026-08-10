@@ -21,7 +21,7 @@ RpcClient::Call
   -> 端点选择与 request id 分配
   -> 多路复用 TCP 连接
   -> 服务端 connection I/O loop
-  -> 分帧与 RpcSession 解码
+  -> RpcFrameStream 增量分帧与解码
   -> 有界 handler worker pool
   -> 响应编码
   -> 原 connection I/O loop

@@ -10,7 +10,7 @@
 - `io/uring_awaitable_test.cpp`
 - `protocol/protocol_test.cpp`
 - `transport/tcp_connection_io_uring_test.cpp`
-- `rpc/server/rpc_session_test.cpp`
+- `rpc/server/rpc_frame_stream_test.cpp`
 - `rpc/server/rpc_server_lifecycle_test.cpp`
 - `rpc/client/endpoint_selector_test.cpp`
 - `rpc/client/rpc_client_endpoint_test.cpp`

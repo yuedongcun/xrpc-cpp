@@ -144,7 +144,7 @@ auto EncodeMessage(const ProtocolResponse &resp, const ProtocolLimits &limits) -
 }
 
 /**
- * @brief Decodes request metadata and payload without using the session cache.
+ * @brief Decodes request metadata and payload without using the frame-stream cache.
  */
 auto DecodeProtocolRequest(const FixedHeader &hdr, std::string_view header_bytes, std::string_view payload)
     -> std::optional<ProtocolRequest> {
@@ -164,7 +164,7 @@ auto DecodeProtocolRequest(const FixedHeader &hdr, std::string_view header_bytes
 }
 
 /**
- * @brief Decodes request metadata and payload using a per-session header cache.
+ * @brief Decodes request metadata and payload using a per-frame-stream header cache.
  *
  * Repeated service and method names on one connection can reuse decoded metadata when the serialized header bytes are
  * identical to the previous request.

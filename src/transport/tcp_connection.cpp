@@ -54,7 +54,7 @@ TcpConnection::TcpConnection(io::UringContext &context, RawHandler handler, Thre
       completion_queue_(ResolveCompletionQueue(context, std::move(options.completion_queue_))),
       executor_(&executor),
       handler_(std::move(handler)),
-      session_(options.protocol_limits_),
+      frame_stream_(options.protocol_limits_),
       protocol_limits_(options.protocol_limits_),
       socket_(std::move(socket)),
       read_buffer_(MakeReadBufferSize(), '\0'),
@@ -92,7 +92,8 @@ auto TcpConnection::Run() -> runtime::Task<void> {
     }
 
     TouchActivity();
-    if (!HandleFeedResult(session_.FeedBytes(std::string_view(read_buffer_.data(), recv_result.bytes_transferred_)))) {
+    if (!HandleFeedResult(
+            frame_stream_.FeedBytes(std::string_view(read_buffer_.data(), recv_result.bytes_transferred_)))) {
       co_return;
     }
   }
@@ -101,15 +102,15 @@ auto TcpConnection::Run() -> runtime::Task<void> {
 }
 
 /**
- * @brief Handles decoded requests produced by feeding bytes into the session parser.
+ * @brief Handles decoded requests produced by feeding bytes into the RPC frame stream.
  *
  * Requests decoded from one read are batched into one worker submission to reduce context handoffs.
  * Per-connection backpressure is enforced before the batch reaches the executor.
  *
- * @param feed Result from `RpcSession::FeedBytes()`.
+ * @param feed Result from `RpcFrameStream::FeedBytes()`.
  * @return true when the connection can continue reading.
  */
-auto TcpConnection::HandleFeedResult(SessionFeedResult &&feed) -> bool {
+auto TcpConnection::HandleFeedResult(FrameStreamFeedResult &&feed) -> bool {
   if (feed.closed_) {
     Close(ConnectionCloseReason::ProtocolError);
     return false;
@@ -404,7 +405,7 @@ auto TcpConnection::RejectRequestDueToBackpressure(RawRequest &&request, std::st
   response.status_ = {StatusCode::ResourceExhausted, std::move(message)};
 
   try {
-    return EnqueueWrite(session_.EncodeResponse(std::move(response)));
+    return EnqueueWrite(frame_stream_.EncodeResponse(std::move(response)));
   } catch (...) {
     Close(ConnectionCloseReason::ProtocolError);
     return false;

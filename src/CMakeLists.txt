@@ -45,7 +45,7 @@ set(XRPC_SOURCES
     rpc/server/service_registry.cpp
     rpc/server/server_runtime_config.cpp
     rpc/server/server_runtime.cpp
-    rpc/server/rpc_session.cpp
+    rpc/server/rpc_frame_stream.cpp
     rpc/server/rpc_server.cpp
     transport/byte_buffer.cpp
     transport/connection_io_loop.cpp

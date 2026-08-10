@@ -8,7 +8,7 @@ namespace xrpc {
  * @brief Non-throwing protocol encode/decode outcome.
  *
  * `NeedMoreData` is recoverable and tells stream owners to keep buffering. The other errors indicate that the current
- * frame cannot be accepted and the owning session should close or report failure.
+ * frame cannot be accepted and the owning frame stream should close or report failure.
  */
 enum class ProtocolError : std::uint8_t {
   /** @brief Operation completed successfully. */

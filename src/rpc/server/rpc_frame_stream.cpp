@@ -1,4 +1,4 @@
-#include "rpc/server/rpc_session.h"
+#include "rpc/server/rpc_frame_stream.h"
 
 #include <string>
 #include <utility>
@@ -46,15 +46,15 @@ auto RawRequestBatch::operator[](std::size_t index) const -> const RawRequest & 
   return additional_requests_[index - 1U];
 }
 
-/** @brief Creates a protocol session for one TCP byte stream. */
-RpcSession::RpcSession(ProtocolLimits protocol_limits) : protocol_limits_(protocol_limits) {}
+/** @brief Creates framing state for one TCP byte stream. */
+RpcFrameStream::RpcFrameStream(ProtocolLimits protocol_limits) : protocol_limits_(protocol_limits) {}
 
 /**
  * @brief Appends stream bytes and drains all complete request frames.
  *
- * Protocol errors mark the session closed so the owning connection can stop reading from the peer.
+ * Protocol errors mark the frame stream closed so the owning connection can stop reading from the peer.
  */
-auto RpcSession::FeedBytes(std::string_view bytes) -> SessionFeedResult {
+auto RpcFrameStream::FeedBytes(std::string_view bytes) -> FrameStreamFeedResult {
   if (closed_) {
     return {.requests_ = {}, .closed_ = true};
   }
@@ -65,19 +65,19 @@ auto RpcSession::FeedBytes(std::string_view bytes) -> SessionFeedResult {
 }
 
 /**
- * @brief Converts and encodes a raw response with this session's limits.
+ * @brief Converts and encodes a raw response with this frame stream's limits.
  */
-auto RpcSession::EncodeResponse(RawResponse &&response) const -> std::string {
+auto RpcFrameStream::EncodeResponse(RawResponse &&response) const -> std::string {
   FrameCodec codec(protocol_limits_);
   return codec.EncodeResponse(ToProtocolResponse(std::move(response)));
 }
 
 /**
- * @brief Drains complete request frames already buffered in the session.
+ * @brief Drains complete request frames already buffered in the frame stream.
  *
- * Partial frames remain buffered. Malformed complete frames close the session and stop the drain.
+ * Partial frames remain buffered. Malformed complete frames close the frame stream and stop the drain.
  */
-auto RpcSession::DrainReadableRequests() -> RawRequestBatch {
+auto RpcFrameStream::DrainReadableRequests() -> RawRequestBatch {
   RawRequestBatch requests;
   FrameCodec codec(protocol_limits_);
 

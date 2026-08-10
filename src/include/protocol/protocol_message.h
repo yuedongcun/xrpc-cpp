@@ -74,7 +74,7 @@ struct DecodeResult {
  * @brief Request-only decode result used by server hot paths.
  *
  * The server only expects request frames from clients. A response frame on this path is reported as a protocol error so
- * the session can close the connection instead of trying to dispatch an invalid message.
+ * the frame stream can close the connection instead of trying to dispatch an invalid message.
  */
 struct RequestDecodeResult {
   /** @brief Decode status for this attempt. */

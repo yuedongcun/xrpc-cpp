@@ -53,7 +53,7 @@ struct ProtocolLimits {
  * @brief Server-side hot-path cache for repeated request headers on one connection.
  *
  * Firehose-style workloads often reuse service and method names while changing only the payload. The cache is explicit
- * and owned by `RpcSession`, so it never shares header bytes across connections.
+ * and owned by `RpcFrameStream`, so it never shares header bytes across connections.
  */
 struct RequestHeaderDecodeCache {
   /** @brief Serialized protobuf header bytes from the last cached request. */
@@ -107,7 +107,7 @@ class FrameCodec final {
    * @brief Attempts to decode one frame while reusing request-header cache entries.
    *
    * @param buf Buffered stream bytes.
-   * @param request_header_cache Per-session request header cache.
+   * @param request_header_cache Per-frame-stream request header cache.
    * @return Decode outcome and number of bytes consumed.
    */
   auto TryDecode(std::string_view buf, RequestHeaderDecodeCache &request_header_cache) -> DecodeResult;
@@ -116,7 +116,7 @@ class FrameCodec final {
    * @brief Attempts to decode one request frame for the server path.
    *
    * @param buf Buffered stream bytes.
-   * @param request_header_cache Per-session request header cache.
+   * @param request_header_cache Per-frame-stream request header cache.
    * @return Request-only decode outcome.
    */
   auto TryDecodeRequest(std::string_view buf, RequestHeaderDecodeCache &request_header_cache) -> RequestDecodeResult;
