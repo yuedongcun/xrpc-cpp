@@ -21,7 +21,6 @@
 #include "protocol/frame_codec.h"
 #include "protocol/protocol_error.h"
 #include "protocol/protocol_message.h"
-#include "rpc/protobuf_codec.h"
 
 namespace {
 
@@ -103,7 +102,10 @@ class EchoTestServer final {
   }
 
   static auto MakeEchoResponse(const xrpc::ProtocolRequest &request) -> xrpc::ProtocolResponse {
-    const xrpc::test::EchoRequest echo_request = xrpc::ProtobufCodec::Decode<xrpc::test::EchoRequest>(request.payload_);
+    xrpc::test::EchoRequest echo_request;
+    if (!echo_request.ParseFromString(request.payload_)) {
+      throw std::runtime_error("failed to parse test request");
+    }
 
     xrpc::test::EchoResponse echo_response;
     echo_response.set_message("echo: " + echo_request.message());
@@ -112,7 +114,7 @@ class EchoTestServer final {
     response.request_id_ = request.request_id_;
     response.error_code_ = 0;
     response.error_text_.clear();
-    response.payload_ = xrpc::ProtobufCodec::Encode(echo_response);
+    response.payload_ = echo_response.SerializeAsString();
     return response;
   }
 

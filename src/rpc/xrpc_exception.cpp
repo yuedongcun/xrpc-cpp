@@ -44,13 +44,6 @@ auto ExceptionToStatus(const std::invalid_argument &exception) -> Status {
 auto ExceptionToStatus(const std::exception &exception) -> Status { return {StatusCode::Internal, exception.what()}; }
 
 /**
- * @brief Converts the currently handled exception to status.
- */
-auto CaughtExceptionToStatus() -> Status {
-  return CaughtExceptionToStatus(StatusCode::Internal, "unknown non-standard exception");
-}
-
-/**
  * @brief Converts the currently handled exception with a fallback message for non-standard exceptions.
  */
 auto CaughtExceptionToStatus(std::string_view non_standard_exception_message) -> Status {
@@ -81,10 +74,5 @@ auto CaughtExceptionToStatus(StatusCode non_standard_exception_code, std::string
     return {non_standard_exception_code, std::string(non_standard_exception_message)};
   }
 }
-
-/**
- * @brief Converts `std::current_exception()` to status.
- */
-auto CurrentExceptionToStatus() -> Status { return CaughtExceptionToStatus(); }
 
 }  // namespace xrpc

@@ -46,15 +46,10 @@ struct CallFailure {
  */
 struct RawCallResult {
   /** @brief Constructs a successful raw call result. */
-  RawCallResult(std::uint64_t request_id, RawResponse response)
-      : request_id_(request_id), response_(std::move(response)) {}
+  explicit RawCallResult(RawResponse response) : response_(std::move(response)) {}
 
   /** @brief Constructs a failed raw call result. */
-  RawCallResult(std::uint64_t request_id, CallFailure failure)
-      : request_id_(request_id), failure_(std::move(failure)) {}
-
-  /** @brief Request id used for this call attempt. */
-  std::uint64_t request_id_;
+  explicit RawCallResult(CallFailure failure) : failure_(std::move(failure)) {}
 
   /** @brief Raw response when the endpoint returned a protocol response. */
   std::optional<RawResponse> response_;
@@ -86,14 +81,13 @@ struct RawCallResult {
 };
 
 /** @return Failed raw call result with retry-safety metadata. */
-[[nodiscard]] inline auto MakeCallFailure(std::uint64_t request_id, Status status, RequestCommitState commit_state)
-    -> RawCallResult {
-  return {request_id, CallFailure{.status_ = std::move(status), .commit_state_ = commit_state}};
+[[nodiscard]] inline auto MakeCallFailure(Status status, RequestCommitState commit_state) -> RawCallResult {
+  return RawCallResult(CallFailure{.status_ = std::move(status), .commit_state_ = commit_state});
 }
 
 /** @return Successful raw call result. */
-[[nodiscard]] inline auto MakeCallSuccess(std::uint64_t request_id, RawResponse response) -> RawCallResult {
-  return {request_id, std::move(response)};
+[[nodiscard]] inline auto MakeCallSuccess(RawResponse response) -> RawCallResult {
+  return RawCallResult(std::move(response));
 }
 
 }  // namespace xrpc

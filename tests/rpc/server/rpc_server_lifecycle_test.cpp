@@ -19,7 +19,6 @@
 #include "protocol/frame_codec.h"
 #include "protocol/protocol_error.h"
 #include "protocol/protocol_message.h"
-#include "rpc/protobuf_codec.h"
 
 namespace {
 
@@ -47,7 +46,7 @@ auto MakeRequestFrame(std::string message, std::uint64_t request_id) -> std::str
   protocol_request.request_id_ = request_id;
   protocol_request.service_name_ = "EchoService";
   protocol_request.method_name_ = "Echo";
-  protocol_request.payload_ = xrpc::ProtobufCodec::Encode(request);
+  protocol_request.payload_ = request.SerializeAsString();
 
   xrpc::FrameCodec codec;
   return codec.EncodeRequest(protocol_request);

@@ -92,23 +92,6 @@ auto ParseEndpoints(const std::string &body) -> std::vector<Endpoint> {
 }  // namespace
 
 /**
- * @brief Validates constructor arguments shared by both resolver constructors.
- *
- * @param service_name Consul service name to watch.
- * @param refresh_interval Refresh wait/backoff interval.
- * @throws ConfigException when service name is empty or interval is negative.
- */
-void ConsulResolver::ValidateConstructorInputs(std::string_view service_name,
-                                               std::chrono::milliseconds refresh_interval) {
-  if (service_name.empty()) {
-    throw ConfigException("ConsulResolver service_name must not be empty");
-  }
-  if (refresh_interval < std::chrono::milliseconds::zero()) {
-    throw ConfigException("ConsulResolver refresh_interval must not be negative");
-  }
-}
-
-/**
  * @brief Creates a Consul resolver using the default HTTP client.
  *
  * @param service_name Consul service name to watch.
@@ -117,34 +100,7 @@ void ConsulResolver::ValidateConstructorInputs(std::string_view service_name,
  */
 ConsulResolver::ConsulResolver(std::string service_name, const std::string &consul_address,
                                std::chrono::milliseconds refresh_interval)
-    : service_name_([&service_name, refresh_interval, &consul_address]() {
-        ValidateConstructorInputs(service_name, refresh_interval);
-        if (consul_address.empty()) {
-          throw ConfigException("ConsulResolver consul_address must not be empty");
-        }
-        return std::move(service_name);
-      }()),
-      http_client_(std::make_unique<ConsulHttpClient>(consul_address)),
-      refresh_interval_(refresh_interval) {}
-
-/**
- * @brief Creates a Consul resolver with an injected HTTP client.
- *
- * @param service_name Consul service name to watch.
- * @param http_client Client used for Consul catalog requests.
- * @param refresh_interval Maximum blocking-query wait interval.
- */
-ConsulResolver::ConsulResolver(std::string service_name, std::unique_ptr<ConsulHttpClientInterface> http_client,
-                               std::chrono::milliseconds refresh_interval)
-    : service_name_([&service_name, refresh_interval, &http_client]() {
-        ValidateConstructorInputs(service_name, refresh_interval);
-        if (http_client == nullptr) {
-          throw ConfigException("ConsulResolver http_client must not be null");
-        }
-        return std::move(service_name);
-      }()),
-      http_client_(std::move(http_client)),
-      refresh_interval_(refresh_interval) {}
+    : service_name_(std::move(service_name)), http_client_(consul_address), refresh_interval_(refresh_interval) {}
 
 /** @brief Stops the refresh thread before destroying resolver state. */
 ConsulResolver::~ConsulResolver() { Stop(); }
@@ -180,18 +136,6 @@ auto ConsulResolver::last_error() const -> std::string {
   return last_error_;
 }
 
-/** @return Resolver kind used in client diagnostics. */
-auto ConsulResolver::kind() const -> ResolverKind { return ResolverKind::Consul; }
-
-/** @return Snapshot of resolver refresh counters. */
-auto ConsulResolver::stats() const -> ResolverStatsSnapshot {
-  return ResolverStatsSnapshot{
-      .refresh_success_count_ = refresh_success_count_.load(),
-      .refresh_failure_count_ = refresh_failure_count_.load(),
-      .empty_snapshot_count_ = empty_snapshot_count_.load(),
-  };
-}
-
 /**
  * @brief Fetches one service snapshot from Consul.
  *
@@ -207,16 +151,14 @@ auto ConsulResolver::Fetch(bool blocking) -> Status {
   const std::chrono::milliseconds request_timeout =
       blocking ? refresh_interval_ + std::chrono::duration_cast<std::chrono::milliseconds>(CONSUL_ERROR_SLEEP)
                : refresh_interval_;
-  const StatusOr<ConsulHttpResponse> response_result = http_client_->Get(QueryPath(blocking), request_timeout);
+  const StatusOr<ConsulHttpResponse> response_result = http_client_.Get(QueryPath(blocking), request_timeout);
   if (!response_result.ok()) {
-    refresh_failure_count_.fetch_add(1);
     SetLastError(response_result.status().message());
     return response_result.status();
   }
 
   const ConsulHttpResponse &response = response_result.value();
   if (response.status_code_ < 200 || response.status_code_ >= 300) {
-    refresh_failure_count_.fetch_add(1);
     std::string error = "Consul request failed with HTTP status " + std::to_string(response.status_code_);
     SetLastError(error);
     return {StatusCode::Unavailable, std::move(error)};
@@ -224,15 +166,10 @@ auto ConsulResolver::Fetch(bool blocking) -> Status {
 
   try {
     std::vector<Endpoint> endpoints = ParseEndpoints(response.body_);
-    if (endpoints.empty()) {
-      empty_snapshot_count_.fetch_add(1);
-    }
     SetSnapshot(std::move(endpoints), ParseConsulIndex(response));
-    refresh_success_count_.fetch_add(1);
     SetLastError({});
     return Status::Ok();
   } catch (...) {
-    refresh_failure_count_.fetch_add(1);
     Status status = CaughtExceptionToStatus(StatusCode::DataLoss, "failed to parse Consul response");
     SetLastError(status.message());
     return status;

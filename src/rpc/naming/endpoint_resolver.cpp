@@ -133,9 +133,6 @@ class StaticResolver final : public EndpointResolver {
   /** @return Empty error text because static resolution cannot refresh-fail after construction. */
   [[nodiscard]] auto last_error() const -> std::string override { return {}; }
 
-  /** @return Resolver kind used for client diagnostics. */
-  [[nodiscard]] auto kind() const -> ResolverKind override { return ResolverKind::StaticList; }
-
  private:
   std::vector<Endpoint> endpoints_;
 };
@@ -166,63 +163,28 @@ auto CanonicalizeEndpoints(std::vector<Endpoint> endpoints) -> std::vector<Endpo
 }
 
 /**
- * @brief Validates resolver options and converts a target URI into resolver configuration.
+ * @brief Constructs the resolver selected by the target URI.
  *
- * Supported targets are `list://host:port[,host:port...]` and `consul://service-name`.
- *
- * @param options Public resolver-related client options.
- * @return Normalized resolver configuration.
- * @throws ConfigException when the target scheme or scheme payload is invalid.
+ * @param target Resolver URI.
+ * @param consul_address Consul agent address used by Consul targets.
+ * @param refresh_interval Consul refresh wait and retry interval.
+ * @return Resolver instance ready for `Start()`.
+ * @throws ConfigException when the target or resolver settings are invalid.
  */
-auto NormalizeResolverOptions(const ResolverOptions &options) -> ResolverConfig {
-  const std::string_view target = Trim(options.target_);
-  if (target.empty()) {
-    throw ConfigException("RpcClient target must not be empty");
-  }
-  if (options.discovery_refresh_interval_ < std::chrono::milliseconds::zero()) {
-    throw ConfigException("RpcClient discovery_refresh_interval must not be negative");
-  }
+auto MakeEndpointResolver(std::string_view target, const std::string &consul_address,
+                          std::chrono::milliseconds refresh_interval) -> std::unique_ptr<EndpointResolver> {
+  target = Trim(target);
   if (StartsWith(target, LIST_SCHEME)) {
-    return ResolverConfig{
-        .kind_ = ResolverKind::StaticList,
-        .static_endpoints_ = ParseListTarget(target),
-        .consul_service_name_ = {},
-        .consul_address_ = {},
-        .discovery_refresh_interval_ = options.discovery_refresh_interval_,
-    };
+    return std::make_unique<StaticResolver>(ParseListTarget(target));
   }
   if (StartsWith(target, CONSUL_SCHEME)) {
     std::string service_name(Trim(target.substr(CONSUL_SCHEME.size())));
     if (service_name.empty()) {
       throw ConfigException("consul target requires a service name");
     }
-    if (options.consul_address_.empty()) {
-      throw ConfigException("consul target requires consul_address");
-    }
-    return ResolverConfig{
-        .kind_ = ResolverKind::Consul,
-        .static_endpoints_ = {},
-        .consul_service_name_ = std::move(service_name),
-        .consul_address_ = options.consul_address_,
-        .discovery_refresh_interval_ = options.discovery_refresh_interval_,
-    };
+    return std::make_unique<ConsulResolver>(std::move(service_name), consul_address, refresh_interval);
   }
   throw ConfigException("unsupported RpcClient target scheme");
-}
-
-/**
- * @brief Constructs the resolver implementation selected by the normalized target URI.
- *
- * @param options Public resolver-related client options.
- * @return Resolver instance ready for `Start()`.
- */
-auto MakeEndpointResolver(const ResolverOptions &options) -> std::unique_ptr<EndpointResolver> {
-  const ResolverConfig config = NormalizeResolverOptions(options);
-  if (config.kind_ == ResolverKind::StaticList) {
-    return std::make_unique<StaticResolver>(config.static_endpoints_);
-  }
-  return std::make_unique<ConsulResolver>(config.consul_service_name_, config.consul_address_,
-                                          config.discovery_refresh_interval_);
 }
 
 }  // namespace xrpc

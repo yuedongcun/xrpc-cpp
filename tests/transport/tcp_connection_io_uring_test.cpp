@@ -17,7 +17,6 @@
 #include "protocol/frame_codec.h"
 #include "protocol/protocol_error.h"
 #include "protocol/protocol_message.h"
-#include "rpc/protobuf_codec.h"
 #include "transport/dispatch_completion_queue.h"
 #include "transport/tcp_connection.h"
 #include "transport/thread_pool_executor.h"
@@ -43,7 +42,7 @@ auto MakeEchoRawResponse(const xrpc::RawRequest &request) -> xrpc::RawResponse {
     return response;
   }
 
-  response.payload_ = xrpc::ProtobufCodec::Encode(Echo(parsed_request));
+  response.payload_ = Echo(parsed_request).SerializeAsString();
   return response;
 }
 
@@ -75,7 +74,7 @@ auto MakeRequestFrame(std::string message, std::uint64_t request_id) -> std::str
   protocol_request.request_id_ = request_id;
   protocol_request.service_name_ = "EchoService";
   protocol_request.method_name_ = "Echo";
-  protocol_request.payload_ = xrpc::ProtobufCodec::Encode(request);
+  protocol_request.payload_ = request.SerializeAsString();
 
   xrpc::FrameCodec codec;
   return codec.EncodeRequest(protocol_request);
@@ -171,7 +170,9 @@ auto DecodeEchoMessage(std::string_view frame, std::uint64_t expected_request_id
   const auto &protocol_response = *decoded.response_;
   EXPECT_EQ(protocol_response.request_id_, expected_request_id);
   EXPECT_EQ(protocol_response.error_code_, 0);
-  return xrpc::ProtobufCodec::Decode<xrpc::test::EchoResponse>(protocol_response.payload_).message();
+  xrpc::test::EchoResponse response;
+  EXPECT_TRUE(response.ParseFromString(protocol_response.payload_));
+  return response.message();
 }
 
 auto DecodeResponseStatus(std::string_view frame, std::uint64_t expected_request_id) -> xrpc::Status {
@@ -366,7 +367,7 @@ TEST(CoroutineTcpConnectionTest, HandlesConcurrentResponsesWithThreadPoolExecuto
   slow_protocol_request.request_id_ = 31;
   slow_protocol_request.service_name_ = "EchoService";
   slow_protocol_request.method_name_ = "SlowEcho";
-  slow_protocol_request.payload_ = xrpc::ProtobufCodec::Encode(slow_request);
+  slow_protocol_request.payload_ = slow_request.SerializeAsString();
 
   xrpc::test::EchoRequest fast_request;
   fast_request.set_message("fast");
@@ -374,7 +375,7 @@ TEST(CoroutineTcpConnectionTest, HandlesConcurrentResponsesWithThreadPoolExecuto
   fast_protocol_request.request_id_ = 32;
   fast_protocol_request.service_name_ = "EchoService";
   fast_protocol_request.method_name_ = "Echo";
-  fast_protocol_request.payload_ = xrpc::ProtobufCodec::Encode(fast_request);
+  fast_protocol_request.payload_ = fast_request.SerializeAsString();
 
   xrpc::FrameCodec codec;
   pair.client_socket_.WriteAll(codec.EncodeRequest(slow_protocol_request) + codec.EncodeRequest(fast_protocol_request));
@@ -483,7 +484,7 @@ TEST(CoroutineTcpConnectionTest, ReturnsResourceExhaustedWhenPerConnectionInflig
   protocol_request.request_id_ = 51;
   protocol_request.service_name_ = "EchoService";
   protocol_request.method_name_ = "SlowEcho";
-  protocol_request.payload_ = xrpc::ProtobufCodec::Encode(request);
+  protocol_request.payload_ = request.SerializeAsString();
   xrpc::ProtocolRequest rejected_protocol_request = protocol_request;
   rejected_protocol_request.request_id_ = 52;
   xrpc::FrameCodec codec;

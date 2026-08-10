@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <memory>
 #include <mutex>
@@ -9,8 +10,8 @@
 
 #include <xrpc/rpc_client.h>
 
+#include "protocol/frame_codec.h"
 #include "rpc/client/channel_endpoint.h"
-#include "rpc/client/client_config.h"
 #include "rpc/client/endpoint_selector.h"
 #include "rpc/client/endpoint_state_table.h"
 #include "rpc/raw_call_result.h"
@@ -30,8 +31,9 @@ namespace xrpc {
  */
 class ClientChannel final {
  public:
-  /** @brief Creates a channel from normalized client configuration. */
-  explicit ClientChannel(ClientConfig config);
+  /** @brief Creates a channel from validated client transport settings. */
+  ClientChannel(std::chrono::milliseconds default_timeout, ProtocolLimits protocol_limits,
+                std::size_t max_inflight_per_endpoint);
 
   /** @brief Closes owned transports before destroying endpoint runtime state. */
   ~ClientChannel();
@@ -88,8 +90,9 @@ class ClientChannel final {
   [[nodiscard]] auto EnsureRuntimeEndpointState(const std::string &endpoint_id)
       -> std::shared_ptr<EndpointRuntimeState>;
 
-  /** @brief Normalized client and protocol configuration. */
-  ClientConfig config_;
+  std::chrono::milliseconds default_timeout_;
+  ProtocolLimits protocol_limits_;
+  std::size_t max_inflight_per_endpoint_;
 
   /** @brief Protects endpoint table, runtime-state map, and routing snapshot publication. */
   mutable std::mutex state_mutex_;

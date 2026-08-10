@@ -5,8 +5,6 @@
 
 #include "rpc/xrpc_exception.h"
 
-#include "rpc/naming/consul_agent_client.h"
-
 namespace xrpc {
 
 /**
@@ -151,7 +149,7 @@ void RpcServer::ServerRuntime::RegisterServiceIfEnabled(std::string_view host) {
     return;
   }
   if (!registrar_) {
-    registrar_ = std::make_unique<ConsulRegistrar>(std::make_unique<ConsulAgentClient>(config_.consul_address_));
+    registrar_ = std::make_unique<ConsulRegistrar>(config_.consul_address_);
   }
   const Status status = registrar_->Register(ResolveRegistrarOptions(config_, host, server_.port()));
   if (!status.ok()) {

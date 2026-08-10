@@ -8,17 +8,23 @@
 #include "rpc/xrpc_exception.h"
 
 #include "io/socket_error.h"
+#include "rpc/client/client_config.h"
 #include "rpc/client/tcp_transport.h"
-#include "rpc/client/transport_error.h"
 
 namespace xrpc {
 
 /**
- * @brief Creates a channel with normalized client configuration.
+ * @brief Creates a channel with validated transport settings.
  *
- * @param config Client configuration already validated by `NormalizeClientOptions()`.
+ * @param default_timeout Client-wide timeout inherited by calls without an override.
+ * @param protocol_limits Validated wire-protocol limits.
+ * @param max_inflight_per_endpoint Per-endpoint pending call limit.
  */
-ClientChannel::ClientChannel(ClientConfig config) : config_(std::move(config)) {}
+ClientChannel::ClientChannel(std::chrono::milliseconds default_timeout, ProtocolLimits protocol_limits,
+                             std::size_t max_inflight_per_endpoint)
+    : default_timeout_(default_timeout),
+      protocol_limits_(protocol_limits),
+      max_inflight_per_endpoint_(max_inflight_per_endpoint) {}
 
 /** @brief Releases endpoint transports through owned runtime state. */
 ClientChannel::~ClientChannel() = default;
@@ -103,7 +109,7 @@ auto ClientChannel::LoadRoutingSnapshot() const -> std::shared_ptr<const Routing
  * @return `Status::Ok()` after one endpoint connects, otherwise the last connection failure.
  */
 auto ClientChannel::EnsureConnected() -> Status {
-  const EffectiveCallOptions effective_options = ResolveCallOptions(config_, CallOptions{});
+  const EffectiveCallOptions effective_options = ResolveCallOptions(default_timeout_, CallOptions{});
   const std::shared_ptr<const RoutingSnapshot> snapshot = LoadRoutingSnapshot();
   if (!snapshot || snapshot->active_endpoints_.empty()) {
     return {StatusCode::Unavailable, "no endpoints available"};
@@ -133,9 +139,9 @@ auto ClientChannel::EnsureConnected() -> Status {
  * @return Successful response, or the final failure result with commit state.
  */
 auto ClientChannel::Call(const RawRequest &request, const CallOptions &options) -> RawCallResult {
-  const EffectiveCallOptions effective_options = ResolveCallOptions(config_, options);
-  RawCallResult last_result = MakeCallFailure(request.request_id_, {StatusCode::Unavailable, "no endpoints available"},
-                                              RequestCommitState::NotSent);
+  const EffectiveCallOptions effective_options = ResolveCallOptions(default_timeout_, options);
+  RawCallResult last_result =
+      MakeCallFailure({StatusCode::Unavailable, "no endpoints available"}, RequestCommitState::NotSent);
 
   const std::shared_ptr<const RoutingSnapshot> snapshot = LoadRoutingSnapshot();
   if (!snapshot || snapshot->active_endpoints_.empty()) {
@@ -183,12 +189,12 @@ auto ClientChannel::EnsureConnectedAtEndpoint(const ActiveEndpointSnapshot &endp
   try {
     if (!state.transport_) {
       state.transport_ = std::make_unique<TcpTransport>(endpoint.endpoint_.host_, endpoint.endpoint_.port_,
-                                                        config_.protocol_limits_, config_.max_inflight_per_endpoint_);
+                                                        protocol_limits_, max_inflight_per_endpoint_);
     }
     state.transport_->EnsureConnected(options);
   } catch (const io::SocketError &error) {
     state.transport_.reset();
-    return ToStatus(error);
+    return error.status();
   } catch (...) {
     state.transport_.reset();
     return CaughtExceptionToStatus("transport connect failed");
@@ -217,12 +223,11 @@ auto ClientChannel::CallAtEndpoint(const ActiveEndpointSnapshot &endpoint, const
     try {
       if (!state.transport_) {
         state.transport_ = std::make_unique<TcpTransport>(endpoint.endpoint_.host_, endpoint.endpoint_.port_,
-                                                          config_.protocol_limits_, config_.max_inflight_per_endpoint_);
+                                                          protocol_limits_, max_inflight_per_endpoint_);
       }
       transport = state.transport_.get();
     } catch (...) {
-      return MakeCallFailure(request.request_id_, CaughtExceptionToStatus("failed to create transport"),
-                             RequestCommitState::NotSent);
+      return MakeCallFailure(CaughtExceptionToStatus("failed to create transport"), RequestCommitState::NotSent);
     }
   }
 

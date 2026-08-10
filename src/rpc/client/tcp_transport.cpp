@@ -14,7 +14,6 @@
 #include "io/socket_error.h"
 #include "protocol/protocol_error.h"
 #include "protocol/protocol_message.h"
-#include "rpc/client/transport_error.h"
 #include "rpc/protocol_adapter.h"
 
 namespace xrpc {
@@ -212,7 +211,7 @@ void TcpTransport::EnsureConnected(const EffectiveCallOptions &options) {
  */
 auto TcpTransport::Call(const RawRequest &request, const EffectiveCallOptions &options) -> RawCallResult {
   auto fail = [&request](Status status, RequestCommitState state) -> RawCallResult {
-    return MakeCallFailure(request.request_id_, std::move(status), state);
+    return MakeCallFailure(std::move(status), state);
   };
 
   FrameCodec codec(protocol_limits_);
@@ -226,7 +225,7 @@ auto TcpTransport::Call(const RawRequest &request, const EffectiveCallOptions &o
   try {
     EnsureConnectedWithTimeout(options.timeout_);
   } catch (const io::SocketError &error) {
-    return fail(ToStatus(error), RequestCommitState::NotSent);
+    return fail(error.status(), RequestCommitState::NotSent);
   } catch (...) {
     return fail(CaughtExceptionToStatus("transport connect failed"), RequestCommitState::NotSent);
   }
@@ -343,7 +342,7 @@ void TcpTransport::ReaderLoop(int fd) {
       }
 
       const std::uint64_t request_id = response->request_id_;
-      CompletePending(request_id, MakeCallSuccess(request_id, std::move(*response)));
+      CompletePending(request_id, MakeCallSuccess(std::move(*response)));
       buffer.erase(0, decoded.consumed_);
     }
 
@@ -474,7 +473,7 @@ void TcpTransport::FailAllPending(const Status &status, RequestCommitState commi
   for (const auto &pending : pending_calls) {
     {
       std::lock_guard lock(pending->mutex_);
-      pending->result_.emplace(pending->request_id_, CallFailure{.status_ = status, .commit_state_ = commit_state});
+      pending->result_.emplace(CallFailure{.status_ = status, .commit_state_ = commit_state});
     }
     pending->cv_.notify_one();
   }
@@ -501,8 +500,7 @@ auto TcpTransport::WaitForResult(const std::shared_ptr<PendingCall> &pending, st
       if (RemovePending(request_id)) {
         // The request was written, so a late server execution is possible even
         // though this caller timed out locally.
-        return MakeCallFailure(request_id, {StatusCode::DeadlineExceeded, "RPC deadline exceeded"},
-                               RequestCommitState::MaybeSent);
+        return MakeCallFailure({StatusCode::DeadlineExceeded, "RPC deadline exceeded"}, RequestCommitState::MaybeSent);
       }
       pending->cv_.wait(lock, has_result);
     }
@@ -528,13 +526,12 @@ auto TcpTransport::WriteRequestFrame(std::uint64_t request_id, std::string_view 
   const int fd = ConnectedFd();
   if (fd < 0) {
     (void)RemovePending(request_id);
-    return MakeCallFailure(request_id, {StatusCode::Unavailable, "transport not connected"},
-                           RequestCommitState::NotSent);
+    return MakeCallFailure({StatusCode::Unavailable, "transport not connected"}, RequestCommitState::NotSent);
   }
 
   if (std::optional<Status> timeout_status = SetSendTimeout(fd, RemainingTimeout(options))) {
     (void)RemovePending(request_id);
-    return MakeCallFailure(request_id, std::move(*timeout_status), RequestCommitState::NotSent);
+    return MakeCallFailure(std::move(*timeout_status), RequestCommitState::NotSent);
   }
 
   if (std::optional<Status> send_status = SendAll(fd, frame)) {
@@ -542,7 +539,7 @@ auto TcpTransport::WriteRequestFrame(std::uint64_t request_id, std::string_view 
     Close();
     // send() may fail after writing a prefix of the frame. Treat it as MaybeSent
     // so ClientChannel does not retry and risk duplicate execution.
-    return MakeCallFailure(request_id, std::move(*send_status), RequestCommitState::MaybeSent);
+    return MakeCallFailure(std::move(*send_status), RequestCommitState::MaybeSent);
   }
 
   return std::nullopt;

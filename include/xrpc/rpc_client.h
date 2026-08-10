@@ -201,29 +201,10 @@ class RpcClient final {
   }
 
  private:
-  struct PayloadRequest {
-    std::uint64_t request_id_ = 0;
-    std::string service_name_;
-    std::string method_name_;
-    std::string payload_;
-  };
-
-  struct PayloadResponse {
-    std::uint64_t request_id_ = 0;
-    std::string payload_;
-  };
-
   class ClientRuntime;
 
   /** @brief Creates a facade from a successfully constructed private runtime. */
   explicit RpcClient(std::unique_ptr<ClientRuntime> runtime);
-
-  /** @brief Sends a fully prepared payload request through the private runtime. */
-  [[nodiscard]] auto CallPayloadRequest(const PayloadRequest &request, const CallOptions &options)
-      -> StatusOr<PayloadResponse>;
-
-  /** @brief Allocates the next request id from the private runtime. */
-  [[nodiscard]] auto NextRequestId() -> std::uint64_t;
 
   std::unique_ptr<ClientRuntime> runtime_;
 };

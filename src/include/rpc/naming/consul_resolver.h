@@ -1,9 +1,7 @@
 #pragma once
 
-#include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <memory>
 #include <mutex>
 #include <stop_token>
 #include <string>
@@ -37,14 +35,6 @@ class ConsulResolver final : public EndpointResolver {
   ConsulResolver(std::string service_name, const std::string &consul_address,
                  std::chrono::milliseconds refresh_interval);
 
-  /**
-   * @brief Creates a resolver with an injected Consul HTTP client.
-   *
-   * Tests use this constructor to avoid real Consul dependencies while preserving resolver behavior.
-   */
-  ConsulResolver(std::string service_name, std::unique_ptr<ConsulHttpClientInterface> http_client,
-                 std::chrono::milliseconds refresh_interval);
-
   /** @brief Stops the refresh thread before destroying resolver state. */
   ~ConsulResolver() override;
 
@@ -63,16 +53,7 @@ class ConsulResolver final : public EndpointResolver {
   /** @return Last refresh error text, or empty string after a successful refresh. */
   [[nodiscard]] auto last_error() const -> std::string override;
 
-  /** @return `ResolverKind::Consul`. */
-  [[nodiscard]] auto kind() const -> ResolverKind override;
-
-  /** @return Refresh and empty-snapshot counters. */
-  [[nodiscard]] auto stats() const -> ResolverStatsSnapshot override;
-
  private:
-  /** @brief Validates constructor arguments before background work can start. */
-  static void ValidateConstructorInputs(std::string_view service_name, std::chrono::milliseconds refresh_interval);
-
   /** @brief Fetches one Consul service snapshot, optionally using a blocking query. */
   [[nodiscard]] auto Fetch(bool blocking) -> Status;
 
@@ -92,7 +73,7 @@ class ConsulResolver final : public EndpointResolver {
   std::string service_name_;
 
   /** @brief HTTP client used for Consul catalog requests. */
-  std::unique_ptr<ConsulHttpClientInterface> http_client_;
+  ConsulHttpClient http_client_;
 
   /** @brief Refresh wait/backoff interval. */
   std::chrono::milliseconds refresh_interval_;
@@ -108,15 +89,6 @@ class ConsulResolver final : public EndpointResolver {
 
   /** @brief Last Consul index used for blocking queries. */
   std::uint64_t last_index_ = 0;
-
-  /** @brief Successful refresh count. */
-  std::atomic<std::uint64_t> refresh_success_count_{0};
-
-  /** @brief Failed refresh count. */
-  std::atomic<std::uint64_t> refresh_failure_count_{0};
-
-  /** @brief Count of refreshes that returned no usable endpoints. */
-  std::atomic<std::uint64_t> empty_snapshot_count_{0};
 
   /** @brief Background thread performing blocking Consul refreshes. */
   std::jthread refresh_thread_;

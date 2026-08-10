@@ -33,17 +33,6 @@ auto ConsulAgentClient::DeregisterService(const std::string &service_id, std::ch
 }
 
 /**
- * @brief Marks a Consul TTL check as passing.
- *
- * @param check_id Consul health-check id.
- * @param timeout Connect and socket I/O timeout.
- * @return `Status::Ok()` for any 2xx response, otherwise transport or HTTP failure status.
- */
-auto ConsulAgentClient::PassTTL(const std::string &check_id, std::chrono::milliseconds timeout) const -> Status {
-  return HandleAgentWriteResponse(http_client_.Put("/v1/agent/check/pass/" + check_id, "", timeout));
-}
-
-/**
  * @brief Converts a Consul agent write response into the public status contract.
  *
  * @param response HTTP response or transport/protocol failure from `ConsulHttpClient`.

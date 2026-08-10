@@ -18,7 +18,6 @@
 #include "protocol/frame_codec.h"
 #include "protocol/protocol_error.h"
 #include "protocol/protocol_message.h"
-#include "rpc/protobuf_codec.h"
 
 namespace {
 
@@ -65,8 +64,8 @@ class EchoTestServer final {
         const xrpc::DecodeResult decoded = codec.TryDecode(buffer);
         if (decoded.error_ == xrpc::ProtocolError::Ok && decoded.request_.has_value()) {
           const auto &request = *decoded.request_;
-          const xrpc::test::EchoRequest echo_request =
-              xrpc::ProtobufCodec::Decode<xrpc::test::EchoRequest>(request.payload_);
+          xrpc::test::EchoRequest echo_request;
+          ASSERT_TRUE(echo_request.ParseFromString(request.payload_));
 
           xrpc::test::EchoResponse echo_response;
           echo_response.set_message("echo: " + echo_request.message());
@@ -75,7 +74,7 @@ class EchoTestServer final {
           response.request_id_ = request.request_id_;
           response.error_code_ = 0;
           response.error_text_.clear();
-          response.payload_ = xrpc::ProtobufCodec::Encode(echo_response);
+          response.payload_ = echo_response.SerializeAsString();
 
           socket.WriteAll(codec.EncodeResponse(response));
           buffer.erase(0, decoded.consumed_);

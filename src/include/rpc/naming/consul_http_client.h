@@ -28,37 +28,19 @@ struct ConsulHttpResponse {
   std::string body_;
 };
 
-/**
- * @brief Blocking HTTP client abstraction for Consul resolver and registrar code.
- *
- * Tests can provide deterministic Consul responses without a real agent. Production code uses `ConsulHttpClient`.
- */
-class ConsulHttpClientInterface {
- public:
-  virtual ~ConsulHttpClientInterface() = default;
-
-  /** @brief Sends a blocking HTTP GET request to a Consul API path. */
-  [[nodiscard]] virtual auto Get(std::string_view path, std::chrono::milliseconds timeout) const
-      -> StatusOr<ConsulHttpResponse> = 0;
-
-  /** @brief Sends a blocking HTTP PUT request to a Consul API path. */
-  [[nodiscard]] virtual auto Put(std::string_view path, std::string_view body, std::chrono::milliseconds timeout) const
-      -> StatusOr<ConsulHttpResponse> = 0;
-};
-
 /** @brief Small blocking HTTP/1.1 client for Consul agent API calls. */
-class ConsulHttpClient final : public ConsulHttpClientInterface {
+class ConsulHttpClient final {
  public:
   /** @brief Creates a client for `host:port` Consul agent address. */
   explicit ConsulHttpClient(const std::string &address);
 
   /** @brief Sends a blocking HTTP GET request. */
   [[nodiscard]] auto Get(std::string_view path, std::chrono::milliseconds timeout) const
-      -> StatusOr<ConsulHttpResponse> override;
+      -> StatusOr<ConsulHttpResponse>;
 
   /** @brief Sends a blocking HTTP PUT request. */
   [[nodiscard]] auto Put(std::string_view path, std::string_view body, std::chrono::milliseconds timeout) const
-      -> StatusOr<ConsulHttpResponse> override;
+      -> StatusOr<ConsulHttpResponse>;
 
  private:
   /** @brief Sends one blocking HTTP request to the configured Consul agent. */

@@ -10,9 +10,7 @@
 #include <xrpc/rpc_client.h>
 
 #include "rpc/client/client_channel.h"
-#include "rpc/client/client_config.h"
 #include "rpc/naming/endpoint_resolver.h"
-#include "rpc/raw_message.h"
 
 namespace xrpc {
 
@@ -28,22 +26,6 @@ namespace xrpc {
  */
 class RpcClient::ClientRuntime final {
  public:
-  /** @brief Diagnostics for resolver snapshot application into the channel. */
-  struct DiscoveryStats {
-    std::uint64_t snapshot_apply_attempt_count_ = 0;
-    std::uint64_t snapshot_update_count_ = 0;
-    std::uint64_t empty_snapshot_count_ = 0;
-  };
-
-  /** @brief Diagnostics copied from the active resolver implementation. */
-  struct ResolverStats {
-    bool is_consul_resolver_ = false;
-    std::uint64_t refresh_success_count_ = 0;
-    std::uint64_t refresh_failure_count_ = 0;
-    std::uint64_t empty_snapshot_count_ = 0;
-    std::string last_error_;
-  };
-
   /** @brief Builds resolver and channel objects from public client options. */
   explicit ClientRuntime(const RpcClientOptions &options);
 
@@ -53,30 +35,18 @@ class RpcClient::ClientRuntime final {
   /** @return Resolver startup and first-snapshot status. */
   [[nodiscard]] auto Init() -> Status;
 
-  /** @return Raw payload response converted to the public client response shape. */
-  [[nodiscard]] auto Call(const RpcClient::PayloadRequest &request, const CallOptions &options)
-      -> StatusOr<RpcClient::PayloadResponse>;
-
-  /** @return Discovery snapshot application counters. */
-  [[nodiscard]] auto discovery_stats() const -> DiscoveryStats;
-
-  /** @return Resolver counters and last error text. */
-  [[nodiscard]] auto resolver_stats() const -> ResolverStats;
+  /** @return Response payload from one discovered and routed RPC call. */
+  [[nodiscard]] auto Call(std::string service_name, std::string method_name, std::string payload,
+                          const CallOptions &options) -> StatusOr<std::string>;
 
  private:
   friend class RpcClient;
-
-  /** @brief Starts discovery and stores any initial failure for later call paths. */
-  void StartResolverAndDeferInitialFailure();
 
   /** @brief Copies the latest resolver snapshot into the channel when it changes. */
   [[nodiscard]] auto ApplyResolverSnapshot() -> Status;
 
   /** @brief Allocates the next monotonically increasing request id. */
   [[nodiscard]] auto NextRequestId() -> std::uint64_t;
-
-  /** @brief Normalized configuration shared by resolver and channel. */
-  ClientConfig config_;
 
   /** @brief Endpoint resolver chosen from the target string. */
   std::unique_ptr<EndpointResolver> resolver_;
@@ -92,15 +62,6 @@ class RpcClient::ClientRuntime final {
 
   /** @brief Serializes resolver snapshot reads and channel updates. */
   mutable std::mutex resolver_snapshot_mu_;
-
-  /** @brief Number of attempts to apply a resolver snapshot. */
-  std::atomic<std::uint64_t> snapshot_apply_attempt_count_{0};
-
-  /** @brief Number of times a changed snapshot was published to the channel. */
-  std::atomic<std::uint64_t> snapshot_update_count_{0};
-
-  /** @brief Number of empty resolver snapshots observed. */
-  std::atomic<std::uint64_t> empty_snapshot_count_{0};
 };
 
 }  // namespace xrpc

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <chrono>
-#include <memory>
 #include <string>
 
 #include <xrpc/status.h>
@@ -14,7 +13,7 @@ namespace xrpc {
  * @brief Best-effort Consul service registration helper.
  *
  * The registrar remembers the registered service id so deregistration can run during server shutdown. Registration
- * failures are returned as `Status` and also stored as `last_error_` for diagnostics.
+ * failures are returned as `Status`.
  */
 class ConsulRegistrar final {
  public:
@@ -36,17 +35,8 @@ class ConsulRegistrar final {
     std::chrono::milliseconds timeout_{1000};
   };
 
-  /** @brief Validated registration configuration used to build the Consul payload. */
-  struct Config {
-    std::string service_name_;
-    std::string service_id_;
-    std::string service_address_;
-    std::uint16_t service_port_ = 0;
-    std::chrono::milliseconds timeout_{0};
-  };
-
-  /** @brief Creates a registrar with an injected Consul agent client. */
-  explicit ConsulRegistrar(std::unique_ptr<ConsulAgentClientInterface> agent_client);
+  /** @brief Creates a registrar for one Consul agent address. */
+  explicit ConsulRegistrar(const std::string &consul_address);
 
   /** @brief Registers the service and records the registered service id on success. */
   [[nodiscard]] auto Register(const Options &options) -> Status;
@@ -57,21 +47,17 @@ class ConsulRegistrar final {
   /** @return true after successful registration and before successful deregistration. */
   [[nodiscard]] auto registered() const -> bool;
 
-  /** @return Last registration or deregistration error text. */
-  [[nodiscard]] auto last_error() const -> std::string;
-
  private:
-  /** @brief Validates user-facing options and fills the internal registration config. */
-  [[nodiscard]] static auto NormalizeOptions(const Options &options) -> StatusOr<Config>;
+  /** @brief Validates service registration options. */
+  [[nodiscard]] static auto ValidateOptions(const Options &options) -> Status;
 
   /** @brief Builds the JSON payload accepted by Consul's service registration API. */
-  [[nodiscard]] auto BuildRegisterPayload(const Config &options) const -> std::string;
+  [[nodiscard]] auto BuildRegisterPayload(const Options &options) const -> std::string;
 
-  std::unique_ptr<ConsulAgentClientInterface> agent_client_;
+  ConsulAgentClient agent_client_;
   bool registered_ = false;
   std::string registered_service_id_;
   std::chrono::milliseconds timeout_{1000};
-  std::string last_error_;
 };
 
 }  // namespace xrpc
