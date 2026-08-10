@@ -9,7 +9,7 @@ namespace xrpc {
  *
  * @param consul_address Consul agent address in `host:port` form.
  */
-ConsulRegistrar::ConsulRegistrar(const std::string &consul_address) : agent_client_(consul_address) {}
+ConsulRegistrar::ConsulRegistrar(const std::string &consul_address) : http_client_(consul_address) {}
 
 /**
  * @brief Registers this process as a Consul service instance.
@@ -25,7 +25,7 @@ auto ConsulRegistrar::Register(const Options &options) -> Status {
   }
 
   const std::string payload = BuildRegisterPayload(options);
-  Status status = agent_client_.RegisterService(payload, options.timeout_);
+  Status status = HandleAgentWriteResponse(http_client_.Put("/v1/agent/service/register", payload, options.timeout_));
   if (!status.ok()) {
     return {status.code(), status.message()};
   }
@@ -44,7 +44,8 @@ auto ConsulRegistrar::Deregister() -> Status {
   if (!registered_) {
     return Status::Ok();
   }
-  const Status status = agent_client_.DeregisterService(registered_service_id_, timeout_);
+  const Status status = HandleAgentWriteResponse(
+      http_client_.Put("/v1/agent/service/deregister/" + registered_service_id_, "", timeout_));
   if (!status.ok()) {
     return {status.code(), status.message()};
   }
@@ -95,6 +96,17 @@ auto ConsulRegistrar::BuildRegisterPayload(const Options &options) const -> std:
   payload["Address"] = options.service_address_;
   payload["Port"] = options.service_port_;
   return payload.dump();
+}
+
+auto ConsulRegistrar::HandleAgentWriteResponse(const StatusOr<ConsulHttpResponse> &response) -> Status {
+  if (!response.ok()) {
+    return response.status();
+  }
+  const int status_code = response.value().status_code_;
+  if (status_code < 200 || status_code >= 300) {
+    return {StatusCode::Unavailable, "Consul agent request failed with HTTP status " + std::to_string(status_code)};
+  }
+  return Status::Ok();
 }
 
 }  // namespace xrpc

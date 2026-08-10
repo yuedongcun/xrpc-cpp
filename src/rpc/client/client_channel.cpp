@@ -3,6 +3,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <utility>
 
 #include "rpc/xrpc_exception.h"
@@ -11,6 +12,66 @@
 #include "rpc/client/client_config.h"
 
 namespace xrpc {
+
+void ClientChannel::EndpointStateTable::UpdateEndpoints(const std::vector<Endpoint> &endpoints) {
+  std::unordered_set<std::string> next_endpoint_ids;
+  next_endpoint_ids.reserve(endpoints.size());
+
+  active_endpoint_ids_.clear();
+  active_endpoint_ids_.reserve(endpoints.size());
+
+  for (const Endpoint &endpoint : endpoints) {
+    const std::string endpoint_id = MakeEndpointId(endpoint);
+    next_endpoint_ids.insert(endpoint_id);
+    active_endpoint_ids_.push_back(endpoint_id);
+
+    auto &entry = endpoint_entries_[endpoint_id];
+    entry.endpoint_ = endpoint;
+    entry.draining_ = false;
+  }
+
+  for (auto &entry : endpoint_entries_) {
+    if (next_endpoint_ids.contains(entry.first)) {
+      continue;
+    }
+    if (!entry.second.draining_) {
+      drained_endpoint_ids_.push_back(entry.first);
+    }
+    entry.second.draining_ = true;
+  }
+}
+
+auto ClientChannel::EndpointStateTable::ActiveEndpointIds() const -> const std::vector<std::string> & {
+  return active_endpoint_ids_;
+}
+
+auto ClientChannel::EndpointStateTable::FindEndpoint(const std::string &endpoint_id) const -> const Endpoint * {
+  const auto it = endpoint_entries_.find(endpoint_id);
+  if (it == endpoint_entries_.end()) {
+    return nullptr;
+  }
+  return &it->second.endpoint_;
+}
+
+auto ClientChannel::EndpointStateTable::TakeDrainedEndpointIds() -> std::vector<std::string> {
+  std::vector<std::string> drained_endpoint_ids = std::move(drained_endpoint_ids_);
+  drained_endpoint_ids_.clear();
+  return drained_endpoint_ids;
+}
+
+void ClientChannel::EndpointStateTable::CleanupDrainedEndpoints() {
+  for (auto it = endpoint_entries_.begin(); it != endpoint_entries_.end();) {
+    if (it->second.draining_) {
+      it = endpoint_entries_.erase(it);
+      continue;
+    }
+    ++it;
+  }
+}
+
+auto ClientChannel::EndpointStateTable::MakeEndpointId(const Endpoint &endpoint) -> std::string {
+  return endpoint.host_ + ":" + std::to_string(endpoint.port_);
+}
 
 /**
  * @brief Creates a channel with validated transport settings.

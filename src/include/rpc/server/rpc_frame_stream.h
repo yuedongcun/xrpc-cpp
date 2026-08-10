@@ -10,7 +10,6 @@
 
 #include "protocol/frame_codec.h"
 #include "rpc/raw_message.h"
-#include "transport/byte_buffer.h"
 
 namespace xrpc {
 
@@ -88,6 +87,30 @@ class RpcFrameStream final {
   [[nodiscard]] auto EncodeResponse(RawResponse &&response) const -> std::string;
 
  private:
+  /**
+   * @brief Append/consume buffer that preserves unread bytes across partial frame decode attempts.
+   *
+   * Consumed prefix storage is reclaimed before later appends, while unread bytes remain contiguous.
+   */
+  class ByteBuffer final {
+   public:
+    void Append(std::string_view bytes);
+
+    [[nodiscard]] auto ReadableBytes() const -> std::string_view;
+
+    void Consume(std::size_t n);
+
+    [[nodiscard]] auto Empty() const -> bool;
+
+   private:
+    [[nodiscard]] auto ReadableSize() const -> std::size_t;
+
+    void Compact();
+
+    std::string buffer_;
+    std::size_t read_offset_ = 0;
+  };
+
   /** @brief Drains all complete request frames currently buffered in the frame stream. */
   [[nodiscard]] auto DrainReadableRequests() -> RawRequestBatch;
 

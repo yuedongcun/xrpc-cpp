@@ -6,8 +6,52 @@
 #include "protocol/frame_codec.h"
 #include "protocol/protocol_message.h"
 #include "rpc/protocol_adapter.h"
+#include "rpc/xrpc_exception.h"
 
 namespace xrpc {
+
+void RpcFrameStream::ByteBuffer::Append(std::string_view bytes) {
+  if (bytes.empty()) {
+    return;
+  }
+  Compact();
+  buffer_.append(bytes.data(), bytes.size());
+}
+
+auto RpcFrameStream::ByteBuffer::ReadableBytes() const -> std::string_view {
+  if (ReadableSize() == 0) {
+    return {};
+  }
+  return {buffer_.data() + read_offset_, ReadableSize()};
+}
+
+void RpcFrameStream::ByteBuffer::Consume(std::size_t n) {
+  if (n > ReadableSize()) {
+    throw LifecycleException("ByteBuffer::Consume exceeds readable bytes");
+  }
+  read_offset_ += n;
+  if (read_offset_ == buffer_.size()) {
+    buffer_.clear();
+    read_offset_ = 0;
+  }
+}
+
+auto RpcFrameStream::ByteBuffer::ReadableSize() const -> std::size_t { return buffer_.size() - read_offset_; }
+
+auto RpcFrameStream::ByteBuffer::Empty() const -> bool { return ReadableSize() == 0; }
+
+void RpcFrameStream::ByteBuffer::Compact() {
+  if (read_offset_ == 0) {
+    return;
+  }
+  if (read_offset_ >= buffer_.size()) {
+    buffer_.clear();
+    read_offset_ = 0;
+    return;
+  }
+  buffer_.erase(0, read_offset_);
+  read_offset_ = 0;
+}
 
 /**
  * @brief Adds a decoded request to the batch.

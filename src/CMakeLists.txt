@@ -32,14 +32,12 @@ set(XRPC_SOURCES
     rpc/protocol_adapter.cpp
     rpc/client/client_config.cpp
     rpc/client/endpoint_selector.cpp
-    rpc/client/endpoint_state_table.cpp
     rpc/client/client_channel.cpp
     rpc/client/tcp_transport.cpp
     rpc/client/rpc_client_runtime.cpp
     rpc/client/rpc_client.cpp
     rpc/naming/endpoint_resolver.cpp
     rpc/naming/consul_http_client.cpp
-    rpc/naming/consul_agent_client.cpp
     rpc/naming/consul_resolver.cpp
     rpc/naming/consul_registrar.cpp
     rpc/server/service_registry.cpp
@@ -47,7 +45,6 @@ set(XRPC_SOURCES
     rpc/server/server_runtime.cpp
     rpc/server/rpc_frame_stream.cpp
     rpc/server/rpc_server.cpp
-    transport/byte_buffer.cpp
     transport/connection_io_loop.cpp
     transport/dispatch_completion_queue.cpp
     transport/thread_pool_executor.cpp

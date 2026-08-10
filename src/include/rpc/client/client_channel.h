@@ -12,7 +12,6 @@
 
 #include "protocol/frame_codec.h"
 #include "rpc/client/endpoint_selector.h"
-#include "rpc/client/endpoint_state_table.h"
 #include "rpc/client/tcp_transport.h"
 #include "rpc/raw_call_result.h"
 #include "rpc/raw_message.h"
@@ -81,6 +80,33 @@ class ClientChannel final {
   void UpdateEndpoints(const std::vector<Endpoint> &endpoints);
 
  private:
+  /** @brief Tracks active and draining endpoint identities across resolver snapshots. */
+  class EndpointStateTable final {
+   public:
+    void UpdateEndpoints(const std::vector<Endpoint> &endpoints);
+
+    [[nodiscard]] auto ActiveEndpointIds() const -> const std::vector<std::string> &;
+
+    [[nodiscard]] auto FindEndpoint(const std::string &endpoint_id) const -> const Endpoint *;
+
+    [[nodiscard]] auto TakeDrainedEndpointIds() -> std::vector<std::string>;
+
+    void CleanupDrainedEndpoints();
+
+    /** @brief Builds the stable endpoint identity used by routing and transport state. */
+    [[nodiscard]] static auto MakeEndpointId(const Endpoint &endpoint) -> std::string;
+
+   private:
+    struct EndpointEntry {
+      Endpoint endpoint_;
+      bool draining_ = false;
+    };
+
+    std::unordered_map<std::string, EndpointEntry> endpoint_entries_;
+    std::vector<std::string> active_endpoint_ids_;
+    std::vector<std::string> drained_endpoint_ids_;
+  };
+
   /** @brief Immutable routing view copied by callers before they leave `state_mutex_`. */
   struct RoutingSnapshot final {
     std::vector<std::string> active_endpoint_ids_;

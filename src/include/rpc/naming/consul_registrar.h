@@ -5,7 +5,7 @@
 
 #include <xrpc/status.h>
 
-#include "rpc/naming/consul_agent_client.h"
+#include "rpc/naming/consul_http_client.h"
 
 namespace xrpc {
 
@@ -54,7 +54,10 @@ class ConsulRegistrar final {
   /** @brief Builds the JSON payload accepted by Consul's service registration API. */
   [[nodiscard]] auto BuildRegisterPayload(const Options &options) const -> std::string;
 
-  ConsulAgentClient agent_client_;
+  /** @brief Converts a Consul agent write response into an XRPC status. */
+  [[nodiscard]] static auto HandleAgentWriteResponse(const StatusOr<ConsulHttpResponse> &response) -> Status;
+
+  ConsulHttpClient http_client_;
   bool registered_ = false;
   std::string registered_service_id_;
   std::chrono::milliseconds timeout_{1000};
