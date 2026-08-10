@@ -32,7 +32,7 @@ namespace xrpc {
 class ConnectionIoLoop final {
  public:
   /** @brief Creates an unstarted connection I/O loop. */
-  ConnectionIoLoop(RawHandler handler, ThreadPoolExecutor &executor, ServerBackpressureLimits limits,
+  ConnectionIoLoop(RawHandler handler, ThreadPoolExecutor &executor, ConnectionBackpressureLimits limits,
                    ServerBackpressureStats &backpressure_stats, ServerIoStats &io_stats, ProtocolLimits protocol_limits,
                    std::chrono::milliseconds connection_idle_timeout);
 
@@ -83,7 +83,7 @@ class ConnectionIoLoop final {
   std::shared_ptr<DispatchCompletionQueue> completion_queue_;
   RawHandler handler_;
   ThreadPoolExecutor *executor_;
-  ServerBackpressureLimits limits_;
+  ConnectionBackpressureLimits limits_;
   ProtocolLimits protocol_limits_;
   std::chrono::milliseconds connection_idle_timeout_{0};
   ServerBackpressureStats *backpressure_stats_;
@@ -103,7 +103,7 @@ class ConnectionIoLoopGroup final {
  public:
   /** @brief Creates `loop_count` unstarted I/O loops. */
   ConnectionIoLoopGroup(std::size_t loop_count, const RawHandler &handler, ThreadPoolExecutor &executor,
-                        ServerBackpressureLimits limits, ServerBackpressureStats &backpressure_stats,
+                        ConnectionBackpressureLimits limits, ServerBackpressureStats &backpressure_stats,
                         ServerIoStats &io_stats, ProtocolLimits protocol_limits,
                         std::chrono::milliseconds connection_idle_timeout);
 

@@ -30,12 +30,12 @@ class ConnectionIoLoopGroup;
 class TcpServer final {
  public:
   /** @brief Creates a server with default connection limits and one connection I/O loop. */
-  TcpServer(io::UringContext &context, RawHandler handler, ThreadPoolExecutor &executor);
+  TcpServer(io::UringContext &accept_context, RawHandler handler, ThreadPoolExecutor &executor);
 
   /** @brief Creates a server with explicit connection limits and protocol options. */
-  TcpServer(io::UringContext &context, RawHandler handler, ThreadPoolExecutor &executor,
-            ServerBackpressureLimits limits, std::size_t connection_io_threads = 1, ProtocolLimits protocol_limits = {},
-            std::chrono::milliseconds connection_idle_timeout = {});
+  TcpServer(io::UringContext &accept_context, RawHandler handler, ThreadPoolExecutor &executor,
+            ConnectionBackpressureLimits limits, std::size_t connection_io_threads = 1,
+            ProtocolLimits protocol_limits = {}, std::chrono::milliseconds connection_idle_timeout = {});
 
   /** @brief Stops accepting and closes connection loops before destroying state. */
   ~TcpServer();
@@ -78,7 +78,7 @@ class TcpServer final {
   void SetSocketFlags(int fd) const;
 
   /** @brief Context that owns the accept coroutine. */
-  io::UringContext *context_;
+  io::UringContext *accept_context_;
 
   /** @brief Raw handler passed to accepted connections. */
   RawHandler handler_;
@@ -87,7 +87,7 @@ class TcpServer final {
   ThreadPoolExecutor *executor_ = nullptr;
 
   /** @brief Backpressure limits copied into each connection. */
-  ServerBackpressureLimits backpressure_limits_;
+  ConnectionBackpressureLimits backpressure_limits_;
 
   /** @brief Protocol limits copied into each connection session. */
   ProtocolLimits protocol_limits_;

@@ -1,4 +1,4 @@
-#include "rpc/server/server_config.h"
+#include "rpc/server/server_runtime_config.h"
 
 #include <unistd.h>
 
@@ -24,7 +24,7 @@ auto IsWildcardAddress(std::string_view host) -> bool { return host == "0.0.0.0"
 /**
  * @brief Validates public server options and resolves internal runtime configuration.
  *
- * The returned configuration is the shape consumed by `RpcServerController`, `TcpServer`, worker
+ * The returned configuration is the shape consumed by `ServerRuntime`, `TcpServer`, worker
  * pool, protocol codec, and optional Consul registration. Later runtime code can rely on all
  * numeric resource limits being non-zero and all optional Consul fields being internally coherent.
  *
@@ -32,7 +32,7 @@ auto IsWildcardAddress(std::string_view host) -> bool { return host == "0.0.0.0"
  * @return Normalized server configuration.
  * @throws ConfigException when any option combination is invalid.
  */
-auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerConfig {
+auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerRuntimeConfig {
   if (options.listen_backlog_ == 0) {
     throw ConfigException("RpcServer listen_backlog must be greater than 0");
   }
@@ -69,7 +69,7 @@ auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerConfig {
   }
   ProtocolLimits protocol_limits = MakeProtocolLimits(options.max_payload_size_);
 
-  return ServerConfig{
+  return ServerRuntimeConfig{
       .worker_threads_ = options.worker_threads_,
       .connection_io_threads_ = options.connection_io_threads_,
       .listen_backlog_ = options.listen_backlog_,
@@ -93,7 +93,7 @@ auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerConfig {
  * @param config Normalized server configuration.
  * @return true when a non-empty service name enables registration.
  */
-auto ServiceRegistrationEnabled(const ServerConfig &config) -> bool { return !config.service_name_.empty(); }
+auto ServiceRegistrationEnabled(const ServerRuntimeConfig &config) -> bool { return !config.service_name_.empty(); }
 
 /**
  * @brief Builds the final Consul registrar options after the listen socket is bound.
@@ -108,7 +108,7 @@ auto ServiceRegistrationEnabled(const ServerConfig &config) -> bool { return !co
  * @throws LifecycleException when service registration is disabled.
  * @throws ConfigException when the advertised address or port cannot be derived safely.
  */
-auto ResolveRegistrarOptions(const ServerConfig &config, std::string_view host, std::uint16_t listen_port)
+auto ResolveRegistrarOptions(const ServerRuntimeConfig &config, std::string_view host, std::uint16_t listen_port)
     -> ConsulRegistrar::Options {
   if (!ServiceRegistrationEnabled(config)) {
     throw LifecycleException("service registration is not enabled");

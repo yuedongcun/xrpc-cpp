@@ -32,7 +32,7 @@ class DispatchCompletionQueue;
  */
 struct TcpConnectionOptions final {
   /** @brief Per-connection inflight and write-queue limits. */
-  ServerBackpressureLimits limits_;
+  ConnectionBackpressureLimits limits_;
 
   /** @brief Optional shared backpressure stats sink. */
   ServerBackpressureStats *backpressure_stats_ = nullptr;
@@ -206,7 +206,7 @@ class TcpConnection final : public std::enable_shared_from_this<TcpConnection> {
   std::uint64_t activity_generation_ = 0;
 
   /** @brief Per-connection backpressure limits. */
-  ServerBackpressureLimits limits_;
+  ConnectionBackpressureLimits limits_;
 
   /** @brief Shared backpressure stats, or `owned_backpressure_stats_` in tests. */
   ServerBackpressureStats *backpressure_stats_ = nullptr;

@@ -14,12 +14,12 @@
 namespace xrpc {
 
 /**
- * @brief Normalized server options used internally by `RpcServer::ServerController`.
+ * @brief Normalized server options used internally by `RpcServer::ServerRuntime`.
  *
- * Values here are validated and have protocol limits resolved. `worker_threads_` may still be zero until controller
+ * Values here are validated and have protocol limits resolved. `worker_threads_` may still be zero until runtime
  * startup resolves it to hardware concurrency.
  */
-struct ServerConfig {
+struct ServerRuntimeConfig {
   std::size_t worker_threads_ = 0;
   std::size_t connection_io_threads_ = 0;
   std::size_t listen_backlog_ = 0;
@@ -42,17 +42,17 @@ struct ServerConfig {
  * @param options Public server options.
  * @return Normalized server configuration.
  */
-[[nodiscard]] auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerConfig;
+[[nodiscard]] auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerRuntimeConfig;
 
 /** @return true when this server configuration should register itself in Consul. */
-[[nodiscard]] auto ServiceRegistrationEnabled(const ServerConfig &config) -> bool;
+[[nodiscard]] auto ServiceRegistrationEnabled(const ServerRuntimeConfig &config) -> bool;
 
 /**
  * @brief Resolves the final Consul registration payload.
  *
  * The listen host and bound port are used as fallbacks for missing advertised address and port fields.
  */
-[[nodiscard]] auto ResolveRegistrarOptions(const ServerConfig &config, std::string_view host, std::uint16_t listen_port)
-    -> ConsulRegistrar::Options;
+[[nodiscard]] auto ResolveRegistrarOptions(const ServerRuntimeConfig &config, std::string_view host,
+                                           std::uint16_t listen_port) -> ConsulRegistrar::Options;
 
 }  // namespace xrpc

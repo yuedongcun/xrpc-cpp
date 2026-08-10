@@ -8,66 +8,19 @@
 namespace xrpc {
 
 /**
- * @brief Invokes the type-erased raw handler owned by this method descriptor.
+ * @brief Registers a raw service method in the registry.
+ *
+ * Registration owns the handler. Dispatch reads the built registry after the server starts listening.
  */
-auto MethodDescriptor::Invoke(RawRequest request) const -> RawResponse { return handler_(std::move(request)); }
-
-/**
- * @brief Registers or replaces one method under this service.
- */
-void ServiceDescriptor::RegisterMethod(std::string method_name, RawHandler handler) {
-  if (methods_.contains(method_name)) {
+void ServiceRegistry::RegisterRaw(const std::string &service, const std::string &method, RawHandler handler) {
+  MethodMap &methods = services_[service];
+  if (methods.contains(method)) {
     std::ostringstream oss;
-    oss << "method already registered: service=" << service_name_ << ", method=" << method_name;
+    oss << "method already registered: service=" << service << ", method=" << method;
     throw ConfigException(oss.str());
   }
 
-  std::string method_key = method_name;
-  methods_.emplace(method_key, MethodDescriptor(service_name_, std::move(method_name), std::move(handler)));
-}
-
-/**
- * @brief Finds a registered method by name.
- */
-auto ServiceDescriptor::FindMethod(std::string_view method_name) const -> const MethodDescriptor * {
-  auto it = methods_.find(std::string(method_name));
-  if (it == methods_.end()) {
-    return nullptr;
-  }
-  return &it->second;
-}
-
-/**
- * @brief Registers a raw service method in the registry.
- *
- * Registration owns the handler. Dispatch later borrows immutable descriptors from the built registry.
- */
-void ServiceRegistry::RegisterRaw(const std::string &service, const std::string &method, RawHandler handler) {
-  auto result = services_.try_emplace(service, ServiceDescriptor(service));
-  auto &service_descriptor = result.first->second;
-  service_descriptor.RegisterMethod(method, std::move(handler));
-}
-
-/**
- * @brief Finds a registered service by name.
- */
-auto ServiceRegistry::FindService(std::string_view service_name) const -> const ServiceDescriptor * {
-  auto service_it = services_.find(std::string(service_name));
-  if (service_it == services_.end()) {
-    return nullptr;
-  }
-  return &service_it->second;
-}
-
-/**
- * @brief Finds a registered method by service and method name.
- */
-auto ServiceRegistry::FindMethod(std::string_view service, std::string_view method) const -> const MethodDescriptor * {
-  const ServiceDescriptor *service_descriptor = FindService(service);
-  if (service_descriptor == nullptr) {
-    return nullptr;
-  }
-  return service_descriptor->FindMethod(method);
+  methods.emplace(method, std::move(handler));
 }
 
 /**
@@ -77,16 +30,16 @@ auto ServiceRegistry::FindMethod(std::string_view service, std::string_view meth
  * RPC status frame.
  */
 auto ServiceRegistry::Dispatch(RawRequest request) const -> RawResponse {
-  const ServiceDescriptor *service = FindService(request.service_name_);
-  if (service == nullptr) {
+  const auto service = services_.find(request.service_name_);
+  if (service == services_.end()) {
     RawResponse resp;
     resp.request_id_ = request.request_id_;
     resp.status_ = {StatusCode::NotFound, "unknown service"};
     return resp;
   }
 
-  const MethodDescriptor *method = service->FindMethod(request.method_name_);
-  if (method == nullptr) {
+  const auto method = service->second.find(request.method_name_);
+  if (method == service->second.end()) {
     RawResponse resp;
     resp.request_id_ = request.request_id_;
     resp.status_ = {StatusCode::Unimplemented, "unknown method"};
@@ -94,7 +47,7 @@ auto ServiceRegistry::Dispatch(RawRequest request) const -> RawResponse {
   }
 
   try {
-    return method->Invoke(std::move(request));
+    return method->second(std::move(request));
   } catch (...) {
     RawResponse resp;
     resp.request_id_ = request.request_id_;

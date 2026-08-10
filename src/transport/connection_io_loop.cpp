@@ -35,9 +35,10 @@ void AddPostStats(io::UringPostStatsSnapshot &target, const io::UringPostStatsSn
  * @param protocol_limits Frame and payload limits.
  * @param connection_idle_timeout Idle timeout applied to new connections.
  */
-ConnectionIoLoop::ConnectionIoLoop(RawHandler handler, ThreadPoolExecutor &executor, ServerBackpressureLimits limits,
-                                   ServerBackpressureStats &backpressure_stats, ServerIoStats &io_stats,
-                                   ProtocolLimits protocol_limits, std::chrono::milliseconds connection_idle_timeout)
+ConnectionIoLoop::ConnectionIoLoop(RawHandler handler, ThreadPoolExecutor &executor,
+                                   ConnectionBackpressureLimits limits, ServerBackpressureStats &backpressure_stats,
+                                   ServerIoStats &io_stats, ProtocolLimits protocol_limits,
+                                   std::chrono::milliseconds connection_idle_timeout)
     : completion_queue_(std::make_shared<DispatchCompletionQueue>(context_)),
       handler_(std::move(handler)),
       executor_(&executor),
@@ -173,7 +174,7 @@ void ConnectionIoLoop::CloseConnections() {
  * @throws ConfigException when `loop_count` is zero.
  */
 ConnectionIoLoopGroup::ConnectionIoLoopGroup(std::size_t loop_count, const RawHandler &handler,
-                                             ThreadPoolExecutor &executor, ServerBackpressureLimits limits,
+                                             ThreadPoolExecutor &executor, ConnectionBackpressureLimits limits,
                                              ServerBackpressureStats &backpressure_stats, ServerIoStats &io_stats,
                                              ProtocolLimits protocol_limits,
                                              std::chrono::milliseconds connection_idle_timeout) {

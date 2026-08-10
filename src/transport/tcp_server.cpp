@@ -30,31 +30,31 @@ void ValidateConnectionIoThreads(std::size_t connection_io_threads) {
 /**
  * @brief Creates a TCP server with default backpressure and one connection event loop.
  *
- * @param context Accept-loop io_uring context.
+ * @param accept_context Accept-loop io_uring context.
  * @param handler Raw RPC handler invoked by accepted connections.
  * @param executor Worker pool used for request dispatch.
  */
-TcpServer::TcpServer(io::UringContext &context, RawHandler handler, ThreadPoolExecutor &executor)
-    : TcpServer(context, std::move(handler), executor, ServerBackpressureLimits{}, 1) {}
+TcpServer::TcpServer(io::UringContext &accept_context, RawHandler handler, ThreadPoolExecutor &executor)
+    : TcpServer(accept_context, std::move(handler), executor, ConnectionBackpressureLimits{}, 1) {}
 
 /**
  * @brief Creates a TCP server with explicit connection-loop and backpressure settings.
  *
- * The accept loop runs on `context`; accepted sockets are handed to a connection I/O loop group so
+ * The accept loop runs on `accept_context`; accepted sockets are handed to a connection I/O loop group so
  * request parsing, writes, and idle cleanup can be spread across event-loop threads.
  *
- * @param context Accept-loop io_uring context.
+ * @param accept_context Accept-loop io_uring context.
  * @param handler Raw RPC handler invoked by connections.
  * @param executor Worker pool used for request dispatch.
- * @param limits Per-connection and global resource limits.
+ * @param limits Per-connection resource limits.
  * @param connection_io_threads Number of connection-loop threads to start.
  * @param protocol_limits Frame and payload size limits.
  * @param connection_idle_timeout Idle timeout applied to accepted connections.
  */
-TcpServer::TcpServer(io::UringContext &context, RawHandler handler, ThreadPoolExecutor &executor,
-                     ServerBackpressureLimits limits, std::size_t connection_io_threads, ProtocolLimits protocol_limits,
-                     std::chrono::milliseconds connection_idle_timeout)
-    : context_(&context),
+TcpServer::TcpServer(io::UringContext &accept_context, RawHandler handler, ThreadPoolExecutor &executor,
+                     ConnectionBackpressureLimits limits, std::size_t connection_io_threads,
+                     ProtocolLimits protocol_limits, std::chrono::milliseconds connection_idle_timeout)
+    : accept_context_(&accept_context),
       handler_(std::move(handler)),
       executor_(&executor),
       backpressure_limits_(limits),
@@ -101,7 +101,7 @@ auto TcpServer::Run() -> runtime::Task<void> {
   connection_io_loop_group_->Start();
 
   while (!stopped_) {
-    const io::IoResult accept_result = co_await context_->Accept(listen_socket_.fd());
+    const io::IoResult accept_result = co_await accept_context_->Accept(listen_socket_.fd());
 
     if (accept_result.result_ < 0) {
       if (!stopped_) {
@@ -131,7 +131,7 @@ void TcpServer::Stop() {
   }
 
   stopped_ = true;
-  context_->CancelFd(listen_socket_.fd());
+  accept_context_->CancelFd(listen_socket_.fd());
   listen_socket_.Close();
 
   connection_io_loop_group_->Stop();

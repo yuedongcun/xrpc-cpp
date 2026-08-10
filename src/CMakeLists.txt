@@ -43,8 +43,8 @@ set(XRPC_SOURCES
     rpc/naming/consul_resolver.cpp
     rpc/naming/consul_registrar.cpp
     rpc/server/service_registry.cpp
-    rpc/server/server_config.cpp
-    rpc/server/rpc_server_controller.cpp
+    rpc/server/server_runtime_config.cpp
+    rpc/server/server_runtime.cpp
     rpc/server/rpc_session.cpp
     rpc/server/rpc_server.cpp
     transport/byte_buffer.cpp

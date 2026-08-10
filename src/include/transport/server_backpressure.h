@@ -11,12 +11,12 @@ namespace xrpc {
  *
  * The global worker queue limit lives in `ThreadPoolExecutor` because it spans all connections.
  */
-struct ServerBackpressureLimits {
+struct ConnectionBackpressureLimits {
   /** @brief Maximum handler jobs one connection may have in flight. */
-  std::size_t max_inflight_per_connection_ = 128;
+  std::size_t max_inflight_ = 128;
 
   /** @brief Maximum encoded response bytes one connection may queue before closure. */
-  std::size_t max_write_queue_bytes_per_connection_ = 8U * 1024U * 1024U;
+  std::size_t max_write_queue_bytes_ = 8U * 1024U * 1024U;
 };
 
 /**

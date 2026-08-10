@@ -1,4 +1,4 @@
-#include "rpc/server/rpc_server_controller.h"
+#include "rpc/server/server_runtime.h"
 
 #include <string_view>
 #include <thread>
@@ -16,25 +16,25 @@ namespace xrpc {
 /**
  * @brief Builds all server runtime components from normalized options.
  *
- * The controller wires the registry into `TcpServer` through a raw handler, while the TCP server owns connection I/O
+ * The runtime wires the registry into `TcpServer` through a raw handler, while the TCP server owns connection I/O
  * and the executor owns method-dispatch worker threads.
  */
-RpcServer::ServerController::ServerController(const RpcServerOptions &options)
+RpcServer::ServerRuntime::ServerRuntime(const RpcServerOptions &options)
     : config_(NormalizeServerOptions(options)),
       executor_(ResolveWorkerCount(config_.worker_threads_), config_.max_pending_jobs_global_),
       server_(
-          context_, [this](RawRequest request) { return registry_.Dispatch(std::move(request)); }, executor_,
-          ServerBackpressureLimits{
-              .max_inflight_per_connection_ = config_.max_inflight_per_connection_,
-              .max_write_queue_bytes_per_connection_ = config_.max_write_queue_bytes_per_connection_,
+          accept_context_, [this](RawRequest request) { return registry_.Dispatch(std::move(request)); }, executor_,
+          ConnectionBackpressureLimits{
+              .max_inflight_ = config_.max_inflight_per_connection_,
+              .max_write_queue_bytes_ = config_.max_write_queue_bytes_per_connection_,
           },
           config_.connection_io_threads_, config_.protocol_limits_, config_.connection_idle_timeout_),
       listen_backlog_(config_.listen_backlog_) {}
 
 /**
- * @brief Performs best-effort shutdown during controller destruction.
+ * @brief Performs best-effort shutdown during runtime destruction.
  */
-RpcServer::ServerController::~ServerController() { ShutdownBestEffort(); }
+RpcServer::ServerRuntime::~ServerRuntime() { ShutdownBestEffort(); }
 
 /**
  * @brief Registers one public method adapter before the server starts listening.
@@ -42,7 +42,7 @@ RpcServer::ServerController::~ServerController() { ShutdownBestEffort(); }
  * The typed public registration is converted to a raw handler that preserves the request id and delegates payload
  * decoding/encoding to the captured method adapter.
  */
-void RpcServer::ServerController::RegisterMethodRegistration(MethodRegistration registration) {
+void RpcServer::ServerRuntime::RegisterMethod(MethodRegistration registration) {
   std::lock_guard<std::mutex> lock(lifecycle_mutex_);
   if (state_ != State::Created) {
     throw LifecycleException("RpcServer::RegisterMethod must be called before Listen");
@@ -68,9 +68,9 @@ void RpcServer::ServerController::RegisterMethodRegistration(MethodRegistration 
  * @brief Binds the listener and performs optional Consul registration.
  *
  * The state transition goes `Created -> Starting -> Listening`; failures stop any partially initialized runtime and
- * leave the controller stopped.
+ * leave the runtime stopped.
  */
-void RpcServer::ServerController::Listen(std::string_view host, std::uint16_t port) {
+void RpcServer::ServerRuntime::Listen(std::string_view host, std::uint16_t port) {
   std::lock_guard operation_lock(lifecycle_operation_mutex_);
   {
     std::lock_guard lock(lifecycle_mutex_);
@@ -97,10 +97,10 @@ void RpcServer::ServerController::Listen(std::string_view host, std::uint16_t po
 /**
  * @brief Runs the accept loop until shutdown.
  *
- * The accept coroutine is started on the `UringContext` thread before the context enters its run loop. Both normal exit
- * and exceptional exit flow through shutdown so workers, connections, and Consul registration are cleaned up.
+ * The accept coroutine is started before the accept context enters its run loop. Both normal exit and exceptional exit
+ * flow through shutdown so workers, connections, and Consul registration are cleaned up.
  */
-void RpcServer::ServerController::Run() {
+void RpcServer::ServerRuntime::Run() {
   {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
     if (state_ != State::Listening) {
@@ -111,8 +111,8 @@ void RpcServer::ServerController::Run() {
 
   try {
     server_task_.emplace(server_.Run());
-    StartServerTaskOnContext();
-    context_.Run();
+    StartServerTaskOnAcceptContext();
+    accept_context_.Run();
     WaitForServerTaskCompletion();
     if (server_task_.has_value()) {
       server_task_->Result();
@@ -128,17 +128,17 @@ void RpcServer::ServerController::Run() {
 /**
  * @brief Requests shutdown through the same best-effort path used by destruction.
  */
-void RpcServer::ServerController::Stop() { ShutdownBestEffort(); }
+void RpcServer::ServerRuntime::Stop() { ShutdownBestEffort(); }
 
 /**
  * @brief Returns the bound listener port.
  */
-auto RpcServer::ServerController::port() const -> std::uint16_t { return server_.port(); }
+auto RpcServer::ServerRuntime::port() const -> std::uint16_t { return server_.port(); }
 
 /**
  * @brief Combines TCP backpressure and worker-pool diagnostics for the public stats API.
  */
-auto RpcServer::ServerController::stats() const -> RpcServerStats {
+auto RpcServer::ServerRuntime::stats() const -> RpcServerStats {
   const ServerBackpressureSnapshot backpressure_snapshot = server_.stats();
   const ThreadPoolExecutorSnapshot executor_snapshot = executor_.stats();
   return RpcServerStats{
@@ -155,14 +155,14 @@ auto RpcServer::ServerController::stats() const -> RpcServerStats {
 /**
  * @brief Dispatches a raw request through the service registry.
  */
-auto RpcServer::ServerController::Dispatch(const RawRequest &request) const -> RawResponse {
+auto RpcServer::ServerRuntime::Dispatch(const RawRequest &request) const -> RawResponse {
   return registry_.Dispatch(request);
 }
 
 /**
  * @brief Dispatches a decoded protocol request and returns protocol response fields.
  */
-auto RpcServer::ServerController::Dispatch(const ProtocolRequest &request) const -> ProtocolResponse {
+auto RpcServer::ServerRuntime::Dispatch(const ProtocolRequest &request) const -> ProtocolResponse {
   return ToProtocolResponse(Dispatch(ToRawRequest(request)));
 }
 
@@ -172,7 +172,7 @@ auto RpcServer::ServerController::Dispatch(const ProtocolRequest &request) const
  * This helper is intentionally narrow and is used by tests and adapter paths. Streaming connections use `RpcSession`
  * and `TcpConnection` instead.
  */
-auto RpcServer::ServerController::DispatchFrame(std::string_view frame_bytes) const -> std::string {
+auto RpcServer::ServerRuntime::DispatchFrame(std::string_view frame_bytes) const -> std::string {
   FrameCodec codec(config_.protocol_limits_);
   DecodeResult decoded = codec.TryDecode(frame_bytes);
   if (decoded.error_ != ProtocolError::Ok || !decoded.request_.has_value()) {
@@ -185,7 +185,7 @@ auto RpcServer::ServerController::DispatchFrame(std::string_view frame_bytes) co
 /**
  * @brief Registers the running server in Consul when service registration is enabled.
  */
-void RpcServer::ServerController::RegisterServiceIfEnabled(std::string_view host) {
+void RpcServer::ServerRuntime::RegisterServiceIfEnabled(std::string_view host) {
   if (!ServiceRegistrationEnabled(config_)) {
     return;
   }
@@ -202,9 +202,9 @@ void RpcServer::ServerController::RegisterServiceIfEnabled(std::string_view host
  * @brief Performs ordered shutdown and records the first cleanup status.
  *
  * When shutdown is entered from inside the run loop, TCP server stop is posted onto the event-loop thread before the
- * context is stopped. External callers can stop the server directly before waking the context.
+ * accept context is stopped. External callers can stop the server directly before waking the accept context.
  */
-auto RpcServer::ServerController::Shutdown(bool run_loop_active) noexcept -> Status {
+auto RpcServer::ServerRuntime::Shutdown(bool run_loop_active) noexcept -> Status {
   std::lock_guard operation_lock(lifecycle_operation_mutex_);
   bool stop_from_running_context = false;
   {
@@ -234,7 +234,7 @@ auto RpcServer::ServerController::Shutdown(bool run_loop_active) noexcept -> Sta
 /**
  * @brief Runs shutdown while preserving the public void-returning API.
  */
-void RpcServer::ServerController::ShutdownBestEffort(bool run_loop_active) noexcept {
+void RpcServer::ServerRuntime::ShutdownBestEffort(bool run_loop_active) noexcept {
   const Status status = Shutdown(run_loop_active);
   if (status.ok()) {
     return;
@@ -247,7 +247,7 @@ void RpcServer::ServerController::ShutdownBestEffort(bool run_loop_active) noexc
 /**
  * @brief Deregisters the Consul service if the registrar still owns one.
  */
-auto RpcServer::ServerController::TryDeregisterService() noexcept -> Status {
+auto RpcServer::ServerRuntime::TryDeregisterService() noexcept -> Status {
   if (!registrar_ || !registrar_->registered()) {
     return Status::Ok();
   }
@@ -262,7 +262,7 @@ auto RpcServer::ServerController::TryDeregisterService() noexcept -> Status {
 /**
  * @brief Resolves zero worker count to a conservative hardware concurrency default.
  */
-auto RpcServer::ServerController::ResolveWorkerCount(std::size_t worker_threads) -> std::size_t {
+auto RpcServer::ServerRuntime::ResolveWorkerCount(std::size_t worker_threads) -> std::size_t {
   if (worker_threads > 0) {
     return worker_threads;
   }
@@ -274,38 +274,37 @@ auto RpcServer::ServerController::ResolveWorkerCount(std::size_t worker_threads)
 /**
  * @brief Stops the TCP server and event loop for the current shutdown context.
  */
-void RpcServer::ServerController::StopRuntime(bool run_loop_active) {
+void RpcServer::ServerRuntime::StopRuntime(bool run_loop_active) {
   if (run_loop_active) {
-    RequestServerStopOnContext();
-    context_.Stop();
+    RequestServerStopOnAcceptContext();
+    accept_context_.Stop();
     return;
   }
 
   server_.Stop();
-  context_.Stop();
+  accept_context_.Stop();
 }
 
 /**
  * @brief Posts accept coroutine startup onto the event-loop thread.
  */
-void RpcServer::ServerController::StartServerTaskOnContext() {
-  context_.Post([this]() { server_task_->Start(); });
+void RpcServer::ServerRuntime::StartServerTaskOnAcceptContext() {
+  accept_context_.Post([this]() { server_task_->Start(); });
 }
 
 /**
  * @brief Posts TCP server stop onto the event-loop thread.
  */
-void RpcServer::ServerController::RequestServerStopOnContext() {
-  // TcpServer owns io_uring operations, so the running server is stopped from
-  // the UringContext thread. Post must happen before context Stop, which closes
-  // the post queue and wakes the loop.
-  context_.Post([this]() { server_.Stop(); });
+void RpcServer::ServerRuntime::RequestServerStopOnAcceptContext() {
+  // TcpServer owns the accept operation, so it is stopped from the accept-context thread.
+  // The post must happen before Stop(), which closes the post queue and wakes the loop.
+  accept_context_.Post([this]() { server_.Stop(); });
 }
 
 /**
  * @brief Waits for the accept coroutine to complete if it was created.
  */
-void RpcServer::ServerController::WaitForServerTaskCompletion() const {
+void RpcServer::ServerRuntime::WaitForServerTaskCompletion() const {
   if (server_task_.has_value()) {
     server_task_->Wait();
   }

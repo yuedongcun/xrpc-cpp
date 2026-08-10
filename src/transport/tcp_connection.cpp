@@ -126,7 +126,7 @@ auto TcpConnection::HandleFeedResult(SessionFeedResult &&feed) -> bool {
   std::vector<RawRequest> requests;
   requests.reserve(request_count);
   const bool accepted_all = feed.requests_.ConsumeEach([this, &requests](RawRequest request) {
-    if (pending_dispatch_jobs_ + requests.size() >= limits_.max_inflight_per_connection_) {
+    if (pending_dispatch_jobs_ + requests.size() >= limits_.max_inflight_) {
       backpressure_stats_->RecordInflightRejection();
       return RejectRequestDueToBackpressure(std::move(request), "server per-connection in-flight limit exceeded");
     }
@@ -242,8 +242,8 @@ auto TcpConnection::EnqueueWrite(std::string bytes) -> bool {
  * @return true when the reservation succeeds, false after closing for backpressure.
  */
 auto TcpConnection::TryReserveWriteBytes(std::size_t bytes) -> bool {
-  if (pending_write_bytes_ > limits_.max_write_queue_bytes_per_connection_ ||
-      bytes > limits_.max_write_queue_bytes_per_connection_ - pending_write_bytes_) {
+  if (pending_write_bytes_ > limits_.max_write_queue_bytes_ ||
+      bytes > limits_.max_write_queue_bytes_ - pending_write_bytes_) {
     backpressure_stats_->RecordWriteQueueClosure();
     Close(ConnectionCloseReason::Backpressure);
     return false;

@@ -2,22 +2,22 @@
 
 #include <utility>
 
-#include "rpc/server/rpc_server_controller.h"
+#include "rpc/server/server_runtime.h"
 #include "rpc/xrpc_exception.h"
 
 namespace xrpc {
 
 /**
- * @brief Creates a server facade from an initialized private controller.
+ * @brief Creates a server facade from an initialized private runtime.
  */
-RpcServer::RpcServer(std::unique_ptr<ServerController> controller) : controller_(std::move(controller)) {}
+RpcServer::RpcServer(std::unique_ptr<ServerRuntime> runtime) : runtime_(std::move(runtime)) {}
 
 /**
  * @brief Creates a configured server without exposing internal exceptions.
  */
 auto RpcServer::Create(const RpcServerOptions &options) -> StatusOr<RpcServer> {
   try {
-    return StatusOr<RpcServer>(RpcServer(std::make_unique<ServerController>(options)));
+    return StatusOr<RpcServer>(RpcServer(std::make_unique<ServerRuntime>(options)));
   } catch (...) {
     return StatusOr<RpcServer>(CaughtExceptionToStatus("failed to create RPC server"));
   }
@@ -26,21 +26,21 @@ auto RpcServer::Create(const RpcServerOptions &options) -> StatusOr<RpcServer> {
 RpcServer::~RpcServer() = default;
 
 /**
- * @brief Moves the private lifecycle controller from another facade.
+ * @brief Moves the private server runtime from another facade.
  */
 RpcServer::RpcServer(RpcServer &&) noexcept = default;
 
 /**
- * @brief Replaces this facade's controller with another facade's controller.
+ * @brief Replaces this facade's runtime with another facade's runtime.
  */
 auto RpcServer::operator=(RpcServer &&) noexcept -> RpcServer & = default;
 
 /**
- * @brief Registers one type-erased method with the private controller.
+ * @brief Registers one type-erased method with the private runtime.
  */
-auto RpcServer::RegisterMethodRegistration(MethodRegistration registration) -> Status {
+auto RpcServer::RegisterMethod(MethodRegistration registration) -> Status {
   try {
-    controller_->RegisterMethodRegistration(std::move(registration));
+    runtime_->RegisterMethod(std::move(registration));
     return Status::Ok();
   } catch (...) {
     return CaughtExceptionToStatus("failed to register RPC method");
@@ -48,11 +48,11 @@ auto RpcServer::RegisterMethodRegistration(MethodRegistration registration) -> S
 }
 
 /**
- * @brief Binds the listening socket through the private controller.
+ * @brief Binds the listening socket through the private runtime.
  */
 auto RpcServer::Listen(std::string_view host, std::uint16_t port) -> Status {
   try {
-    controller_->Listen(host, port);
+    runtime_->Listen(host, port);
     return Status::Ok();
   } catch (...) {
     return CaughtExceptionToStatus("failed to listen");
@@ -60,11 +60,11 @@ auto RpcServer::Listen(std::string_view host, std::uint16_t port) -> Status {
 }
 
 /**
- * @brief Runs the blocking server lifecycle through the private controller.
+ * @brief Runs the blocking server lifecycle through the private runtime.
  */
 auto RpcServer::Run() -> Status {
   try {
-    controller_->Run();
+    runtime_->Run();
     return Status::Ok();
   } catch (...) {
     return CaughtExceptionToStatus("server runtime failed");
@@ -72,24 +72,24 @@ auto RpcServer::Run() -> Status {
 }
 
 /**
- * @brief Requests server shutdown through the private controller.
+ * @brief Requests server shutdown through the private runtime.
  */
-void RpcServer::Stop() { controller_->Stop(); }
+void RpcServer::Stop() { runtime_->Stop(); }
 
 /**
- * @brief Returns the bound listen port from the private controller.
+ * @brief Returns the bound listen port from the private runtime.
  */
 auto RpcServer::port() const -> StatusOr<std::uint16_t> {
   try {
-    return StatusOr<std::uint16_t>(controller_->port());
+    return StatusOr<std::uint16_t>(runtime_->port());
   } catch (...) {
     return StatusOr<std::uint16_t>(CaughtExceptionToStatus("server port is unavailable"));
   }
 }
 
 /**
- * @brief Returns server diagnostic counters from the private controller.
+ * @brief Returns server diagnostic counters from the private runtime.
  */
-auto RpcServer::stats() const -> RpcServerStats { return controller_->stats(); }
+auto RpcServer::stats() const -> RpcServerStats { return runtime_->stats(); }
 
 }  // namespace xrpc

@@ -107,7 +107,7 @@ class RpcServer final {
   /**
    * @brief Creates a server with validated runtime, resource, and registration options.
    *
-   * @param options Server options copied into the controller at construction time. Defaults are suitable for a basic
+   * @param options Server options copied into the runtime at construction time. Defaults are suitable for a basic
    * server.
    * @return A server, or a status describing configuration or runtime initialization failure.
    */
@@ -119,10 +119,10 @@ class RpcServer final {
   RpcServer(const RpcServer &) = delete;
   auto operator=(const RpcServer &) -> RpcServer & = delete;
 
-  /** @brief Moves the server controller from another server facade. */
+  /** @brief Moves the server runtime from another server facade. */
   RpcServer(RpcServer &&) noexcept;
 
-  /** @brief Replaces this server controller with another server facade's controller. */
+  /** @brief Replaces this server runtime with another server facade's runtime. */
   auto operator=(RpcServer &&) noexcept -> RpcServer &;
 
   /**
@@ -142,7 +142,7 @@ class RpcServer final {
     if (!registration.ok()) {
       return registration.status();
     }
-    return RegisterMethodRegistration(std::move(registration).value());
+    return RegisterMethod(std::move(registration).value());
   }
 
   /**
@@ -176,15 +176,15 @@ class RpcServer final {
   [[nodiscard]] auto stats() const -> RpcServerStats;
 
  private:
-  class ServerController;
+  class ServerRuntime;
 
-  /** @brief Creates a facade from a successfully constructed private controller. */
-  explicit RpcServer(std::unique_ptr<ServerController> controller);
+  /** @brief Creates a facade from a successfully constructed private runtime. */
+  explicit RpcServer(std::unique_ptr<ServerRuntime> runtime);
 
-  /** @brief Registers one type-erased method descriptor with the private controller. */
-  [[nodiscard]] auto RegisterMethodRegistration(MethodRegistration registration) -> Status;
+  /** @brief Registers one type-erased method descriptor with the private runtime. */
+  [[nodiscard]] auto RegisterMethod(MethodRegistration registration) -> Status;
 
-  std::unique_ptr<ServerController> controller_;
+  std::unique_ptr<ServerRuntime> runtime_;
 };
 
 }  // namespace xrpc
