@@ -9,8 +9,6 @@
 #include <vector>
 
 #include "protocol/frame_codec.h"
-#include "protocol/protocol_message.h"
-#include "rpc/handler.h"
 #include "rpc/raw_message.h"
 #include "transport/byte_buffer.h"
 
@@ -18,14 +16,6 @@ namespace xrpc {
 
 /**
  * @brief Small request batch optimized for the common one-request read.
- *
- * Design note:
- * - Ownership: one `RpcSession` belongs to one connection and owns the read buffer plus protocol header cache for that
- *   byte stream.
- * - State: `FeedBytes()` appends bytes, drains complete request frames, and marks the session closed on protocol
- *   errors.
- * - Failure: protocol decode errors close the session; handler failures become `RawResponse` status values before
- *   encoding.
  *
  * The first request is stored without allocating a vector. Additional requests are used only when a read contains
  * pipelined frames.
@@ -83,11 +73,8 @@ struct SessionFeedResult {
  */
 class RpcSession final {
  public:
-  /** @brief Creates a session without an attached handler, useful for protocol tests. */
+  /** @brief Creates a session with the frame limits for one TCP byte stream. */
   explicit RpcSession(ProtocolLimits protocol_limits = {});
-
-  /** @brief Creates a session that can decode, dispatch, and encode request bytes. */
-  explicit RpcSession(RawHandler handler, ProtocolLimits protocol_limits = {});
 
   /**
    * @brief Appends stream bytes and drains all complete request frames.
@@ -97,14 +84,8 @@ class RpcSession final {
    */
   [[nodiscard]] auto FeedBytes(std::string_view bytes) -> SessionFeedResult;
 
-  /** @return Encoded response frame bytes. */
-  [[nodiscard]] auto EncodeResponse(const ProtocolResponse &response) const -> std::string;
-
   /** @return Encoded response frame bytes after mapping raw status fields to protocol fields. */
   [[nodiscard]] auto EncodeResponse(RawResponse &&response) const -> std::string;
-
-  /** @return Concatenated response frames produced by decoding and dispatching `bytes`. */
-  [[nodiscard]] auto HandleBytes(std::string_view bytes) -> std::string;
 
   /** @return true after a non-recoverable protocol error has closed this session. */
   [[nodiscard]] auto IsClosed() const -> bool { return closed_; }
@@ -112,9 +93,6 @@ class RpcSession final {
  private:
   /** @brief Drains all complete request frames currently buffered in the session. */
   [[nodiscard]] auto DrainReadableRequests() -> RawRequestBatch;
-
-  /** @brief Handler used by `HandleBytes()` and connection dispatch paths. */
-  RawHandler handler_;
 
   /** @brief Buffered TCP stream bytes not yet consumed by the frame codec. */
   ByteBuffer buffer_;

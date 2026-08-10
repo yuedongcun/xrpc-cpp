@@ -46,16 +46,8 @@ auto RawRequestBatch::operator[](std::size_t index) const -> const RawRequest & 
   return additional_requests_[index - 1U];
 }
 
-/**
- * @brief Creates a protocol session without a handler.
- */
+/** @brief Creates a protocol session for one TCP byte stream. */
 RpcSession::RpcSession(ProtocolLimits protocol_limits) : protocol_limits_(protocol_limits) {}
-
-/**
- * @brief Creates a protocol session with a raw handler for dispatch helpers.
- */
-RpcSession::RpcSession(RawHandler handler, ProtocolLimits protocol_limits)
-    : handler_(std::move(handler)), protocol_limits_(protocol_limits) {}
 
 /**
  * @brief Appends stream bytes and drains all complete request frames.
@@ -73,45 +65,11 @@ auto RpcSession::FeedBytes(std::string_view bytes) -> SessionFeedResult {
 }
 
 /**
- * @brief Encodes a protocol response with this session's limits.
- */
-auto RpcSession::EncodeResponse(const ProtocolResponse &response) const -> std::string {
-  FrameCodec codec(protocol_limits_);
-  return codec.EncodeResponse(response);
-}
-
-/**
  * @brief Converts and encodes a raw response with this session's limits.
  */
 auto RpcSession::EncodeResponse(RawResponse &&response) const -> std::string {
-  return EncodeResponse(ToProtocolResponse(std::move(response)));
-}
-
-/**
- * @brief Decodes, dispatches, and encodes complete requests from a byte span.
- *
- * This helper is used by tests and simple in-memory protocol paths. Streaming server connections use `FeedBytes()` and
- * dispatch decoded requests through the worker pool.
- */
-auto RpcSession::HandleBytes(std::string_view bytes) -> std::string {
-  SessionFeedResult feed = FeedBytes(bytes);
-  if (feed.closed_) {
-    return {};
-  }
-
-  std::string response_bytes;
-  const bool handled_all = feed.requests_.ConsumeEach([this, &response_bytes](RawRequest request) {
-    if (!handler_) {
-      closed_ = true;
-      return false;
-    }
-    response_bytes.append(EncodeResponse(ToProtocolResponse(handler_(std::move(request)))));
-    return true;
-  });
-  if (!handled_all) {
-    return {};
-  }
-  return response_bytes;
+  FrameCodec codec(protocol_limits_);
+  return codec.EncodeResponse(ToProtocolResponse(std::move(response)));
 }
 
 /**

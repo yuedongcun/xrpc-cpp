@@ -4,6 +4,7 @@
 #include <chrono>
 #include <exception>
 #include <future>
+#include <limits>
 #include <optional>
 #include <string>
 #include <thread>
@@ -184,6 +185,15 @@ TEST(RpcServerLifecycleTest, WildcardListenRequiresServiceAddressWhenRegistratio
 TEST(RpcServerLifecycleTest, RejectsZeroListenBacklogAtConstruction) {
   xrpc::RpcServerOptions options;
   options.listen_backlog_ = 0;
+
+  const xrpc::StatusOr<xrpc::RpcServer> result = xrpc::RpcServer::Create(options);
+  ASSERT_FALSE(result.ok());
+  EXPECT_EQ(result.status().code(), xrpc::StatusCode::InvalidArgument);
+}
+
+TEST(RpcServerLifecycleTest, RejectsListenBacklogOutsideSocketApiRange) {
+  xrpc::RpcServerOptions options;
+  options.listen_backlog_ = static_cast<std::size_t>(std::numeric_limits<int>::max()) + 1U;
 
   const xrpc::StatusOr<xrpc::RpcServer> result = xrpc::RpcServer::Create(options);
   ASSERT_FALSE(result.ok());

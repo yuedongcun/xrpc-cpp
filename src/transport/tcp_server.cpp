@@ -1,5 +1,6 @@
 #include "transport/tcp_server.h"
 
+#include <cassert>
 #include <fcntl.h>
 #include <memory>
 #include <utility>
@@ -11,34 +12,9 @@
 #include "transport/connection_io_loop.h"
 
 namespace xrpc {
-namespace {
 
 /**
- * @brief Validates the number of connection event loops owned by a server.
- *
- * @param connection_io_threads Requested number of connection-loop threads.
- * @throws ConfigException when no connection loop would be created.
- */
-void ValidateConnectionIoThreads(std::size_t connection_io_threads) {
-  if (connection_io_threads == 0) {
-    throw ConfigException("TcpServer connection_io_threads must be greater than 0");
-  }
-}
-
-}  // namespace
-
-/**
- * @brief Creates a TCP server with default backpressure and one connection event loop.
- *
- * @param accept_context Accept-loop io_uring context.
- * @param handler Raw RPC handler invoked by accepted connections.
- * @param executor Worker pool used for request dispatch.
- */
-TcpServer::TcpServer(io::UringContext &accept_context, RawHandler handler, ThreadPoolExecutor &executor)
-    : TcpServer(accept_context, std::move(handler), executor, ConnectionBackpressureLimits{}, 1) {}
-
-/**
- * @brief Creates a TCP server with explicit connection-loop and backpressure settings.
+ * @brief Creates a TCP server from normalized transport settings.
  *
  * The accept loop runs on `accept_context`; accepted sockets are handed to a connection I/O loop group so
  * request parsing, writes, and idle cleanup can be spread across event-loop threads.
@@ -46,24 +22,16 @@ TcpServer::TcpServer(io::UringContext &accept_context, RawHandler handler, Threa
  * @param accept_context Accept-loop io_uring context.
  * @param handler Raw RPC handler invoked by connections.
  * @param executor Worker pool used for request dispatch.
- * @param limits Per-connection resource limits.
- * @param connection_io_threads Number of connection-loop threads to start.
- * @param protocol_limits Frame and payload size limits.
- * @param connection_idle_timeout Idle timeout applied to accepted connections.
+ * @param config Listener and connection transport settings.
  */
 TcpServer::TcpServer(io::UringContext &accept_context, RawHandler handler, ThreadPoolExecutor &executor,
-                     ConnectionBackpressureLimits limits, std::size_t connection_io_threads,
-                     ProtocolLimits protocol_limits, std::chrono::milliseconds connection_idle_timeout)
-    : accept_context_(&accept_context),
-      handler_(std::move(handler)),
-      executor_(&executor),
-      backpressure_limits_(limits),
-      protocol_limits_(protocol_limits),
-      connection_idle_timeout_(connection_idle_timeout) {
-  ValidateConnectionIoThreads(connection_io_threads);
+                     TcpServerConfig config)
+    : accept_context_(&accept_context), handler_(std::move(handler)), executor_(&executor), config_(std::move(config)) {
+  assert(config_.listen_backlog_ > 0);
+  assert(config_.connection_io_threads_ > 0);
   connection_io_loop_group_ = std::make_unique<ConnectionIoLoopGroup>(
-      connection_io_threads, handler_, *executor_, backpressure_limits_, backpressure_stats_, io_stats_,
-      protocol_limits_, connection_idle_timeout_);
+      config_.connection_io_threads_, handler_, *executor_, config_.backpressure_limits_, backpressure_stats_,
+      io_stats_, config_.protocol_limits_, config_.connection_idle_timeout_);
 }
 
 /** @brief Releases the connection-loop group after shutdown. */
@@ -74,15 +42,14 @@ TcpServer::~TcpServer() = default;
  *
  * @param host Local address to bind.
  * @param port Local TCP port, or zero to let the OS choose.
- * @param backlog Listen backlog passed to the socket.
  */
-void TcpServer::Listen(std::string_view host, std::uint16_t port, std::size_t backlog) {
+void TcpServer::Listen(std::string_view host, std::uint16_t port) {
   if (listen_socket_.valid()) {
     return;
   }
 
   listen_socket_.Bind(host, port);
-  listen_socket_.Listen(static_cast<int>(backlog));
+  listen_socket_.Listen(config_.listen_backlog_);
   port_ = listen_socket_.LocalPort();
 }
 

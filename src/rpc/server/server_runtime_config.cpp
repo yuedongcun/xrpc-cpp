@@ -3,7 +3,9 @@
 #include <unistd.h>
 
 #include <cstdint>
+#include <limits>
 #include <string>
+#include <thread>
 
 #include "rpc/xrpc_exception.h"
 
@@ -18,6 +20,16 @@ namespace {
  * @return true when `host` is an IPv4 or IPv6 wildcard bind address.
  */
 auto IsWildcardAddress(std::string_view host) -> bool { return host == "0.0.0.0" || host == "::"; }
+
+/** @brief Resolves the public zero value to a concrete worker count. */
+auto ResolveWorkerThreads(std::size_t worker_threads) -> std::size_t {
+  if (worker_threads > 0) {
+    return worker_threads;
+  }
+
+  const auto hardware_threads = std::thread::hardware_concurrency();
+  return hardware_threads == 0 ? 1U : static_cast<std::size_t>(hardware_threads);
+}
 
 }  // namespace
 
@@ -35,6 +47,9 @@ auto IsWildcardAddress(std::string_view host) -> bool { return host == "0.0.0.0"
 auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerRuntimeConfig {
   if (options.listen_backlog_ == 0) {
     throw ConfigException("RpcServer listen_backlog must be greater than 0");
+  }
+  if (options.listen_backlog_ > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw ConfigException("RpcServer listen_backlog exceeds the socket API range");
   }
   if (options.connection_io_threads_ == 0) {
     throw ConfigException("RpcServer connection_io_threads must be greater than 0");
@@ -67,23 +82,27 @@ auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerRuntimeCon
   } else if (options.consul_address_.empty()) {
     throw ConfigException("RpcServer consul_address must not be empty when service registration is enabled");
   }
-  ProtocolLimits protocol_limits = MakeProtocolLimits(options.max_payload_size_);
-
   return ServerRuntimeConfig{
-      .worker_threads_ = options.worker_threads_,
-      .connection_io_threads_ = options.connection_io_threads_,
-      .listen_backlog_ = options.listen_backlog_,
-      .max_inflight_per_connection_ = options.max_inflight_per_connection_,
-      .max_write_queue_bytes_per_connection_ = options.max_write_queue_bytes_per_connection_,
+      .worker_threads_ = ResolveWorkerThreads(options.worker_threads_),
       .max_pending_jobs_global_ = options.max_pending_jobs_global_,
-      .connection_idle_timeout_ = options.connection_idle_timeout_,
+      .transport_ =
+          TcpServerConfig{
+              .listen_backlog_ = static_cast<int>(options.listen_backlog_),
+              .backpressure_limits_ =
+                  ConnectionBackpressureLimits{
+                      .max_inflight_ = options.max_inflight_per_connection_,
+                      .max_write_queue_bytes_ = options.max_write_queue_bytes_per_connection_,
+                  },
+              .connection_io_threads_ = options.connection_io_threads_,
+              .protocol_limits_ = MakeProtocolLimits(options.max_payload_size_),
+              .connection_idle_timeout_ = options.connection_idle_timeout_,
+          },
       .service_name_ = options.service_name_,
       .service_id_ = options.service_id_,
       .service_address_ = options.service_address_,
       .service_port_ = options.service_port_,
       .consul_address_ = options.consul_address_,
       .consul_timeout_ = options.consul_timeout_,
-      .protocol_limits_ = protocol_limits,
   };
 }
 

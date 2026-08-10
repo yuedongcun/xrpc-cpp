@@ -11,7 +11,6 @@
 
 #include "common/task.h"
 #include "io/uring_context.h"
-#include "protocol/protocol_message.h"
 #include "rpc/handler.h"
 #include "rpc/naming/consul_registrar.h"
 #include "rpc/raw_message.h"
@@ -58,15 +57,6 @@ class RpcServer::ServerRuntime final {
   /** @return Snapshot of server runtime diagnostics. */
   [[nodiscard]] auto stats() const -> RpcServerStats;
 
-  /** @return Raw response produced by the registered service registry. */
-  [[nodiscard]] auto Dispatch(const RawRequest &request) const -> RawResponse;
-
-  /** @return Protocol response produced from a decoded protocol request. */
-  [[nodiscard]] auto Dispatch(const ProtocolRequest &request) const -> ProtocolResponse;
-
-  /** @return Encoded response frame for one encoded request frame. */
-  [[nodiscard]] auto DispatchFrame(std::string_view frame_bytes) const -> std::string;
-
  private:
   /** @brief Lifecycle state machine for public server operations. */
   enum class State : std::uint8_t {
@@ -77,9 +67,6 @@ class RpcServer::ServerRuntime final {
     Stopping,
     Stopped,
   };
-
-  /** @brief Resolves zero worker count to a hardware-concurrency based value. */
-  [[nodiscard]] static auto ResolveWorkerCount(std::size_t worker_threads) -> std::size_t;
 
   /** @brief Registers this server in Consul when registration options are enabled. */
   void RegisterServiceIfEnabled(std::string_view host);
@@ -117,7 +104,6 @@ class RpcServer::ServerRuntime final {
   TcpServer server_;
   std::optional<runtime::Task<void>> server_task_;
   std::unique_ptr<ConsulRegistrar> registrar_;
-  std::size_t listen_backlog_ = 0;
   std::mutex lifecycle_operation_mutex_;
   std::mutex lifecycle_mutex_;
   Status shutdown_status_;

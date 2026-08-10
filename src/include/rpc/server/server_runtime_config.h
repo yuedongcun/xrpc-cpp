@@ -8,32 +8,26 @@
 
 #include <xrpc/rpc_server.h>
 
-#include "protocol/frame_codec.h"
 #include "rpc/naming/consul_registrar.h"
+#include "transport/tcp_server.h"
 
 namespace xrpc {
 
 /**
  * @brief Normalized server options used internally by `RpcServer::ServerRuntime`.
  *
- * Values here are validated and have protocol limits resolved. `worker_threads_` may still be zero until runtime
- * startup resolves it to hardware concurrency.
+ * All defaults, resource limits, and transport values are resolved before this configuration reaches the runtime.
  */
 struct ServerRuntimeConfig {
-  std::size_t worker_threads_ = 0;
-  std::size_t connection_io_threads_ = 0;
-  std::size_t listen_backlog_ = 0;
-  std::size_t max_inflight_per_connection_ = 0;
-  std::size_t max_write_queue_bytes_per_connection_ = 0;
-  std::size_t max_pending_jobs_global_ = 0;
-  std::chrono::milliseconds connection_idle_timeout_{0};
+  std::size_t worker_threads_;
+  std::size_t max_pending_jobs_global_;
+  TcpServerConfig transport_;
   std::string service_name_;
   std::string service_id_;
   std::string service_address_;
-  std::uint16_t service_port_ = 0;
+  std::uint16_t service_port_;
   std::string consul_address_;
-  std::chrono::milliseconds consul_timeout_{0};
-  ProtocolLimits protocol_limits_;
+  std::chrono::milliseconds consul_timeout_;
 };
 
 /**

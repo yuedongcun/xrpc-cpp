@@ -1,15 +1,11 @@
 #include "rpc/server/server_runtime.h"
 
 #include <string_view>
-#include <thread>
 #include <utility>
 
 #include "rpc/xrpc_exception.h"
 
-#include "protocol/frame_codec.h"
-#include "protocol/protocol_error.h"
 #include "rpc/naming/consul_agent_client.h"
-#include "rpc/protocol_adapter.h"
 
 namespace xrpc {
 
@@ -21,15 +17,10 @@ namespace xrpc {
  */
 RpcServer::ServerRuntime::ServerRuntime(const RpcServerOptions &options)
     : config_(NormalizeServerOptions(options)),
-      executor_(ResolveWorkerCount(config_.worker_threads_), config_.max_pending_jobs_global_),
+      executor_(config_.worker_threads_, config_.max_pending_jobs_global_),
       server_(
           accept_context_, [this](RawRequest request) { return registry_.Dispatch(std::move(request)); }, executor_,
-          ConnectionBackpressureLimits{
-              .max_inflight_ = config_.max_inflight_per_connection_,
-              .max_write_queue_bytes_ = config_.max_write_queue_bytes_per_connection_,
-          },
-          config_.connection_io_threads_, config_.protocol_limits_, config_.connection_idle_timeout_),
-      listen_backlog_(config_.listen_backlog_) {}
+          config_.transport_) {}
 
 /**
  * @brief Performs best-effort shutdown during runtime destruction.
@@ -81,7 +72,7 @@ void RpcServer::ServerRuntime::Listen(std::string_view host, std::uint16_t port)
   }
 
   try {
-    server_.Listen(host, port, listen_backlog_);
+    server_.Listen(host, port);
     RegisterServiceIfEnabled(host);
   } catch (...) {
     StopRuntime(false);
@@ -150,36 +141,6 @@ auto RpcServer::ServerRuntime::stats() const -> RpcServerStats {
       .worker_jobs_rejected_ = executor_snapshot.rejected_jobs_,
       .max_observed_worker_queue_depth_ = executor_snapshot.max_observed_worker_queue_depth_,
   };
-}
-
-/**
- * @brief Dispatches a raw request through the service registry.
- */
-auto RpcServer::ServerRuntime::Dispatch(const RawRequest &request) const -> RawResponse {
-  return registry_.Dispatch(request);
-}
-
-/**
- * @brief Dispatches a decoded protocol request and returns protocol response fields.
- */
-auto RpcServer::ServerRuntime::Dispatch(const ProtocolRequest &request) const -> ProtocolResponse {
-  return ToProtocolResponse(Dispatch(ToRawRequest(request)));
-}
-
-/**
- * @brief Decodes, dispatches, and re-encodes one request frame.
- *
- * This helper is intentionally narrow and is used by tests and adapter paths. Streaming connections use `RpcSession`
- * and `TcpConnection` instead.
- */
-auto RpcServer::ServerRuntime::DispatchFrame(std::string_view frame_bytes) const -> std::string {
-  FrameCodec codec(config_.protocol_limits_);
-  DecodeResult decoded = codec.TryDecode(frame_bytes);
-  if (decoded.error_ != ProtocolError::Ok || !decoded.request_.has_value()) {
-    return {};
-  }
-
-  return codec.EncodeResponse(Dispatch(*decoded.request_));
 }
 
 /**
@@ -257,18 +218,6 @@ auto RpcServer::ServerRuntime::TryDeregisterService() noexcept -> Status {
   } catch (...) {
     return CaughtExceptionToStatus("Consul service deregistration failed");
   }
-}
-
-/**
- * @brief Resolves zero worker count to a conservative hardware concurrency default.
- */
-auto RpcServer::ServerRuntime::ResolveWorkerCount(std::size_t worker_threads) -> std::size_t {
-  if (worker_threads > 0) {
-    return worker_threads;
-  }
-
-  const auto hc = std::thread::hardware_concurrency();
-  return hc == 0 ? 1U : static_cast<std::size_t>(hc);
 }
 
 /**
