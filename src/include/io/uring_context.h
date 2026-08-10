@@ -43,7 +43,7 @@ struct UringPostStatsSnapshot {
 class UringContext final {
  public:
   /** @brief Creates an io_uring runtime with the requested queue depth. */
-  explicit UringContext(std::uint32_t entries = 4096);
+  explicit UringContext(std::uint32_t entries = 256);
 
   /** @brief Stops and releases runtime resources. */
   ~UringContext();

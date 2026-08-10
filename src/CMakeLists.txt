@@ -24,6 +24,8 @@ set(XRPC_SOURCES
     io/socket.cpp
     io/uring_awaitable.cpp
     io/uring_context.cpp
+    io/uring_context_io.cpp
+    io/uring_context_wakeup.cpp
     protocol/fixed_header.cpp
     protocol/frame_codec.cpp
     rpc/xrpc_exception.cpp
