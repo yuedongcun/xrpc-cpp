@@ -32,7 +32,6 @@
 #include "benchmark_stats.h"
 #include "proto/echo.pb.h"
 #include "protocol/fixed_header.h"
-#include "protocol/message_type.h"
 
 namespace xrpc::benchmark {
 

@@ -11,7 +11,6 @@
 
 #include "common/task.h"
 #include "io/uring_context.h"
-#include "rpc/handler.h"
 #include "rpc/naming/consul_registrar.h"
 #include "rpc/raw_message.h"
 #include "rpc/server/server_runtime_config.h"

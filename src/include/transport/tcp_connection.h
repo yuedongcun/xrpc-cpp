@@ -13,15 +13,28 @@
 #include "io/socket.h"
 #include "io/uring_context.h"
 #include "protocol/frame_codec.h"
-#include "rpc/handler.h"
+#include "rpc/raw_message.h"
 #include "rpc/server/rpc_frame_stream.h"
-#include "transport/connection_close_reason.h"
 #include "transport/server_backpressure.h"
 #include "transport/thread_pool_executor.h"
 
 namespace xrpc {
 
 class DispatchCompletionQueue;
+
+/**
+ * @brief First reason recorded when a server-side connection closes.
+ *
+ * The value is diagnostic and remains stable after the first close transition.
+ */
+enum class ConnectionCloseReason : std::uint8_t {
+  None = 0,
+  PeerClosed,
+  ProtocolError,
+  SocketError,
+  Backpressure,
+  IdleTimeout,
+};
 
 /**
  * @brief Dependencies and limits injected into one accepted connection.

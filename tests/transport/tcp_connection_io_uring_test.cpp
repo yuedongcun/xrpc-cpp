@@ -15,7 +15,6 @@
 #include "io/uring_context.h"
 #include "proto/echo.pb.h"
 #include "protocol/frame_codec.h"
-#include "protocol/protocol_error.h"
 #include "protocol/protocol_message.h"
 #include "transport/dispatch_completion_queue.h"
 #include "transport/tcp_connection.h"

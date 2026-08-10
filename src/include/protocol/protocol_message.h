@@ -1,11 +1,28 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 
-#include "protocol/protocol_error.h"
-
 namespace xrpc {
+
+/**
+ * @brief Non-throwing protocol encode/decode outcome.
+ *
+ * `NeedMoreData` is recoverable. Other errors mean the current frame cannot be accepted.
+ */
+enum class ProtocolError : std::uint8_t {
+  Ok = 0,
+  NeedMoreData,
+  InvalidMagic,
+  UnsupportedVersion,
+  InvalidMessageType,
+  UnsupportedMessageType,
+  FrameTooLarge,
+  DecodeError,
+  EncodeError,
+};
 
 /**
  * @brief Protocol-level request after fixed-frame and protobuf-header decoding.

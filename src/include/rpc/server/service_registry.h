@@ -3,7 +3,6 @@
 #include <string>
 #include <unordered_map>
 
-#include "rpc/handler.h"
 #include "rpc/raw_message.h"
 
 namespace xrpc {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 
 #include <xrpc/status.h>
@@ -43,5 +44,12 @@ struct RawResponse {
   /** @brief Opaque response body bytes for successful calls. */
   std::string payload_;
 };
+
+/**
+ * @brief Server-side raw handler signature used after protocol decoding.
+ *
+ * Handlers take ownership of decoded requests so payload bytes can move through dispatch without an extra copy.
+ */
+using RawHandler = std::function<RawResponse(RawRequest)>;
 
 }  // namespace xrpc

@@ -11,7 +11,7 @@
 #include "io/socket.h"
 #include "io/uring_context.h"
 #include "protocol/frame_codec.h"
-#include "rpc/handler.h"
+#include "rpc/raw_message.h"
 #include "transport/dispatch_completion_queue.h"
 #include "transport/server_backpressure.h"
 #include "transport/tcp_connection.h"

@@ -9,7 +9,6 @@
 
 #include "io/socket_error.h"
 #include "rpc/client/client_config.h"
-#include "rpc/client/tcp_transport.h"
 
 namespace xrpc {
 

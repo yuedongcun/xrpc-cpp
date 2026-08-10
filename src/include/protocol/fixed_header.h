@@ -5,9 +5,20 @@
 #include <string>
 #include <string_view>
 
-#include "protocol/message_type.h"
-
 namespace xrpc {
+
+/**
+ * @brief Values stored in `FixedHeader::message_type_`.
+ *
+ * Heartbeat variants are reserved for protocol evolution. Request and response are the only message types accepted by
+ * the current frame codec.
+ */
+enum class MessageType : std::uint8_t {
+  Request = 1,
+  Response = 2,
+  Heartbeat = 3,
+  HeartbeatAck = 4,
+};
 
 /**
  * @brief Fixed-size prefix that starts every XRPC wire frame.

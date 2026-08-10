@@ -9,7 +9,6 @@
 
 #include "protocol/fixed_header.h"
 #include "protocol/frame_codec.h"
-#include "protocol/protocol_error.h"
 #include "protocol/protocol_message.h"
 
 namespace xrpc {

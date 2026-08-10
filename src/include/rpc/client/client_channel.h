@@ -11,13 +11,26 @@
 #include <xrpc/rpc_client.h>
 
 #include "protocol/frame_codec.h"
-#include "rpc/client/channel_endpoint.h"
 #include "rpc/client/endpoint_selector.h"
 #include "rpc/client/endpoint_state_table.h"
+#include "rpc/client/tcp_transport.h"
 #include "rpc/raw_call_result.h"
 #include "rpc/raw_message.h"
 
 namespace xrpc {
+
+/** @brief Mutable transport state shared by routing snapshots for one endpoint. */
+struct EndpointRuntimeState final {
+  std::mutex mutex_;
+  std::unique_ptr<TcpTransport> transport_;
+};
+
+/** @brief Immutable endpoint entry published as part of a routing snapshot. */
+struct ActiveEndpointSnapshot final {
+  std::string endpoint_id_;
+  Endpoint endpoint_;
+  std::shared_ptr<EndpointRuntimeState> runtime_state_;
+};
 
 /**
  * @brief Owns client-side routing state and per-endpoint transports.

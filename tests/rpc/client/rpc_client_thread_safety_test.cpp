@@ -19,7 +19,6 @@
 #include "io/socket.h"
 #include "proto/echo.pb.h"
 #include "protocol/frame_codec.h"
-#include "protocol/protocol_error.h"
 #include "protocol/protocol_message.h"
 
 namespace {

@@ -4,7 +4,6 @@
 #include <utility>
 
 #include "protocol/frame_codec.h"
-#include "protocol/protocol_error.h"
 #include "protocol/protocol_message.h"
 #include "rpc/protocol_adapter.h"
 
