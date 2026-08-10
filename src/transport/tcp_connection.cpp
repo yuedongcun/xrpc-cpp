@@ -1,6 +1,7 @@
 #include "transport/tcp_connection.h"
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <memory>
 #include <string>
@@ -19,21 +20,6 @@ auto MakeReadBufferSize() -> std::size_t { return 16U * 1024U; }
 /** @return Maximum bytes coalesced into one asynchronous send operation. */
 auto MakeMaxWriteBatchBytes() -> std::size_t { return 64U * 1024U; }
 
-/**
- * @brief Returns the provided completion queue or creates one bound to this context.
- *
- * @param context Event-loop context used for worker completion callbacks.
- * @param completion_queue Optional externally shared completion queue.
- * @return Queue used by this connection to receive worker completions.
- */
-auto ResolveCompletionQueue(io::UringContext &context, std::shared_ptr<DispatchCompletionQueue> completion_queue)
-    -> std::shared_ptr<DispatchCompletionQueue> {
-  if (completion_queue) {
-    return completion_queue;
-  }
-  return std::make_shared<DispatchCompletionQueue>(context);
-}
-
 }  // namespace
 
 /**
@@ -51,7 +37,7 @@ auto ResolveCompletionQueue(io::UringContext &context, std::shared_ptr<DispatchC
 TcpConnection::TcpConnection(io::UringContext &context, RawHandler handler, ThreadPoolExecutor &executor,
                              io::Socket socket, TcpConnectionOptions options)
     : context_(&context),
-      completion_queue_(ResolveCompletionQueue(context, std::move(options.completion_queue_))),
+      completion_queue_(std::move(options.completion_queue_)),
       executor_(&executor),
       handler_(std::move(handler)),
       frame_stream_(options.protocol_limits_),
@@ -60,9 +46,10 @@ TcpConnection::TcpConnection(io::UringContext &context, RawHandler handler, Thre
       read_buffer_(MakeReadBufferSize(), '\0'),
       idle_timeout_(options.idle_timeout_),
       limits_(options.limits_),
-      backpressure_stats_(options.backpressure_stats_ == nullptr ? &owned_backpressure_stats_
-                                                                 : options.backpressure_stats_),
-      io_stats_(options.io_stats_ == nullptr ? &owned_io_stats_ : options.io_stats_) {}
+      backpressure_stats_(options.backpressure_stats_) {
+  assert(completion_queue_ != nullptr);
+  assert(backpressure_stats_ != nullptr);
+}
 
 /** @brief Connection state is closed by the run loop or owner before destruction. */
 TcpConnection::~TcpConnection() = default;
@@ -224,13 +211,11 @@ auto TcpConnection::EnqueueWrite(std::string bytes) -> bool {
 
   write_queue_.push_back(std::move(bytes));
   TouchActivity();
-  io_stats_->RecordWriteFrameEnqueued(write_queue_.size());
   if (write_in_progress_) {
     return true;
   }
 
   write_in_progress_ = true;
-  io_stats_->RecordWriteDrainStarted();
   write_task_.emplace(DrainWriteQueue());
   write_task_->Start();
   return true;
@@ -304,7 +289,6 @@ auto TcpConnection::DrainWriteQueue() -> runtime::Task<void> {
         break;
       }
 
-      io_stats_->RecordSendOperation(send_result.bytes_transferred_);
       TouchActivity();
       offset += send_result.bytes_transferred_;
     }
@@ -357,7 +341,7 @@ auto TcpConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> boo
         std::size_t successful_jobs = 0;
         bool encode_failed = false;
         for (RawRequest &request : *request_batch) {
-          RawResponse response = self->DispatchOnWorker(std::move(request));
+          RawResponse response = self->handler_(std::move(request));
           try {
             batch_response_bytes.append(self->EncodeResponseOnWorker(std::move(response)));
             ++successful_jobs;
@@ -411,14 +395,6 @@ auto TcpConnection::RejectRequestDueToBackpressure(RawRequest &&request, std::st
     return false;
   }
 }
-
-/**
- * @brief Invokes the registered raw handler on a worker thread.
- *
- * @param request Raw request to dispatch.
- * @return Raw response produced by the service registry.
- */
-auto TcpConnection::DispatchOnWorker(RawRequest request) const -> RawResponse { return handler_(std::move(request)); }
 
 /**
  * @brief Encodes a raw response on the worker thread before event-loop handoff.

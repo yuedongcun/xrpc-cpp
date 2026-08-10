@@ -11,25 +11,6 @@
 namespace xrpc::io {
 
 /**
- * @brief Snapshot of cross-thread `Post()` traffic.
- *
- * These counters are diagnostic only and are intentionally relaxed because they are not used for synchronization.
- */
-struct UringPostStatsSnapshot {
-  /** @brief Number of callbacks accepted by `Post()`. */
-  std::uint64_t posted_callbacks_ = 0;
-
-  /** @brief Number of callbacks executed on the run thread. */
-  std::uint64_t drained_callbacks_ = 0;
-
-  /** @brief Number of posted-callback drain batches. */
-  std::uint64_t drain_batches_ = 0;
-
-  /** @brief Highest posted-callback queue depth observed. */
-  std::uint64_t max_observed_post_queue_depth_ = 0;
-};
-
-/**
  * @brief Single-threaded io_uring event-loop runtime.
  *
  * Design note:
@@ -84,9 +65,6 @@ class UringContext final {
 
   /** @brief Submits an async no-op operation. Must be called on the `Run()` thread. */
   [[nodiscard]] auto Nop() -> UringAwaitable;
-
-  /** @return Snapshot of cross-thread post diagnostics. */
-  [[nodiscard]] auto post_stats() const -> UringPostStatsSnapshot;
 
   /**
    * @brief Cancels outstanding operations for `fd`.

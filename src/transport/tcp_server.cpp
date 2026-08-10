@@ -1,7 +1,7 @@
 #include "transport/tcp_server.h"
 
-#include <cassert>
 #include <fcntl.h>
+#include <cassert>
 #include <memory>
 #include <utility>
 
@@ -26,12 +26,12 @@ namespace xrpc {
  */
 TcpServer::TcpServer(io::UringContext &accept_context, RawHandler handler, ThreadPoolExecutor &executor,
                      TcpServerConfig config)
-    : accept_context_(&accept_context), handler_(std::move(handler)), executor_(&executor), config_(std::move(config)) {
+    : accept_context_(&accept_context), config_(config) {
   assert(config_.listen_backlog_ > 0);
   assert(config_.connection_io_threads_ > 0);
   connection_io_loop_group_ = std::make_unique<ConnectionIoLoopGroup>(
-      config_.connection_io_threads_, handler_, *executor_, config_.backpressure_limits_, backpressure_stats_,
-      io_stats_, config_.protocol_limits_, config_.connection_idle_timeout_);
+      config_.connection_io_threads_, handler, executor, config_.backpressure_limits_, backpressure_stats_,
+      config_.protocol_limits_, config_.connection_idle_timeout_);
 }
 
 /** @brief Releases the connection-loop group after shutdown. */
@@ -79,7 +79,7 @@ auto TcpServer::Run() -> runtime::Task<void> {
 
     io::Socket client_socket(accept_result.result_);
     SetSocketFlags(client_socket.fd());
-    StartConnection(std::move(client_socket));
+    connection_io_loop_group_->Dispatch(std::move(client_socket));
   }
 
   connection_io_loop_group_->Stop();
@@ -102,23 +102,6 @@ void TcpServer::Stop() {
   listen_socket_.Close();
 
   connection_io_loop_group_->Stop();
-}
-
-/** @return Number of connections currently owned by connection event loops. */
-auto TcpServer::ConnectionCount() const -> std::size_t { return connection_io_loop_group_->ConnectionCount(); }
-
-/** @return Snapshot of cross-thread post counters from connection event loops. */
-auto TcpServer::io_loop_post_stats() const -> io::UringPostStatsSnapshot {
-  return connection_io_loop_group_->post_stats();
-}
-
-/**
- * @brief Hands an accepted client socket to the connection-loop group.
- *
- * @param client_socket Accepted socket with nonblocking flags applied by the accept loop.
- */
-void TcpServer::StartConnection(io::Socket client_socket) {
-  connection_io_loop_group_->Dispatch(std::move(client_socket));
 }
 
 /**

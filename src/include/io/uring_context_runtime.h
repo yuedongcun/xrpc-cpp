@@ -80,13 +80,9 @@ struct UringContext::Runtime final {
 
   void DrainWakeupCounter() const;
 
-  [[nodiscard]] auto PostStats() const -> UringPostStatsSnapshot;
-
   [[nodiscard]] static auto MakeErrorMessage(std::string_view action, int error_code) -> std::string;
 
   [[nodiscard]] static auto CurrentThreadToken() -> const void *;
-
-  static void ObserveMaximum(std::atomic<std::uint64_t> &maximum, std::size_t value);
 
   /** @brief Kernel submission/completion queue. */
   io_uring ring_{};
@@ -117,18 +113,6 @@ struct UringContext::Runtime final {
 
   /** @brief Callbacks waiting to run on the event-loop thread. */
   std::queue<std::function<void()>> posted_callbacks_;
-
-  /** @brief Total callbacks accepted by `Post()`. */
-  std::atomic<std::uint64_t> posted_callbacks_count_{0};
-
-  /** @brief Total callbacks executed by `DrainPosted()`. */
-  std::atomic<std::uint64_t> drained_callbacks_count_{0};
-
-  /** @brief Number of batches drained from the posted callback queue. */
-  std::atomic<std::uint64_t> drain_batches_{0};
-
-  /** @brief Highest posted callback queue depth observed. */
-  std::atomic<std::uint64_t> max_observed_post_queue_depth_{0};
 
   /** @brief Timeout operations that should be canceled when shutdown starts. */
   std::unordered_set<Operation *> pending_timeout_operations_;

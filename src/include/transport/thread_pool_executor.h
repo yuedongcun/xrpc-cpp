@@ -18,16 +18,10 @@ namespace xrpc {
 /**
  * @brief Worker-pool diagnostics copied from relaxed atomic counters.
  *
- * `submitted_jobs_`, `completed_jobs_`, and `rejected_jobs_` count logical jobs. A batch of N RPCs submitted as one
- * physical worker task contributes N logical jobs. `max_observed_worker_queue_depth_` tracks queued physical tasks.
+ * `rejected_jobs_` counts logical jobs. A batch of N RPCs submitted as one physical worker task contributes N logical
+ * jobs. `max_observed_worker_queue_depth_` tracks queued physical tasks.
  */
 struct ThreadPoolExecutorSnapshot {
-  /** @brief Logical jobs accepted by the pool. */
-  std::uint64_t submitted_jobs_ = 0;
-
-  /** @brief Logical jobs completed by worker threads. */
-  std::uint64_t completed_jobs_ = 0;
-
   /** @brief Logical jobs rejected by the global pending-job limit. */
   std::uint64_t rejected_jobs_ = 0;
 
@@ -40,8 +34,8 @@ struct ThreadPoolExecutorSnapshot {
  *
  * Design note:
  * - Ownership: each worker owns one private queue; the executor owns all workers and the global pending-job counter.
- * - Backpressure: `TrySubmit()` reserves logical jobs before queueing. Rejection is visible to `TcpConnection` so it
- * can send an RPC error instead of growing memory.
+ * - Backpressure: submission reserves logical jobs before queueing. Rejection is visible to `TcpConnection` so it can
+ * send an RPC error instead of growing memory.
  * - Shutdown: `Stop()` flips `stopped_`, wakes all queues, and lets `jthread`s join.
  * - Batching: `TrySubmitBatch()` counts multiple RPCs as one physical worker task.
  */
@@ -64,13 +58,6 @@ class ThreadPoolExecutor final {
 
   ThreadPoolExecutor(ThreadPoolExecutor &&) = delete;
   auto operator=(ThreadPoolExecutor &&) -> ThreadPoolExecutor & = delete;
-
-  /**
-   * @brief Queues one logical job.
-   *
-   * @return true when the job was accepted, false when the pool is stopped or the pending-job limit is reached.
-   */
-  [[nodiscard]] auto TrySubmit(std::function<void()> job) -> bool;
 
   /**
    * @brief Batches multiple logical jobs into one physical worker task.
@@ -117,8 +104,6 @@ class ThreadPoolExecutor final {
   std::size_t max_pending_jobs_ = 0;
   std::atomic<std::size_t> pending_jobs_{0};
   std::atomic_bool stopped_{false};
-  std::atomic<std::uint64_t> submitted_jobs_{0};
-  std::atomic<std::uint64_t> completed_jobs_{0};
   std::atomic<std::uint64_t> rejected_jobs_{0};
   std::atomic<std::uint64_t> max_observed_worker_queue_depth_{0};
 };

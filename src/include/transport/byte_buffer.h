@@ -23,13 +23,13 @@ class ByteBuffer final {
   /** @brief Marks `n` readable bytes as consumed and compacts when worthwhile. */
   void Consume(std::size_t n);
 
-  /** @return Number of unread bytes currently buffered. */
-  [[nodiscard]] auto ReadableSize() const -> std::size_t;
-
   /** @return true when no unread bytes are buffered. */
   [[nodiscard]] auto Empty() const -> bool;
 
  private:
+  /** @return Number of unread bytes currently buffered. */
+  [[nodiscard]] auto ReadableSize() const -> std::size_t;
+
   /** @brief Reclaims consumed prefix storage when it dominates the buffer. */
   void Compact();
 

@@ -58,14 +58,6 @@ ThreadPoolExecutor::ThreadPoolExecutor(std::size_t worker_count, std::size_t max
 ThreadPoolExecutor::~ThreadPoolExecutor() { Stop(); }
 
 /**
- * @brief Attempts to submit one logical job.
- *
- * @param job Callable to run on a worker thread.
- * @return true when accepted, false when the global pending limit is full.
- */
-auto ThreadPoolExecutor::TrySubmit(std::function<void()> job) -> bool { return TrySubmitBatch(std::move(job), 1); }
-
-/**
  * @brief Attempts to submit a callable representing multiple logical RPC jobs.
  *
  * Batched submission is used when one worker callable drains several decoded requests from the same
@@ -98,7 +90,6 @@ auto ThreadPoolExecutor::TrySubmitBatch(std::function<void()> job, std::size_t l
     queue.jobs_.push(WorkerJob{.run_ = std::move(job), .logical_jobs_ = logical_jobs});
     const std::size_t queue_depth = queue.pending_jobs_.fetch_add(1, std::memory_order_relaxed) + 1;
     ObserveMaximum(max_observed_worker_queue_depth_, queue_depth);
-    submitted_jobs_.fetch_add(logical_jobs, std::memory_order_relaxed);
   } catch (...) {
     ReleasePendingJobs(logical_jobs);
     throw;
@@ -110,8 +101,6 @@ auto ThreadPoolExecutor::TrySubmitBatch(std::function<void()> job, std::size_t l
 /** @return Snapshot of worker-pool counters used by server diagnostics. */
 auto ThreadPoolExecutor::stats() const -> ThreadPoolExecutorSnapshot {
   return ThreadPoolExecutorSnapshot{
-      .submitted_jobs_ = submitted_jobs_.load(std::memory_order_relaxed),
-      .completed_jobs_ = completed_jobs_.load(std::memory_order_relaxed),
       .rejected_jobs_ = rejected_jobs_.load(std::memory_order_relaxed),
       .max_observed_worker_queue_depth_ = max_observed_worker_queue_depth_.load(std::memory_order_relaxed),
   };
@@ -220,7 +209,6 @@ void ThreadPoolExecutor::WorkerLoop(WorkerQueue &queue) {
     }
 
     job.run_();
-    completed_jobs_.fetch_add(job.logical_jobs_, std::memory_order_relaxed);
     queue.pending_jobs_.fetch_sub(1, std::memory_order_relaxed);
     ReleasePendingJobs(job.logical_jobs_);
   }

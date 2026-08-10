@@ -87,9 +87,6 @@ class RpcFrameStream final {
   /** @return Encoded response frame bytes after mapping raw status fields to protocol fields. */
   [[nodiscard]] auto EncodeResponse(RawResponse &&response) const -> std::string;
 
-  /** @return true after a non-recoverable protocol error has closed this frame stream. */
-  [[nodiscard]] auto IsClosed() const -> bool { return closed_; }
-
  private:
   /** @brief Drains all complete request frames currently buffered in the frame stream. */
   [[nodiscard]] auto DrainReadableRequests() -> RawRequestBatch;

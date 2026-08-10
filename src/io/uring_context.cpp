@@ -154,9 +154,6 @@ void UringContext::Run() {
 /** @brief Requests event-loop shutdown from any thread. */
 void UringContext::Stop() { runtime_->RequestStop(); }
 
-/** @return Snapshot of cross-thread post diagnostics. */
-auto UringContext::post_stats() const -> UringPostStatsSnapshot { return runtime_->PostStats(); }
-
 /**
  * @brief Cancels pending operations associated with one file descriptor.
  *

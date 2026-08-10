@@ -14,7 +14,6 @@
 #include "rpc/handler.h"
 #include "transport/dispatch_completion_queue.h"
 #include "transport/server_backpressure.h"
-#include "transport/server_io_stats.h"
 #include "transport/tcp_connection.h"
 #include "transport/thread_pool_executor.h"
 
@@ -33,7 +32,7 @@ class ConnectionIoLoop final {
  public:
   /** @brief Creates an unstarted connection I/O loop. */
   ConnectionIoLoop(RawHandler handler, ThreadPoolExecutor &executor, ConnectionBackpressureLimits limits,
-                   ServerBackpressureStats &backpressure_stats, ServerIoStats &io_stats, ProtocolLimits protocol_limits,
+                   ServerBackpressureStats &backpressure_stats, ProtocolLimits protocol_limits,
                    std::chrono::milliseconds connection_idle_timeout);
 
   /** @brief Stops the loop and closes owned connections. */
@@ -56,12 +55,6 @@ class ConnectionIoLoop final {
 
   /** @brief Rethrows an exception captured by the event-loop thread, if any. */
   void RethrowIfFailed() const;
-
-  /** @return Current number of tracked connection entries. */
-  [[nodiscard]] auto ConnectionCount() const -> std::size_t;
-
-  /** @return Cross-thread post statistics from this loop's `UringContext`. */
-  [[nodiscard]] auto post_stats() const -> io::UringPostStatsSnapshot { return context_.post_stats(); }
 
  private:
   /** @brief Live connection and its coroutine task. */
@@ -87,7 +80,6 @@ class ConnectionIoLoop final {
   ProtocolLimits protocol_limits_;
   std::chrono::milliseconds connection_idle_timeout_{0};
   ServerBackpressureStats *backpressure_stats_;
-  ServerIoStats *io_stats_;
   std::vector<ConnectionEntry> connections_;
   std::jthread thread_;
   std::exception_ptr error_;
@@ -104,8 +96,7 @@ class ConnectionIoLoopGroup final {
   /** @brief Creates `loop_count` unstarted I/O loops. */
   ConnectionIoLoopGroup(std::size_t loop_count, const RawHandler &handler, ThreadPoolExecutor &executor,
                         ConnectionBackpressureLimits limits, ServerBackpressureStats &backpressure_stats,
-                        ServerIoStats &io_stats, ProtocolLimits protocol_limits,
-                        std::chrono::milliseconds connection_idle_timeout);
+                        ProtocolLimits protocol_limits, std::chrono::milliseconds connection_idle_timeout);
 
   /** @brief Stops all loops before destroying them. */
   ~ConnectionIoLoopGroup();
@@ -127,12 +118,6 @@ class ConnectionIoLoopGroup final {
 
   /** @brief Rethrows the first loop failure observed after shutdown. */
   void RethrowIfFailed() const;
-
-  /** @return Total tracked connection count across loops. */
-  [[nodiscard]] auto ConnectionCount() const -> std::size_t;
-
-  /** @return Aggregated cross-thread post statistics across loops. */
-  [[nodiscard]] auto post_stats() const -> io::UringPostStatsSnapshot;
 
  private:
   std::vector<std::unique_ptr<ConnectionIoLoop>> loops_;

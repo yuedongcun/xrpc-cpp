@@ -20,20 +20,6 @@
 namespace xrpc::io {
 
 /**
- * @brief Atomically records the maximum observed value.
- *
- * @param maximum Relaxed diagnostic counter to update.
- * @param value Candidate maximum.
- */
-void UringContext::Runtime::ObserveMaximum(std::atomic<std::uint64_t> &maximum, std::size_t value) {
-  std::uint64_t observed = maximum.load(std::memory_order_relaxed);
-  const auto candidate = static_cast<std::uint64_t>(value);
-  while (observed < candidate &&
-         !maximum.compare_exchange_weak(observed, candidate, std::memory_order_relaxed, std::memory_order_relaxed)) {
-  }
-}
-
-/**
  * @brief Enqueues a cross-thread callback for execution on the run thread.
  *
  * @param fn Callback to execute from `DrainPosted()`.
@@ -47,8 +33,6 @@ void UringContext::Runtime::EnqueuePosted(std::function<void()> fn) {
     }
     should_wake = posted_callbacks_.empty();
     posted_callbacks_.emplace(std::move(fn));
-    posted_callbacks_count_.fetch_add(1, std::memory_order_relaxed);
-    ObserveMaximum(max_observed_post_queue_depth_, posted_callbacks_.size());
   }
 
   if (should_wake) {
@@ -80,17 +64,11 @@ void UringContext::Runtime::RequestStop() {
  */
 void UringContext::Runtime::DrainPosted() {
   std::queue<std::function<void()>> callbacks;
-  std::size_t batch_size = 0;
   {
     std::lock_guard<std::mutex> lock(post_mutex_);
     // Swap under the mutex, then execute callbacks without holding it so
     // callbacks can safely post more work or call Stop().
-    batch_size = posted_callbacks_.size();
     std::swap(callbacks, posted_callbacks_);
-  }
-  if (batch_size > 0) {
-    drained_callbacks_count_.fetch_add(batch_size, std::memory_order_relaxed);
-    drain_batches_.fetch_add(1, std::memory_order_relaxed);
   }
 
   while (!callbacks.empty()) {
@@ -204,16 +182,6 @@ void UringContext::Runtime::DrainWakeupCounter() const {
     }
     throw InternalException(MakeErrorMessage("eventfd read", errno));
   }
-}
-
-/** @return Snapshot of cross-thread post diagnostics. */
-auto UringContext::Runtime::PostStats() const -> UringPostStatsSnapshot {
-  return UringPostStatsSnapshot{
-      .posted_callbacks_ = posted_callbacks_count_.load(std::memory_order_relaxed),
-      .drained_callbacks_ = drained_callbacks_count_.load(std::memory_order_relaxed),
-      .drain_batches_ = drain_batches_.load(std::memory_order_relaxed),
-      .max_observed_post_queue_depth_ = max_observed_post_queue_depth_.load(std::memory_order_relaxed),
-  };
 }
 
 }  // namespace xrpc::io

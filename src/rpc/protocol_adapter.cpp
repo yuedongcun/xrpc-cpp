@@ -36,18 +36,6 @@ auto DecodeStatus(std::int32_t code, std::string message) -> Status {
 }  // namespace
 
 /**
- * @brief Copies a decoded protocol request into the raw RPC core request model.
- */
-auto ToRawRequest(const ProtocolRequest &request) -> RawRequest {
-  RawRequest raw;
-  raw.request_id_ = request.request_id_;
-  raw.service_name_ = request.service_name_;
-  raw.method_name_ = request.method_name_;
-  raw.payload_ = request.payload_;
-  return raw;
-}
-
-/**
  * @brief Moves a decoded protocol request into the raw RPC core request model.
  */
 auto ToRawRequest(ProtocolRequest &&request) -> RawRequest {
@@ -68,18 +56,6 @@ auto ToProtocolRequest(const RawRequest &request) -> ProtocolRequest {
   protocol.service_name_ = request.service_name_;
   protocol.method_name_ = request.method_name_;
   protocol.payload_ = request.payload_;
-  return protocol;
-}
-
-/**
- * @brief Copies a raw RPC response into protocol fields for frame encoding.
- */
-auto ToProtocolResponse(const RawResponse &response) -> ProtocolResponse {
-  ProtocolResponse protocol;
-  protocol.request_id_ = response.request_id_;
-  protocol.error_code_ = static_cast<std::int32_t>(response.status_.code());
-  protocol.error_text_ = response.status_.message();
-  protocol.payload_ = response.payload_;
   return protocol;
 }
 

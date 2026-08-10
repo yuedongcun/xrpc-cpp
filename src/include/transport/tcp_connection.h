@@ -17,7 +17,6 @@
 #include "rpc/server/rpc_frame_stream.h"
 #include "transport/connection_close_reason.h"
 #include "transport/server_backpressure.h"
-#include "transport/server_io_stats.h"
 #include "transport/thread_pool_executor.h"
 
 namespace xrpc {
@@ -27,18 +26,15 @@ class DispatchCompletionQueue;
 /**
  * @brief Dependencies and limits injected into one accepted connection.
  *
- * Stats pointers may be null; `TcpConnection` then owns local stats for tests. In production, the owning `TcpServer`
- * passes shared stats objects so connection-level rejections and write behavior can be observed at the server facade.
+ * The owning connection I/O loop supplies the shared completion queue and backpressure counters used by every
+ * connection assigned to that loop.
  */
 struct TcpConnectionOptions final {
   /** @brief Per-connection inflight and write-queue limits. */
   ConnectionBackpressureLimits limits_;
 
-  /** @brief Optional shared backpressure stats sink. */
+  /** @brief Shared backpressure stats sink. */
   ServerBackpressureStats *backpressure_stats_ = nullptr;
-
-  /** @brief Optional shared I/O stats sink. */
-  ServerIoStats *io_stats_ = nullptr;
 
   /** @brief Completion queue used by worker threads to return encoded responses. */
   std::shared_ptr<DispatchCompletionQueue> completion_queue_;
@@ -94,9 +90,6 @@ class TcpConnection final : public std::enable_shared_from_this<TcpConnection> {
   /** @return First close reason recorded for this connection. */
   [[nodiscard]] auto close_reason() const -> ConnectionCloseReason { return close_reason_; }
 
-  /** @return Underlying socket fd, or -1 after the socket has been closed. */
-  [[nodiscard]] auto fd() const -> int { return socket_.fd(); }
-
  private:
   friend class DispatchCompletionQueue;
 
@@ -129,9 +122,6 @@ class TcpConnection final : public std::enable_shared_from_this<TcpConnection> {
 
   /** @brief Produces an immediate resource-exhausted response for a rejected request. */
   [[nodiscard]] auto RejectRequestDueToBackpressure(RawRequest &&request, std::string message) -> bool;
-
-  /** @brief Runs the raw handler and converts thrown failures to raw responses. */
-  [[nodiscard]] auto DispatchOnWorker(RawRequest request) const -> RawResponse;
 
   /** @brief Encodes a raw response on a worker before handing bytes to the event loop. */
   [[nodiscard]] auto EncodeResponseOnWorker(RawResponse &&response) const -> std::string;
@@ -208,17 +198,8 @@ class TcpConnection final : public std::enable_shared_from_this<TcpConnection> {
   /** @brief Per-connection backpressure limits. */
   ConnectionBackpressureLimits limits_;
 
-  /** @brief Shared backpressure stats, or `owned_backpressure_stats_` in tests. */
+  /** @brief Shared backpressure stats owned by the TCP server. */
   ServerBackpressureStats *backpressure_stats_ = nullptr;
-
-  /** @brief Local stats used when no shared backpressure stats were provided. */
-  ServerBackpressureStats owned_backpressure_stats_;
-
-  /** @brief Shared I/O stats, or `owned_io_stats_` in tests. */
-  ServerIoStats *io_stats_ = nullptr;
-
-  /** @brief Local stats used when no shared I/O stats were provided. */
-  ServerIoStats owned_io_stats_;
 
   /** @brief Closed flag owned by the event-loop thread. */
   bool closed_ = false;

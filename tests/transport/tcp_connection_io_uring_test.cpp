@@ -18,6 +18,7 @@
 #include "protocol/protocol_error.h"
 #include "protocol/protocol_message.h"
 #include "rpc/protobuf_codec.h"
+#include "transport/dispatch_completion_queue.h"
 #include "transport/tcp_connection.h"
 #include "transport/thread_pool_executor.h"
 
@@ -57,11 +58,12 @@ auto MakeSlowEchoHandler() -> xrpc::RawHandler {
   };
 }
 
-auto MakeConnectionOptions(xrpc::ConnectionBackpressureLimits limits, xrpc::ServerBackpressureStats &stats)
-    -> xrpc::TcpConnectionOptions {
+auto MakeConnectionOptions(xrpc::io::UringContext &context, xrpc::ServerBackpressureStats &stats,
+                           xrpc::ConnectionBackpressureLimits limits = {}) -> xrpc::TcpConnectionOptions {
   xrpc::TcpConnectionOptions options;
   options.limits_ = limits;
   options.backpressure_stats_ = &stats;
+  options.completion_queue_ = std::make_shared<xrpc::DispatchCompletionQueue>(context);
   return options;
 }
 
@@ -211,9 +213,11 @@ auto WaitForConnectionTask(xrpc::runtime::Task<void> &task, xrpc::io::UringConte
 TEST(CoroutineTcpConnectionTest, EchoesSingleFrameAndClosesAfterPeerShutdown) {
   ConnectedPair pair = MakeConnectedPair();
   xrpc::io::UringContext context;
+  xrpc::ServerBackpressureStats stats;
   xrpc::ThreadPoolExecutor executor(1);
+  xrpc::TcpConnectionOptions options = MakeConnectionOptions(context, stats);
   auto connection = std::make_shared<xrpc::TcpConnection>(context, MakeEchoHandler(), executor,
-                                                          std::move(pair.server_socket_), xrpc::TcpConnectionOptions{});
+                                                          std::move(pair.server_socket_), std::move(options));
   xrpc::runtime::Task<void> task = connection->Run();
   UringContextRunner runner;
   StartTaskOnContext(context, task);
@@ -235,8 +239,9 @@ TEST(CoroutineTcpConnectionTest, EchoesSingleFrameAndClosesAfterPeerShutdown) {
 TEST(CoroutineTcpConnectionTest, ClosesIdleConnectionAfterTimeout) {
   ConnectedPair pair = MakeConnectedPair();
   xrpc::io::UringContext context;
+  xrpc::ServerBackpressureStats stats;
   xrpc::ThreadPoolExecutor executor(1);
-  xrpc::TcpConnectionOptions options;
+  xrpc::TcpConnectionOptions options = MakeConnectionOptions(context, stats);
   options.idle_timeout_ = std::chrono::milliseconds(20);
   auto connection = std::make_shared<xrpc::TcpConnection>(context, MakeEchoHandler(), executor,
                                                           std::move(pair.server_socket_), std::move(options));
@@ -255,9 +260,11 @@ TEST(CoroutineTcpConnectionTest, ClosesIdleConnectionAfterTimeout) {
 TEST(CoroutineTcpConnectionTest, HandlesHalfPacketsAndStickyPackets) {
   ConnectedPair pair = MakeConnectedPair();
   xrpc::io::UringContext context;
+  xrpc::ServerBackpressureStats stats;
   xrpc::ThreadPoolExecutor executor(1);
+  xrpc::TcpConnectionOptions options = MakeConnectionOptions(context, stats);
   auto connection = std::make_shared<xrpc::TcpConnection>(context, MakeSlowEchoHandler(), executor,
-                                                          std::move(pair.server_socket_), xrpc::TcpConnectionOptions{});
+                                                          std::move(pair.server_socket_), std::move(options));
   xrpc::runtime::Task<void> task = connection->Run();
   UringContextRunner runner;
   StartTaskOnContext(context, task);
@@ -288,9 +295,11 @@ TEST(CoroutineTcpConnectionTest, HandlesHalfPacketsAndStickyPackets) {
 TEST(CoroutineTcpConnectionTest, HandlesPipelinedRequestsOnOneConnection) {
   ConnectedPair pair = MakeConnectedPair();
   xrpc::io::UringContext context;
+  xrpc::ServerBackpressureStats stats;
   xrpc::ThreadPoolExecutor executor(1);
+  xrpc::TcpConnectionOptions options = MakeConnectionOptions(context, stats);
   auto connection = std::make_shared<xrpc::TcpConnection>(context, MakeEchoHandler(), executor,
-                                                          std::move(pair.server_socket_), xrpc::TcpConnectionOptions{});
+                                                          std::move(pair.server_socket_), std::move(options));
   xrpc::runtime::Task<void> task = connection->Run();
   UringContextRunner runner;
   StartTaskOnContext(context, task);
@@ -317,9 +326,11 @@ TEST(CoroutineTcpConnectionTest, HandlesPipelinedRequestsOnOneConnection) {
 TEST(CoroutineTcpConnectionTest, ClosesOnInvalidFrame) {
   ConnectedPair pair = MakeConnectedPair();
   xrpc::io::UringContext context;
+  xrpc::ServerBackpressureStats stats;
   xrpc::ThreadPoolExecutor executor(1);
+  xrpc::TcpConnectionOptions options = MakeConnectionOptions(context, stats);
   auto connection = std::make_shared<xrpc::TcpConnection>(context, MakeEchoHandler(), executor,
-                                                          std::move(pair.server_socket_), xrpc::TcpConnectionOptions{});
+                                                          std::move(pair.server_socket_), std::move(options));
   xrpc::runtime::Task<void> task = connection->Run();
   UringContextRunner runner;
   StartTaskOnContext(context, task);
@@ -339,9 +350,11 @@ TEST(CoroutineTcpConnectionTest, ClosesOnInvalidFrame) {
 TEST(CoroutineTcpConnectionTest, HandlesConcurrentResponsesWithThreadPoolExecutor) {
   ConnectedPair pair = MakeConnectedPair();
   xrpc::io::UringContext context;
+  xrpc::ServerBackpressureStats stats;
   xrpc::ThreadPoolExecutor executor(2);
+  xrpc::TcpConnectionOptions options = MakeConnectionOptions(context, stats);
   auto connection = std::make_shared<xrpc::TcpConnection>(context, MakeEchoHandler(), executor,
-                                                          std::move(pair.server_socket_), xrpc::TcpConnectionOptions{});
+                                                          std::move(pair.server_socket_), std::move(options));
   xrpc::runtime::Task<void> task = connection->Run();
   UringContextRunner runner;
   StartTaskOnContext(context, task);
@@ -409,10 +422,10 @@ TEST(CoroutineTcpConnectionTest, KeepsReadingWhileWorkerHandlerIsPending) {
 
   ConnectedPair pair = MakeConnectedPair();
   xrpc::io::UringContext context;
-  xrpc::ThreadPoolExecutor executor(1);
   xrpc::ServerBackpressureStats stats;
+  xrpc::ThreadPoolExecutor executor(1);
   xrpc::TcpConnectionOptions options = MakeConnectionOptions(
-      xrpc::ConnectionBackpressureLimits{.max_inflight_ = 1, .max_write_queue_bytes_ = 1024}, stats);
+      context, stats, xrpc::ConnectionBackpressureLimits{.max_inflight_ = 1, .max_write_queue_bytes_ = 1024});
   auto connection = std::make_shared<xrpc::TcpConnection>(context, std::move(blocking_handler), executor,
                                                           std::move(pair.server_socket_), std::move(options));
   xrpc::runtime::Task<void> task = connection->Run();
@@ -453,10 +466,10 @@ TEST(CoroutineTcpConnectionTest, KeepsReadingWhileWorkerHandlerIsPending) {
 TEST(CoroutineTcpConnectionTest, ReturnsResourceExhaustedWhenPerConnectionInflightLimitIsReached) {
   ConnectedPair pair = MakeConnectedPair();
   xrpc::io::UringContext context;
-  xrpc::ThreadPoolExecutor executor(1);
   xrpc::ServerBackpressureStats stats;
+  xrpc::ThreadPoolExecutor executor(1);
   xrpc::TcpConnectionOptions options = MakeConnectionOptions(
-      xrpc::ConnectionBackpressureLimits{.max_inflight_ = 1, .max_write_queue_bytes_ = 1024}, stats);
+      context, stats, xrpc::ConnectionBackpressureLimits{.max_inflight_ = 1, .max_write_queue_bytes_ = 1024});
   auto connection = std::make_shared<xrpc::TcpConnection>(context, MakeSlowEchoHandler(), executor,
                                                           std::move(pair.server_socket_), std::move(options));
   xrpc::runtime::Task<void> task = connection->Run();
@@ -497,10 +510,10 @@ TEST(CoroutineTcpConnectionTest, ReturnsResourceExhaustedWhenPerConnectionInflig
 TEST(CoroutineTcpConnectionTest, ClosesWhenWriteQueueByteLimitIsReached) {
   ConnectedPair pair = MakeConnectedPair();
   xrpc::io::UringContext context;
-  xrpc::ThreadPoolExecutor executor(1);
   xrpc::ServerBackpressureStats stats;
-  xrpc::TcpConnectionOptions options =
-      MakeConnectionOptions(xrpc::ConnectionBackpressureLimits{.max_inflight_ = 8, .max_write_queue_bytes_ = 1}, stats);
+  xrpc::ThreadPoolExecutor executor(1);
+  xrpc::TcpConnectionOptions options = MakeConnectionOptions(
+      context, stats, xrpc::ConnectionBackpressureLimits{.max_inflight_ = 8, .max_write_queue_bytes_ = 1});
   auto connection = std::make_shared<xrpc::TcpConnection>(context, MakeEchoHandler(), executor,
                                                           std::move(pair.server_socket_), std::move(options));
   xrpc::runtime::Task<void> task = connection->Run();
