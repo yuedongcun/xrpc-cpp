@@ -83,25 +83,43 @@ TEST(RpcServerLifecycleTest, RunBeforeListenReturnsFailedPrecondition) {
 
 TEST(RpcServerLifecycleTest, StopUnblocksBlockingRun) {
   xrpc::RpcServer server = MakeServer();
+  const xrpc::Status registration_status =
+      server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>("EchoService", "Echo", Echo);
+  ASSERT_TRUE(registration_status.ok()) << registration_status.message();
   ASSERT_TRUE(server.Listen("127.0.0.1", 0).ok());
+  const xrpc::StatusOr<std::uint16_t> port_result = server.port();
+  ASSERT_TRUE(port_result.ok()) << port_result.status().message();
 
-  bool run_returned = false;
-  std::promise<void> run_started;
-  std::future<void> run_started_future = run_started.get_future();
-  std::jthread run_thread([&]() {
-    run_started.set_value();
-    EXPECT_TRUE(server.Run().ok());
-    run_returned = true;
-  });
+  std::promise<xrpc::Status> run_finished;
+  std::future<xrpc::Status> run_finished_future = run_finished.get_future();
+  std::jthread run_thread([&]() { run_finished.set_value(server.Run()); });
 
-  ASSERT_EQ(run_started_future.wait_for(WaitTimeout), std::future_status::ready);
+  xrpc::io::Socket socket;
+  socket.Connect("127.0.0.1", port_result.value(), WaitTimeout);
+  socket.SetReadWriteTimeout(WaitTimeout);
+  socket.WriteAll(MakeRequestFrame("ready", 1));
+  (void)RecvFrame(socket);
+
   server.Stop();
 
-  if (run_thread.joinable()) {
-    run_thread.join();
-  }
+  ASSERT_EQ(run_finished_future.wait_for(WaitTimeout), std::future_status::ready);
+  EXPECT_TRUE(run_finished_future.get().ok());
+  run_thread.join();
+}
 
-  EXPECT_TRUE(run_returned);
+TEST(RpcServerLifecycleTest, StopBeforeRunClosesRuntimeAndRejectsRun) {
+  xrpc::RpcServer server = MakeServer();
+  ASSERT_TRUE(server.Listen("127.0.0.1", 0).ok());
+  const xrpc::StatusOr<std::uint16_t> port_result = server.port();
+  ASSERT_TRUE(port_result.ok()) << port_result.status().message();
+
+  server.Stop();
+  server.Stop();
+
+  EXPECT_EQ(server.Run().code(), xrpc::StatusCode::FailedPrecondition);
+
+  xrpc::io::Socket socket;
+  EXPECT_THROW(socket.Connect("127.0.0.1", port_result.value(), std::chrono::milliseconds(100)), xrpc::io::SocketError);
 }
 
 TEST(RpcServerLifecycleTest, StopDrainsAdmittedHandlerAndWritesResponse) {

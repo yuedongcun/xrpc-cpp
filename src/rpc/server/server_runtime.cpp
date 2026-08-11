@@ -1,5 +1,6 @@
 #include "rpc/server/server_runtime.h"
 
+#include <cassert>
 #include <string_view>
 #include <utility>
 
@@ -26,20 +27,13 @@ RpcServer::ServerRuntime::ServerRuntime(const RpcServerOptions &options)
       executor_(config_.worker_threads_, config_.max_pending_jobs_global_),
       server_(accept_context_, MakeDispatchHandler(registry_), executor_, config_.transport_) {}
 
-/** @brief Waits for an active Run() coordinator or drains an unstarted runtime. */
+/** @brief Stops an unstarted runtime or waits for an active Run() coordinator. */
 RpcServer::ServerRuntime::~ServerRuntime() {
   Stop();
-  {
-    std::unique_lock lock(lifecycle_mutex_);
-    if (run_active_) {
-      lifecycle_cv_.wait(lock, [this]() -> bool { return state_ == State::Stopped; });
-      return;
-    }
-    if (state_ == State::Stopped) {
-      return;
-    }
+  std::unique_lock lock(lifecycle_mutex_);
+  if (state_ == State::Stopping) {
+    lifecycle_cv_.wait(lock, [this]() -> bool { return state_ == State::Stopped; });
   }
-  CompleteShutdownBestEffort();
 }
 
 /**
@@ -49,7 +43,7 @@ RpcServer::ServerRuntime::~ServerRuntime() {
  * decoding/encoding to the captured method adapter.
  */
 void RpcServer::ServerRuntime::RegisterMethod(MethodRegistration registration) {
-  std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+  std::lock_guard lock(lifecycle_mutex_);
   if (state_ != State::Created) {
     throw LifecycleException("RpcServer::RegisterMethod must be called before Listen");
   }
@@ -73,35 +67,24 @@ void RpcServer::ServerRuntime::RegisterMethod(MethodRegistration registration) {
 /**
  * @brief Binds the listener and performs optional Consul registration.
  *
- * The state transition goes `Created -> Starting -> Listening`; failures stop any partially initialized runtime and
- * leave the runtime stopped.
+ * The operation commits `Created -> Listening` only after binding and optional registration both succeed. Failures
+ * close the partially initialized runtime and commit the terminal state.
  */
 void RpcServer::ServerRuntime::Listen(std::string_view host, std::uint16_t port) {
-  std::lock_guard operation_lock(lifecycle_operation_mutex_);
-  {
-    std::lock_guard lock(lifecycle_mutex_);
-    if (state_ != State::Created) {
-      throw LifecycleException("RpcServer::Listen requires a newly created server");
-    }
-    state_ = State::Starting;
+  std::lock_guard lock(lifecycle_mutex_);
+  if (state_ != State::Created) {
+    throw LifecycleException("RpcServer::Listen requires a newly created server");
   }
 
   try {
     server_.Listen(host, port);
     RegisterServiceIfEnabled(host);
   } catch (...) {
-    executor_.CloseSubmissions();
-    server_.StopAccepting();
-    {
-      std::lock_guard lock(lifecycle_mutex_);
-      state_ = State::Stopping;
-    }
-    CompleteShutdownBestEffort();
+    ShutdownComponentsBestEffort();
+    state_ = State::Stopped;
     throw;
   }
 
-  std::lock_guard lock(lifecycle_mutex_);
-  listen_completed_ = true;
   state_ = State::Listening;
 }
 
@@ -112,35 +95,31 @@ void RpcServer::ServerRuntime::Listen(std::string_view host, std::uint16_t port)
  * flow through shutdown so workers, connections, and Consul registration are cleaned up.
  */
 void RpcServer::ServerRuntime::Run() {
-  bool stopped_before_start = false;
   {
-    std::lock_guard operation_lock(lifecycle_operation_mutex_);
     std::lock_guard lock(lifecycle_mutex_);
-    if (state_ == State::Stopping && listen_completed_) {
-      run_active_ = true;
-      stopped_before_start = true;
-    } else {
-      if (state_ != State::Listening) {
-        throw LifecycleException("RpcServer::Run must be called once after Listen");
-      }
+    if (state_ != State::Listening) {
+      throw LifecycleException("RpcServer::Run must be called once after Listen");
+    }
+
+    try {
       server_task_.emplace(server_.Run());
       StartServerTaskOnAcceptContext();
-      run_active_ = true;
-      state_ = State::Running;
+    } catch (...) {
+      ShutdownComponentsBestEffort();
+      state_ = State::Stopped;
+      throw;
     }
+
+    state_ = State::Running;
   }
 
   std::exception_ptr failure;
-  if (!stopped_before_start) {
-    try {
-      accept_context_.Run();
-      WaitForServerTaskCompletion();
-      if (server_task_.has_value()) {
-        server_task_->Result();
-      }
-    } catch (...) {
-      failure = std::current_exception();
-    }
+  try {
+    accept_context_.Run();
+    server_task_->Wait();
+    server_task_->Result();
+  } catch (...) {
+    failure = std::current_exception();
   }
 
   try {
@@ -159,22 +138,23 @@ void RpcServer::ServerRuntime::Run() {
  * @brief Closes admission and asks the accept loop to begin graceful shutdown.
  */
 void RpcServer::ServerRuntime::Stop() {
-  std::lock_guard operation_lock(lifecycle_operation_mutex_);
-  bool stop_on_accept_context = false;
-  {
-    std::lock_guard lock(lifecycle_mutex_);
-    if (state_ == State::Stopping || state_ == State::Stopped) {
+  std::lock_guard lock(lifecycle_mutex_);
+  switch (state_) {
+    case State::Created:
+    case State::Listening:
+      ShutdownComponentsBestEffort();
+      state_ = State::Stopped;
       return;
-    }
-    stop_on_accept_context = state_ == State::Running;
-    state_ = State::Stopping;
-  }
 
-  executor_.CloseSubmissions();
-  if (stop_on_accept_context) {
-    RequestServerStopOnAcceptContext();
-  } else {
-    server_.StopAccepting();
+    case State::Running:
+      state_ = State::Stopping;
+      executor_.CloseSubmissions();
+      RequestServerStopOnAcceptContext();
+      return;
+
+    case State::Stopping:
+    case State::Stopped:
+      return;
   }
 }
 
@@ -215,16 +195,33 @@ void RpcServer::ServerRuntime::RegisterServiceIfEnabled(std::string_view host) {
   }
 }
 
-/** @brief Completes the ordered graceful-drain sequence owned by Run() or destruction. */
+/** @brief Completes the ordered graceful-drain sequence owned by Run(). */
 void RpcServer::ServerRuntime::CompleteShutdown() {
   {
     std::lock_guard lock(lifecycle_mutex_);
-    if (state_ == State::Stopped) {
-      return;
-    }
+    assert(state_ == State::Running || state_ == State::Stopping);
     state_ = State::Stopping;
   }
 
+  std::exception_ptr failure;
+  try {
+    ShutdownComponents();
+  } catch (...) {
+    failure = std::current_exception();
+  }
+
+  {
+    std::lock_guard lock(lifecycle_mutex_);
+    state_ = State::Stopped;
+  }
+  lifecycle_cv_.notify_all();
+  if (failure) {
+    std::rethrow_exception(failure);
+  }
+}
+
+/** @brief Stops components while keeping connection loops alive until worker completions drain. */
+void RpcServer::ServerRuntime::ShutdownComponents() {
   std::exception_ptr failure;
   auto attempt = [&failure](auto &&action) {
     try {
@@ -244,21 +241,15 @@ void RpcServer::ServerRuntime::CompleteShutdown() {
   attempt([this]() { server_.FinishDrain(); });
   attempt([this]() { accept_context_.Stop(); });
 
-  {
-    std::lock_guard lock(lifecycle_mutex_);
-    run_active_ = false;
-    state_ = State::Stopped;
-  }
-  lifecycle_cv_.notify_all();
   if (failure) {
     std::rethrow_exception(failure);
   }
 }
 
-/** @brief Suppresses cleanup failures for destructor and partial-start paths. */
-void RpcServer::ServerRuntime::CompleteShutdownBestEffort() noexcept {
+/** @brief Suppresses cleanup failures for pre-run and partial-start shutdown. */
+void RpcServer::ServerRuntime::ShutdownComponentsBestEffort() noexcept {
   try {
-    CompleteShutdown();
+    ShutdownComponents();
   } catch (...) {
   }
 }
@@ -290,15 +281,6 @@ void RpcServer::ServerRuntime::StartServerTaskOnAcceptContext() {
  */
 void RpcServer::ServerRuntime::RequestServerStopOnAcceptContext() {
   accept_context_.Post([this]() { server_.StopAccepting(); });
-}
-
-/**
- * @brief Waits for the accept coroutine to complete if it was created.
- */
-void RpcServer::ServerRuntime::WaitForServerTaskCompletion() const {
-  if (server_task_.has_value()) {
-    server_task_->Wait();
-  }
 }
 
 }  // namespace xrpc

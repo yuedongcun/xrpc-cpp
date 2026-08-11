@@ -161,8 +161,9 @@ class RpcServer final {
   /**
    * @brief Requests server shutdown.
    *
-   * Stop is thread-safe and idempotent. It closes admission and returns after requesting shutdown. `Run()` returns
-   * only after already admitted handlers finish and their responses have been given a chance to drain.
+   * Stop is thread-safe and idempotent. Before `Run()`, it closes the runtime synchronously. While `Run()` is active,
+   * it closes admission and returns after requesting graceful shutdown; `Run()` returns after admitted handlers finish
+   * and their responses have been given a chance to drain.
    */
   void Stop();
 

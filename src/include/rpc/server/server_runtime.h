@@ -29,8 +29,8 @@ namespace xrpc {
  *   and optional Consul registrar.
  * - State: public lifecycle methods are serialized and checked against `State`.
  * - Threading: accept and connection I/O stay on their io_uring loops, while handlers run on `ThreadPoolExecutor`.
- * - Shutdown: `Stop()` closes admission; `Run()` keeps workers and connection loops alive until admitted responses
- *   drain, then publishes the terminal state.
+ * - Shutdown: before `Run()`, `Stop()` closes the runtime directly; while running, `Run()` owns graceful drain and
+ *   publishes the terminal state.
  */
 class RpcServer::ServerRuntime final {
  public:
@@ -62,7 +62,6 @@ class RpcServer::ServerRuntime final {
   /** @brief Lifecycle state machine for public server operations. */
   enum class State : std::uint8_t {
     Created,
-    Starting,
     Listening,
     Running,
     Stopping,
@@ -75,8 +74,11 @@ class RpcServer::ServerRuntime final {
   /** @brief Completes graceful drain after shutdown has been requested. */
   void CompleteShutdown();
 
-  /** @brief Completes graceful drain while suppressing cleanup failures. */
-  void CompleteShutdownBestEffort() noexcept;
+  /** @brief Stops all owned runtime components in dependency order. */
+  void ShutdownComponents();
+
+  /** @brief Stops all owned runtime components while suppressing cleanup failures. */
+  void ShutdownComponentsBestEffort() noexcept;
 
   /** @brief Deregisters the Consul service if one was registered. */
   [[nodiscard]] auto TryDeregisterService() noexcept -> Status;
@@ -87,9 +89,6 @@ class RpcServer::ServerRuntime final {
   /** @brief Posts TCP server stop onto the accept context. */
   void RequestServerStopOnAcceptContext();
 
-  /** @brief Blocks until the accept coroutine reaches completion. */
-  void WaitForServerTaskCompletion() const;
-
   ServerRuntimeConfig config_;
   ServiceRegistry registry_;
   io::UringContext accept_context_;
@@ -97,12 +96,9 @@ class RpcServer::ServerRuntime final {
   TcpServer server_;
   std::optional<runtime::Task<void>> server_task_;
   std::unique_ptr<ConsulRegistrar> registrar_;
-  std::mutex lifecycle_operation_mutex_;
   std::mutex lifecycle_mutex_;
   std::condition_variable lifecycle_cv_;
   State state_ = State::Created;
-  bool listen_completed_ = false;
-  bool run_active_ = false;
 };
 
 }  // namespace xrpc
