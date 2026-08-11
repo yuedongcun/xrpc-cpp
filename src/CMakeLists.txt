@@ -28,28 +28,28 @@ set(XRPC_SOURCES
     io/uring_context_wakeup.cpp
     protocol/fixed_header.cpp
     protocol/frame_codec.cpp
-    rpc/xrpc_exception.cpp
+    common/xrpc_exception.cpp
     rpc/protocol_adapter.cpp
-    rpc/client/client_config.cpp
-    rpc/client/endpoint_selector.cpp
-    rpc/client/client_channel.cpp
-    rpc/client/tcp_transport.cpp
-    rpc/client/rpc_client_runtime.cpp
-    rpc/client/rpc_client.cpp
-    rpc/naming/endpoint_resolver.cpp
-    rpc/naming/consul_http_client.cpp
-    rpc/naming/consul_resolver.cpp
-    rpc/naming/consul_registrar.cpp
-    rpc/server/service_registry.cpp
-    rpc/server/server_runtime_config.cpp
-    rpc/server/server_runtime.cpp
-    rpc/server/rpc_frame_stream.cpp
-    rpc/server/rpc_server.cpp
-    transport/connection_io_loop.cpp
-    transport/dispatch_mailbox.cpp
-    transport/thread_pool_executor.cpp
-    transport/tcp_connection.cpp
-    transport/tcp_server.cpp
+    client/client_config.cpp
+    client/endpoint_selector.cpp
+    client/client_channel.cpp
+    client/tcp_transport.cpp
+    client/rpc_client_runtime.cpp
+    client/rpc_client.cpp
+    naming/endpoint_resolver.cpp
+    naming/consul_http_client.cpp
+    naming/consul_resolver.cpp
+    naming/consul_registrar.cpp
+    server/service_registry.cpp
+    server/server_runtime_config.cpp
+    server/server_runtime.cpp
+    server/rpc_frame_stream.cpp
+    server/rpc_server.cpp
+    server/connection_io_loop.cpp
+    server/dispatch_mailbox.cpp
+    server/thread_pool_executor.cpp
+    server/tcp_connection.cpp
+    server/tcp_server.cpp
 )
 
 add_library(xrpc STATIC ${XRPC_SOURCES} $<TARGET_OBJECTS:xrpc_proto>)

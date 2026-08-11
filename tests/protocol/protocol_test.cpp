@@ -5,7 +5,7 @@
 #include <string>
 #include <string_view>
 
-#include "rpc/xrpc_exception.h"
+#include "common/xrpc_exception.h"
 
 #include "protocol/fixed_header.h"
 #include "protocol/frame_codec.h"

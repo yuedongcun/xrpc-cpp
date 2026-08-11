@@ -14,7 +14,7 @@
 #include <liburing.h>
 
 #include "io/uring_context_runtime.h"
-#include "rpc/xrpc_exception.h"
+#include "common/xrpc_exception.h"
 
 namespace xrpc::io {
 

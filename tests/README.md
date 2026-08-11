@@ -9,16 +9,16 @@
 - `common/task_test.cpp`
 - `io/uring_awaitable_test.cpp`
 - `protocol/protocol_test.cpp`
-- `transport/tcp_connection_io_uring_test.cpp`
-- `rpc/server/rpc_frame_stream_test.cpp`
-- `rpc/server/rpc_server_lifecycle_test.cpp`
-- `rpc/client/endpoint_selector_test.cpp`
-- `rpc/client/rpc_client_endpoint_test.cpp`
-- `rpc/client/rpc_client_thread_safety_test.cpp`
+- `server/tcp_connection_io_uring_test.cpp`
+- `server/rpc_frame_stream_test.cpp`
+- `server/rpc_server_lifecycle_test.cpp`
+- `client/endpoint_selector_test.cpp`
+- `client/rpc_client_endpoint_test.cpp`
+- `client/rpc_client_thread_safety_test.cpp`
 
 外部测试：
 
-- `rpc/naming/consul_resolver_integration_test.cpp`
+- `naming/consul_resolver_integration_test.cpp`
 
 `tests/package_consumer/` 保留为安装后 `find_package(xrpc CONFIG REQUIRED)` 的消费验证，不算入默认测试集。
 
