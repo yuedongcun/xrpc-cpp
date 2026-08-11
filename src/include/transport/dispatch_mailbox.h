@@ -16,7 +16,7 @@ class TcpConnection;
  * @brief Method-dispatch completion produced by a worker thread.
  *
  * Design note:
- * - Ownership: `TcpConnection` holds a shared queue; worker completions hold weak connection references so closed
+ * - Ownership: `TcpConnection` holds a shared mailbox; worker completions hold weak connection references so closed
  *   connections can disappear safely.
  * - Threading: workers call `Submit()`, which posts one drain callback onto the `UringContext` thread; only that drain
  *   touches `TcpConnection` state.
@@ -24,7 +24,7 @@ class TcpConnection;
  */
 struct DispatchCompletion {
   /** @brief Weak connection reference; expired means the connection closed before completion. */
-  std::weak_ptr<TcpConnection> connection_;
+  std::weak_ptr<TcpConnection> target_connection_;
 
   /** @brief Encoded response bytes ready to enqueue on the connection. */
   std::string response_bytes_;
@@ -37,21 +37,21 @@ struct DispatchCompletion {
 };
 
 /**
- * @brief Cross-thread handoff queue from worker threads back to one io_uring context.
+ * @brief Cross-thread mailbox from worker threads back to one io_uring context.
  *
- * The queue coalesces many worker completions into one posted drain callback. All connection state changes happen in
+ * The mailbox coalesces many worker completions into one posted drain callback. All connection state changes happen in
  * `DrainOnContext()` on the event-loop thread.
  */
-class DispatchCompletionQueue final : public std::enable_shared_from_this<DispatchCompletionQueue> {
+class DispatchMailbox final : public std::enable_shared_from_this<DispatchMailbox> {
  public:
-  /** @brief Creates a completion queue bound to one `UringContext`. */
-  explicit DispatchCompletionQueue(io::UringContext &context);
+  /** @brief Creates a completion mailbox bound to one `UringContext`. */
+  explicit DispatchMailbox(io::UringContext &context);
 
-  DispatchCompletionQueue(const DispatchCompletionQueue &) = delete;
-  auto operator=(const DispatchCompletionQueue &) -> DispatchCompletionQueue & = delete;
+  DispatchMailbox(const DispatchMailbox &) = delete;
+  auto operator=(const DispatchMailbox &) -> DispatchMailbox & = delete;
 
-  DispatchCompletionQueue(DispatchCompletionQueue &&) = delete;
-  auto operator=(DispatchCompletionQueue &&) -> DispatchCompletionQueue & = delete;
+  DispatchMailbox(DispatchMailbox &&) = delete;
+  auto operator=(DispatchMailbox &&) -> DispatchMailbox & = delete;
 
   /** @brief Submits a worker completion and posts a drain callback if needed. */
   void Submit(DispatchCompletion completion);

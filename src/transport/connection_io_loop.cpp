@@ -18,7 +18,7 @@ namespace xrpc {
 ConnectionIoLoop::ConnectionIoLoop(RawHandler handler, ThreadPoolExecutor &executor,
                                    ConnectionBackpressureLimits limits, ServerBackpressureStats &backpressure_stats,
                                    ProtocolLimits protocol_limits, std::chrono::milliseconds connection_idle_timeout)
-    : completion_queue_(std::make_shared<DispatchCompletionQueue>(context_)),
+    : dispatch_mailbox_(std::make_shared<DispatchMailbox>(context_)),
       handler_(std::move(handler)),
       executor_(&executor),
       limits_(limits),
@@ -68,7 +68,48 @@ void ConnectionIoLoop::Stop() noexcept {
   if (thread_.joinable()) {
     thread_.join();
   }
-  completion_queue_->Disable();
+  dispatch_mailbox_->Disable();
+  started_ = false;
+}
+
+/** @brief Stops connection reads without stopping the event-loop runtime. */
+void ConnectionIoLoop::BeginDrain() {
+  {
+    std::unique_lock lock(drain_mutex_);
+    if (!started_) {
+      drain_requested_ = true;
+      drain_ready_ = true;
+      return;
+    }
+    if (drain_requested_) {
+      drain_cv_.wait(lock, [this] { return drain_ready_; });
+      return;
+    }
+    drain_requested_ = true;
+  }
+
+  context_.Post([this]() { BeginDrainOnContext(); });
+  std::unique_lock lock(drain_mutex_);
+  drain_cv_.wait(lock, [this] { return drain_ready_; });
+}
+
+/** @brief Waits for admitted work and response writes before stopping the loop. */
+void ConnectionIoLoop::FinishDrain() {
+  BeginDrain();
+  {
+    std::unique_lock lock(drain_mutex_);
+    drain_cv_.wait(lock, [this] { return live_connections_ == 0; });
+  }
+
+  if (!started_) {
+    return;
+  }
+  context_.Stop();
+  if (thread_.joinable()) {
+    thread_.join();
+  }
+  dispatch_mailbox_->Disable();
+  connections_.clear();
   started_ = false;
 }
 
@@ -100,14 +141,30 @@ void ConnectionIoLoop::RethrowIfFailed() const {
  * @param client_socket Accepted socket already moved onto this loop thread.
  */
 void ConnectionIoLoop::StartConnection(io::Socket client_socket) {
+  {
+    std::lock_guard lock(drain_mutex_);
+    if (drain_requested_) {
+      client_socket.Close();
+      return;
+    }
+    ++live_connections_;
+  }
+
   TcpConnectionOptions options;
   options.limits_ = limits_;
   options.backpressure_stats_ = backpressure_stats_;
-  options.completion_queue_ = completion_queue_;
+  options.dispatch_mailbox_ = dispatch_mailbox_;
   options.protocol_limits_ = protocol_limits_;
   options.idle_timeout_ = connection_idle_timeout_;
-  auto connection =
-      std::make_shared<TcpConnection>(context_, handler_, *executor_, std::move(client_socket), std::move(options));
+  options.on_closed_ = [this]() { OnConnectionClosed(); };
+  std::shared_ptr<TcpConnection> connection;
+  try {
+    connection =
+        std::make_shared<TcpConnection>(context_, handler_, *executor_, std::move(client_socket), std::move(options));
+  } catch (...) {
+    OnConnectionClosed();
+    throw;
+  }
   ConnectionEntry entry{.connection_ = connection, .task_ = connection->Run()};
   entry.task_.Start();
   connections_.push_back(std::move(entry));
@@ -129,6 +186,29 @@ void ConnectionIoLoop::CloseConnections() {
     }
   }
   CleanupClosedConnections();
+}
+
+/** @brief Marks all live connections as draining on the owning event-loop thread. */
+void ConnectionIoLoop::BeginDrainOnContext() {
+  for (auto &entry : connections_) {
+    entry.connection_->BeginDrain();
+  }
+  {
+    std::lock_guard lock(drain_mutex_);
+    drain_ready_ = true;
+  }
+  drain_cv_.notify_all();
+}
+
+/** @brief Releases one live connection from graceful-drain accounting. */
+void ConnectionIoLoop::OnConnectionClosed() {
+  {
+    std::lock_guard lock(drain_mutex_);
+    if (live_connections_ > 0) {
+      --live_connections_;
+    }
+  }
+  drain_cv_.notify_all();
 }
 
 /**
@@ -173,6 +253,20 @@ void ConnectionIoLoopGroup::Start() {
 void ConnectionIoLoopGroup::Stop() noexcept {
   for (auto &loop : loops_) {
     loop->Stop();
+  }
+}
+
+/** @brief Starts graceful drain on all connection loops. */
+void ConnectionIoLoopGroup::BeginDrain() {
+  for (auto &loop : loops_) {
+    loop->BeginDrain();
+  }
+}
+
+/** @brief Waits for all connection loops to drain and stop. */
+void ConnectionIoLoopGroup::FinishDrain() {
+  for (auto &loop : loops_) {
+    loop->FinishDrain();
   }
 }
 

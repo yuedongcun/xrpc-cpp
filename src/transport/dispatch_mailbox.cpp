@@ -1,4 +1,4 @@
-#include "transport/dispatch_completion_queue.h"
+#include "transport/dispatch_mailbox.h"
 
 #include <utility>
 
@@ -7,11 +7,11 @@
 namespace xrpc {
 
 /**
- * @brief Creates a completion handoff queue bound to one io_uring context.
+ * @brief Creates a dispatch mailbox bound to one io_uring context.
  *
  * @param context Event-loop context on which connection callbacks must execute.
  */
-DispatchCompletionQueue::DispatchCompletionQueue(io::UringContext &context) : context_(&context) {}
+DispatchMailbox::DispatchMailbox(io::UringContext &context) : context_(&context) {}
 
 /**
  * @brief Enqueues one worker completion and schedules a drain callback on the context thread.
@@ -21,7 +21,7 @@ DispatchCompletionQueue::DispatchCompletionQueue(io::UringContext &context) : co
  *
  * @param completion Encoded response or encode-failure accounting result.
  */
-void DispatchCompletionQueue::Submit(DispatchCompletion completion) {
+void DispatchMailbox::Submit(DispatchCompletion completion) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (context_ == nullptr) {
     return;
@@ -35,13 +35,13 @@ void DispatchCompletionQueue::Submit(DispatchCompletion completion) {
   // Only one drain callback is needed; it will swap and process all completions
   // currently queued, then loop once more for completions submitted meanwhile.
   drain_posted_ = true;
-  std::weak_ptr<DispatchCompletionQueue> weak_queue = weak_from_this();
-  context_->Post([weak_queue]() {
-    std::shared_ptr<DispatchCompletionQueue> queue = weak_queue.lock();
-    if (!queue) {
+  std::weak_ptr<DispatchMailbox> weak_mailbox = weak_from_this();
+  context_->Post([weak_mailbox]() {
+    std::shared_ptr<DispatchMailbox> mailbox = weak_mailbox.lock();
+    if (!mailbox) {
       return;
     }
-    queue->DrainOnContext();
+    mailbox->DrainOnContext();
   });
 }
 
@@ -51,7 +51,7 @@ void DispatchCompletionQueue::Submit(DispatchCompletion completion) {
  * Any completions not yet delivered are dropped because their event loop is no longer allowed to
  * touch connections.
  */
-void DispatchCompletionQueue::Disable() {
+void DispatchMailbox::Disable() {
   std::lock_guard<std::mutex> lock(mutex_);
   context_ = nullptr;
   pending_completions_.clear();
@@ -62,10 +62,10 @@ void DispatchCompletionQueue::Disable() {
 /**
  * @brief Drains queued worker completions on the owning io_uring context thread.
  *
- * This method invokes `TcpConnection` callbacks without holding the queue mutex so workers can keep
+ * This method invokes `TcpConnection` callbacks without holding the mailbox mutex so workers can keep
  * submitting completions while connection code enqueues response bytes.
  */
-void DispatchCompletionQueue::DrainOnContext() {
+void DispatchMailbox::DrainOnContext() {
   while (true) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -80,7 +80,7 @@ void DispatchCompletionQueue::DrainOnContext() {
     }
 
     for (DispatchCompletion &completion : drain_completions_) {
-      std::shared_ptr<TcpConnection> connection = completion.connection_.lock();
+      std::shared_ptr<TcpConnection> connection = completion.target_connection_.lock();
       if (!connection) {
         continue;
       }

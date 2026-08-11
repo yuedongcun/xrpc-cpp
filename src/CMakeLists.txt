@@ -46,7 +46,7 @@ set(XRPC_SOURCES
     rpc/server/rpc_frame_stream.cpp
     rpc/server/rpc_server.cpp
     transport/connection_io_loop.cpp
-    transport/dispatch_completion_queue.cpp
+    transport/dispatch_mailbox.cpp
     transport/thread_pool_executor.cpp
     transport/tcp_connection.cpp
     transport/tcp_server.cpp

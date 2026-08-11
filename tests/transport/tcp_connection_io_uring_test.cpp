@@ -16,7 +16,7 @@
 #include "proto/echo.pb.h"
 #include "protocol/frame_codec.h"
 #include "protocol/protocol_message.h"
-#include "transport/dispatch_completion_queue.h"
+#include "transport/dispatch_mailbox.h"
 #include "transport/tcp_connection.h"
 #include "transport/thread_pool_executor.h"
 
@@ -61,7 +61,7 @@ auto MakeConnectionOptions(xrpc::io::UringContext &context, xrpc::ServerBackpres
   xrpc::TcpConnectionOptions options;
   options.limits_ = limits;
   options.backpressure_stats_ = &stats;
-  options.completion_queue_ = std::make_shared<xrpc::DispatchCompletionQueue>(context);
+  options.dispatch_mailbox_ = std::make_shared<xrpc::DispatchMailbox>(context);
   return options;
 }
 

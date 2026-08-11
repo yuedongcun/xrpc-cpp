@@ -66,14 +66,13 @@ ThreadPoolExecutor::~ThreadPoolExecutor() { Stop(); }
  * @param job Callable to run on a worker thread.
  * @param logical_jobs Number of RPC jobs represented by `job`.
  * @return true when accepted, false when the global pending limit is full.
- * @throws LifecycleException when the pool is already stopped.
  */
 auto ThreadPoolExecutor::TrySubmitBatch(std::function<void()> job, std::size_t logical_jobs) -> bool {
   if (logical_jobs == 0) {
     throw std::invalid_argument("ThreadPoolExecutor::TrySubmitBatch requires at least one logical job");
   }
-  if (stopped_.load(std::memory_order_acquire)) {
-    throw LifecycleException("ThreadPoolExecutor::TrySubmit called after Stop");
+  if (!accepting_submissions_.load(std::memory_order_acquire)) {
+    return false;
   }
 
   const std::optional<std::size_t> pending_after_reservation = TryReservePendingJobs(logical_jobs);
@@ -84,8 +83,9 @@ auto ThreadPoolExecutor::TrySubmitBatch(std::function<void()> job, std::size_t l
   WorkerQueue &queue = SelectWorkerQueue();
   try {
     std::lock_guard<std::mutex> lock(queue.mutex_);
-    if (stopped_.load(std::memory_order_relaxed)) {
-      throw LifecycleException("ThreadPoolExecutor::TrySubmit called after Stop");
+    if (!accepting_submissions_.load(std::memory_order_relaxed)) {
+      ReleasePendingJobs(logical_jobs);
+      return false;
     }
     queue.jobs_.push(WorkerJob{.run_ = std::move(job), .logical_jobs_ = logical_jobs});
     const std::size_t queue_depth = queue.pending_jobs_.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -96,6 +96,21 @@ auto ThreadPoolExecutor::TrySubmitBatch(std::function<void()> job, std::size_t l
   }
   queue.cv_.notify_one();
   return true;
+}
+
+/** @brief Closes the admission gate without canceling queued or running jobs. */
+void ThreadPoolExecutor::CloseSubmissions() noexcept {
+  accepting_submissions_.store(false, std::memory_order_release);
+  for (const auto &queue : worker_queues_) {
+    // Synchronize with submissions that passed the first admission check. When
+    // this method returns, no producer can still append a job to a worker queue.
+    std::lock_guard lock(queue->mutex_);
+  }
+}
+
+/** @return true while new jobs may still be admitted. */
+auto ThreadPoolExecutor::accepting_submissions() const noexcept -> bool {
+  return accepting_submissions_.load(std::memory_order_acquire);
 }
 
 /** @return Snapshot of worker-pool counters used by server diagnostics. */
@@ -169,6 +184,7 @@ void ThreadPoolExecutor::ReleasePendingJobs(std::size_t logical_jobs) {
  * Stop is idempotent and joins every owned `std::jthread` before returning.
  */
 void ThreadPoolExecutor::Stop() {
+  CloseSubmissions();
   if (stopped_.exchange(true, std::memory_order_acq_rel)) {
     return;
   }

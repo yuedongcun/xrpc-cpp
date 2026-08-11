@@ -1,5 +1,6 @@
 #pragma once
 
+#include <condition_variable>
 #include <cstddef>
 #include <memory>
 #include <mutex>
@@ -28,7 +29,8 @@ namespace xrpc {
  *   and optional Consul registrar.
  * - State: public lifecycle methods are serialized and checked against `State`.
  * - Threading: accept and connection I/O stay on their io_uring loops, while handlers run on `ThreadPoolExecutor`.
- * - Failure: shutdown is best-effort after construction, including destructor cleanup and Consul deregistration.
+ * - Shutdown: `Stop()` closes admission; `Run()` keeps workers and connection loops alive until admitted responses
+ *   drain, then publishes the terminal state.
  */
 class RpcServer::ServerRuntime final {
  public:
@@ -47,7 +49,7 @@ class RpcServer::ServerRuntime final {
   /** @brief Runs the accept loop until shutdown. */
   void Run();
 
-  /** @brief Requests best-effort shutdown from any thread. */
+  /** @brief Requests graceful shutdown from any thread. */
   void Stop();
 
   /** @return Bound listener port after `Listen()`. */
@@ -70,22 +72,14 @@ class RpcServer::ServerRuntime final {
   /** @brief Registers this server in Consul when registration options are enabled. */
   void RegisterServiceIfEnabled(std::string_view host);
 
-  /**
-   * @brief Performs ordered shutdown and records a status for public lifecycle calls.
-   *
-   * `Shutdown()` can be entered from `Run()`, `Stop()`, or the destructor. `run_loop_active` tells `StopRuntime()`
-   * whether the accept context is running and server shutdown must be posted before it stops.
-   */
-  [[nodiscard]] auto Shutdown(bool run_loop_active) noexcept -> Status;
+  /** @brief Completes graceful drain after shutdown has been requested. */
+  void CompleteShutdown();
 
-  /** @brief Runs shutdown and suppresses failures for destructors and cleanup paths. */
-  void ShutdownBestEffort(bool run_loop_active = true) noexcept;
+  /** @brief Completes graceful drain while suppressing cleanup failures. */
+  void CompleteShutdownBestEffort() noexcept;
 
   /** @brief Deregisters the Consul service if one was registered. */
   [[nodiscard]] auto TryDeregisterService() noexcept -> Status;
-
-  /** @brief Stops TCP server, event loop, and worker pool in lifecycle order. */
-  void StopRuntime(bool run_loop_active);
 
   /** @brief Starts the TCP accept coroutine on the accept context. */
   void StartServerTaskOnAcceptContext();
@@ -105,8 +99,10 @@ class RpcServer::ServerRuntime final {
   std::unique_ptr<ConsulRegistrar> registrar_;
   std::mutex lifecycle_operation_mutex_;
   std::mutex lifecycle_mutex_;
-  Status shutdown_status_;
+  std::condition_variable lifecycle_cv_;
   State state_ = State::Created;
+  bool listen_completed_ = false;
+  bool run_active_ = false;
 };
 
 }  // namespace xrpc

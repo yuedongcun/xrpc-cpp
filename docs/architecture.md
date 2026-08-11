@@ -104,9 +104,10 @@ magic、版本、长度或消息类型会转化为协议错误，而不是触发
 请求可以在没有 wire response 的情况下完成；已经发送的请求则通过 request id
 匹配响应。
 
-服务端关闭时先停止新的 accept，再注销可选的 Consul 服务，停止 connection
-loops，最后 join worker 和 runtime 线程。`Stop()` 是幂等的，可以从另一个线程
-调用，即使此时 `Run()` 仍在阻塞。
+服务端采用 graceful drain：`Stop()` 先关闭新请求的 admission 并停止 accept，
+已经进入 worker 的 handler 继续执行，response 仍通过原 Connection I/O Loop 写回。
+所有已接收请求完成后才停止 connection loops 和 worker，随后 `Run()` 返回。
+`Stop()` 是线程安全且幂等的；如果 handler 永远不返回，`Run()` 也会继续等待。
 
 ## 当前范围
 

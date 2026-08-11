@@ -67,6 +67,12 @@ class ThreadPoolExecutor final {
    */
   [[nodiscard]] auto TrySubmitBatch(std::function<void()> job, std::size_t logical_jobs) -> bool;
 
+  /** @brief Prevents new jobs from being admitted while allowing accepted jobs to finish. */
+  void CloseSubmissions() noexcept;
+
+  /** @return true while new jobs may still be submitted. */
+  [[nodiscard]] auto accepting_submissions() const noexcept -> bool;
+
   /** @return Snapshot of relaxed worker-pool diagnostics. */
   [[nodiscard]] auto stats() const -> ThreadPoolExecutorSnapshot;
 
@@ -103,6 +109,7 @@ class ThreadPoolExecutor final {
   std::atomic<std::size_t> next_worker_index_{0};
   std::size_t max_pending_jobs_ = 0;
   std::atomic<std::size_t> pending_jobs_{0};
+  std::atomic_bool accepting_submissions_{true};
   std::atomic_bool stopped_{false};
   std::atomic<std::uint64_t> rejected_by_pending_limit_{0};
   std::atomic<std::uint64_t> max_observed_worker_queue_depth_{0};

@@ -104,6 +104,70 @@ TEST(RpcServerLifecycleTest, StopUnblocksBlockingRun) {
   EXPECT_TRUE(run_returned);
 }
 
+TEST(RpcServerLifecycleTest, StopDrainsAdmittedHandlerAndWritesResponse) {
+  xrpc::RpcServerOptions options;
+  options.worker_threads_ = 1;
+  xrpc::StatusOr<xrpc::RpcServer> server_result = xrpc::RpcServer::Create(options);
+  ASSERT_TRUE(server_result.ok()) << server_result.status().message();
+  xrpc::RpcServer server = std::move(server_result).value();
+
+  std::atomic<std::size_t> handler_calls = 0;
+  std::promise<void> handler_started;
+  std::future<void> handler_started_future = handler_started.get_future();
+  std::promise<void> release_handler;
+  std::shared_future<void> release_handler_future = release_handler.get_future().share();
+  const xrpc::Status registration_status = server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
+      "EchoService", "Echo", [&](const xrpc::test::EchoRequest &request) {
+        if (handler_calls.fetch_add(1, std::memory_order_relaxed) == 0) {
+          handler_started.set_value();
+        }
+        release_handler_future.wait();
+        return Echo(request);
+      });
+  ASSERT_TRUE(registration_status.ok()) << registration_status.message();
+
+  ASSERT_TRUE(server.Listen("127.0.0.1", 0).ok());
+  const xrpc::StatusOr<std::uint16_t> port_result = server.port();
+  ASSERT_TRUE(port_result.ok()) << port_result.status().message();
+
+  std::promise<xrpc::Status> run_finished;
+  std::future<xrpc::Status> run_finished_future = run_finished.get_future();
+  std::jthread run_thread([&]() { run_finished.set_value(server.Run()); });
+
+  xrpc::io::Socket client_socket;
+  client_socket.Connect("127.0.0.1", port_result.value(), WaitTimeout);
+  client_socket.SetReadWriteTimeout(WaitTimeout);
+  client_socket.WriteAll(MakeRequestFrame("first", 1));
+  ASSERT_EQ(handler_started_future.wait_for(WaitTimeout), std::future_status::ready);
+
+  std::jthread first_stop([&]() { server.Stop(); });
+  std::jthread second_stop([&]() { server.Stop(); });
+  first_stop.join();
+  second_stop.join();
+
+  EXPECT_EQ(run_finished_future.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+  try {
+    client_socket.WriteAll(MakeRequestFrame("after-stop", 2));
+  } catch (const xrpc::io::SocketError &) {
+  }
+
+  release_handler.set_value();
+  const std::string response_frame = RecvFrame(client_socket);
+  xrpc::FrameCodec codec;
+  const xrpc::DecodeResult decoded = codec.TryDecode(response_frame);
+  ASSERT_EQ(decoded.error_, xrpc::ProtocolError::Ok);
+  ASSERT_TRUE(decoded.response_.has_value());
+  EXPECT_EQ(decoded.response_->request_id_, 1U);
+  xrpc::test::EchoResponse response;
+  ASSERT_TRUE(response.ParseFromString(decoded.response_->payload_));
+  EXPECT_EQ(response.message(), "first");
+
+  ASSERT_EQ(run_finished_future.wait_for(WaitTimeout), std::future_status::ready);
+  EXPECT_TRUE(run_finished_future.get().ok());
+  EXPECT_EQ(handler_calls.load(std::memory_order_relaxed), 1U);
+  run_thread.join();
+}
+
 TEST(RpcServerLifecycleTest, DestructorClosesListeningRuntime) {
   std::uint16_t port = 0;
   {

@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -20,7 +21,7 @@
 
 namespace xrpc {
 
-class DispatchCompletionQueue;
+class DispatchMailbox;
 
 /**
  * @brief First reason recorded when a server-side connection closes.
@@ -39,7 +40,7 @@ enum class ConnectionCloseReason : std::uint8_t {
 /**
  * @brief Dependencies and limits injected into one accepted connection.
  *
- * The owning connection I/O loop supplies the shared completion queue and backpressure counters used by every
+ * The owning connection I/O loop supplies the shared dispatch mailbox and backpressure counters used by every
  * connection assigned to that loop.
  */
 struct TcpConnectionOptions final {
@@ -49,14 +50,17 @@ struct TcpConnectionOptions final {
   /** @brief Shared backpressure stats sink. */
   ServerBackpressureStats *backpressure_stats_ = nullptr;
 
-  /** @brief Completion queue used by worker threads to return encoded responses. */
-  std::shared_ptr<DispatchCompletionQueue> completion_queue_;
+  /** @brief Mailbox used by worker threads to return encoded responses. */
+  std::shared_ptr<DispatchMailbox> dispatch_mailbox_;
 
   /** @brief Frame limits applied by the connection's `RpcFrameStream`. */
   ProtocolLimits protocol_limits_;
 
   /** @brief Idle timeout for this connection. Zero disables idle cleanup. */
   std::chrono::milliseconds idle_timeout_{0};
+
+  /** @brief Notifies the owning I/O loop when this connection reaches its terminal state. */
+  std::function<void()> on_closed_;
 };
 
 /**
@@ -66,11 +70,11 @@ struct TcpConnectionOptions final {
  * - Ownership: one shared `TcpConnection` owns its socket, frame stream, write queue, idle timer task, and outstanding
  *   dispatch accounting.
  * - Threading: socket/framing/write state stays on the `UringContext` thread; handlers run on `ThreadPoolExecutor`
- *   and return through `DispatchCompletionQueue`.
+ *   and return through `DispatchMailbox`.
  * - Backpressure: reads can continue only while inflight jobs and queued writes stay within `TcpConnectionOptions`
  *   limits.
- * - Shutdown: `Close()` records one reason, drains or rejects pending work, and lets the coroutine finish on the
- *   event-loop thread.
+ * - Shutdown: `BeginDrain()` stops reads and preserves admitted response writes; `Close()` performs the terminal
+ *   socket transition on the event-loop thread.
  */
 class TcpConnection final : public std::enable_shared_from_this<TcpConnection> {
  public:
@@ -97,6 +101,9 @@ class TcpConnection final : public std::enable_shared_from_this<TcpConnection> {
   /** @brief Closes the connection with the first recorded close reason. */
   void Close(ConnectionCloseReason reason = ConnectionCloseReason::SocketError);
 
+  /** @brief Stops reading new requests while allowing admitted responses to drain. */
+  void BeginDrain();
+
   /** @return true after the connection has entered the closed state. */
   [[nodiscard]] auto IsClosed() const -> bool { return closed_; }
 
@@ -104,7 +111,7 @@ class TcpConnection final : public std::enable_shared_from_this<TcpConnection> {
   [[nodiscard]] auto close_reason() const -> ConnectionCloseReason { return close_reason_; }
 
  private:
-  friend class DispatchCompletionQueue;
+  friend class DispatchMailbox;
 
   /** @brief Handles a worker-completed encoded response on the event-loop thread. */
   void OnEncodedDispatchComplete(std::string &&response_bytes, std::size_t completed_jobs);
@@ -142,8 +149,8 @@ class TcpConnection final : public std::enable_shared_from_this<TcpConnection> {
   /** @brief Records the first close reason and leaves it unchanged afterward. */
   void SetClosedReason(ConnectionCloseReason reason);
 
-  /** @brief Finishes shutdown after peer EOF once queued and dispatched work drains. */
-  void TryFinishAfterPeerClosed();
+  /** @brief Finishes shutdown after the read side closes and admitted work drains. */
+  void TryFinishAfterReadClosed();
 
   /** @brief Starts the idle timer coroutine when idle cleanup is enabled. */
   void StartIdleTimerIfNeeded();
@@ -160,8 +167,8 @@ class TcpConnection final : public std::enable_shared_from_this<TcpConnection> {
   /** @brief Event loop that owns this connection's socket operations. */
   io::UringContext *context_;
 
-  /** @brief Worker-to-event-loop completion queue. */
-  std::shared_ptr<DispatchCompletionQueue> completion_queue_;
+  /** @brief Worker-to-event-loop dispatch mailbox. */
+  std::shared_ptr<DispatchMailbox> dispatch_mailbox_;
 
   /** @brief Worker pool used for handler dispatch and response encoding. */
   ThreadPoolExecutor *executor_ = nullptr;
@@ -193,8 +200,8 @@ class TcpConnection final : public std::enable_shared_from_this<TcpConnection> {
   /** @brief True while `DrainWriteQueue()` owns the socket send path. */
   bool write_in_progress_ = false;
 
-  /** @brief True after peer EOF; connection waits for pending work before final close. */
-  bool peer_read_closed_ = false;
+  /** @brief True after peer EOF or server drain stops the read side. */
+  bool read_closed_ = false;
 
   /** @brief Number of handler jobs submitted to workers but not yet completed on the loop. */
   std::size_t pending_dispatch_jobs_ = 0;
@@ -213,6 +220,12 @@ class TcpConnection final : public std::enable_shared_from_this<TcpConnection> {
 
   /** @brief Shared backpressure stats owned by the TCP server. */
   ServerBackpressureStats *backpressure_stats_ = nullptr;
+
+  /** @brief Owner callback invoked exactly once when the connection closes. */
+  std::function<void()> on_closed_;
+
+  /** @brief True after server shutdown has stopped this connection from reading new requests. */
+  bool draining_ = false;
 
   /** @brief Closed flag owned by the event-loop thread. */
   bool closed_ = false;

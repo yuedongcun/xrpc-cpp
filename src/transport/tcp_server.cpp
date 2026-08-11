@@ -64,15 +64,15 @@ auto TcpServer::Run() -> runtime::Task<void> {
     throw LifecycleException("TcpServer::Run called before Listen");
   }
 
-  stopped_ = false;
+  accept_stopped_ = false;
   connection_io_loop_group_->Start();
 
-  while (!stopped_) {
+  while (!accept_stopped_) {
     const io::IoResult accept_result = co_await accept_context_->Accept(listen_socket_.fd());
 
     if (accept_result.result_ < 0) {
-      if (!stopped_) {
-        Stop();
+      if (!accept_stopped_) {
+        StopAccepting();
       }
       break;
     }
@@ -82,26 +82,38 @@ auto TcpServer::Run() -> runtime::Task<void> {
     connection_io_loop_group_->Dispatch(std::move(client_socket));
   }
 
-  connection_io_loop_group_->Stop();
-  connection_io_loop_group_->RethrowIfFailed();
+  try {
+    BeginDrain();
+  } catch (...) {
+    accept_context_->Stop();
+    throw;
+  }
+  accept_context_->Stop();
 }
 
 /**
- * @brief Stops accepting and requests all connection event loops to stop.
+ * @brief Stops accepting while leaving connection loops alive for graceful drain.
  *
  * The listening file descriptor is canceled through the accept-loop context before being closed so
  * a suspended `Accept()` awaiter wakes promptly.
  */
-void TcpServer::Stop() {
-  if (stopped_) {
+void TcpServer::StopAccepting() {
+  if (accept_stopped_) {
     return;
   }
 
-  stopped_ = true;
+  accept_stopped_ = true;
   accept_context_->CancelFd(listen_socket_.fd());
   listen_socket_.Close();
+}
 
-  connection_io_loop_group_->Stop();
+/** @brief Stops reads on all accepted connections. */
+void TcpServer::BeginDrain() { connection_io_loop_group_->BeginDrain(); }
+
+/** @brief Waits for accepted responses to drain before stopping connection loops. */
+void TcpServer::FinishDrain() {
+  connection_io_loop_group_->FinishDrain();
+  connection_io_loop_group_->RethrowIfFailed();
 }
 
 /**

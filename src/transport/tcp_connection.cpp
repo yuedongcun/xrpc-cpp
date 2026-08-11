@@ -8,8 +8,10 @@
 #include <utility>
 #include <vector>
 
+#include <sys/socket.h>
+
 #include "rpc/protocol_adapter.h"
-#include "transport/dispatch_completion_queue.h"
+#include "transport/dispatch_mailbox.h"
 
 namespace xrpc {
 namespace {
@@ -26,7 +28,7 @@ auto MakeMaxWriteBatchBytes() -> std::size_t { return 64U * 1024U; }
  * @brief Creates a connection actor for one accepted TCP socket.
  *
  * All socket I/O runs on `context`, while request handlers run on `executor` and report completions
- * back through `completion_queue_`.
+ * back through `dispatch_mailbox_`.
  *
  * @param context Event loop owning this connection.
  * @param handler Raw request dispatcher.
@@ -37,7 +39,7 @@ auto MakeMaxWriteBatchBytes() -> std::size_t { return 64U * 1024U; }
 TcpConnection::TcpConnection(io::UringContext &context, RawHandler handler, ThreadPoolExecutor &executor,
                              io::Socket socket, TcpConnectionOptions options)
     : context_(&context),
-      completion_queue_(std::move(options.completion_queue_)),
+      dispatch_mailbox_(std::move(options.dispatch_mailbox_)),
       executor_(&executor),
       handler_(std::move(handler)),
       frame_stream_(options.protocol_limits_),
@@ -46,8 +48,9 @@ TcpConnection::TcpConnection(io::UringContext &context, RawHandler handler, Thre
       read_buffer_(MakeReadBufferSize(), '\0'),
       idle_timeout_(options.idle_timeout_),
       limits_(options.limits_),
-      backpressure_stats_(options.backpressure_stats_) {
-  assert(completion_queue_ != nullptr);
+      backpressure_stats_(options.backpressure_stats_),
+      on_closed_(std::move(options.on_closed_)) {
+  assert(dispatch_mailbox_ != nullptr);
   assert(backpressure_stats_ != nullptr);
 }
 
@@ -62,14 +65,19 @@ TcpConnection::~TcpConnection() = default;
 auto TcpConnection::Run() -> runtime::Task<void> {
   StartIdleTimerIfNeeded();
 
-  while (!closed_ && !peer_read_closed_) {
+  while (!closed_ && !read_closed_) {
     const io::IoResult recv_result = co_await context_->Recv(socket_.fd(), read_buffer_.data(), read_buffer_.size());
     if (closed_) {
       co_return;
     }
 
+    if (draining_) {
+      TryFinishAfterReadClosed();
+      co_return;
+    }
+
     if (recv_result.result_ == 0) {
-      peer_read_closed_ = true;
+      read_closed_ = true;
       break;
     }
 
@@ -85,7 +93,7 @@ auto TcpConnection::Run() -> runtime::Task<void> {
     }
   }
 
-  TryFinishAfterPeerClosed();
+  TryFinishAfterReadClosed();
 }
 
 /**
@@ -147,6 +155,25 @@ void TcpConnection::Close(ConnectionCloseReason reason) {
   write_in_progress_ = false;
   context_->CancelFd(socket_.fd());
   socket_.Close();
+  if (on_closed_) {
+    on_closed_();
+  }
+}
+
+/**
+ * @brief Stops the read side and keeps the connection alive until admitted responses are written.
+ */
+void TcpConnection::BeginDrain() {
+  if (closed_ || draining_) {
+    return;
+  }
+
+  draining_ = true;
+  read_closed_ = true;
+  if (socket_.valid()) {
+    (void)::shutdown(socket_.fd(), SHUT_RD);
+  }
+  TryFinishAfterReadClosed();
 }
 
 /**
@@ -159,7 +186,7 @@ void TcpConnection::OnEncodedDispatchComplete(std::string &&response_bytes, std:
   ReleaseDispatchJobs(completed_jobs);
   TouchActivity();
   if (closed_) {
-    TryFinishAfterPeerClosed();
+    TryFinishAfterReadClosed();
     return;
   }
   try {
@@ -167,7 +194,7 @@ void TcpConnection::OnEncodedDispatchComplete(std::string &&response_bytes, std:
   } catch (...) {
     Close(ConnectionCloseReason::ProtocolError);
   }
-  TryFinishAfterPeerClosed();
+  TryFinishAfterReadClosed();
 }
 
 /**
@@ -178,7 +205,7 @@ void TcpConnection::OnEncodedDispatchComplete(std::string &&response_bytes, std:
 void TcpConnection::OnDispatchEncodeFailure(std::size_t completed_jobs) {
   ReleaseDispatchJobs(completed_jobs);
   Close(ConnectionCloseReason::ProtocolError);
-  TryFinishAfterPeerClosed();
+  TryFinishAfterReadClosed();
 }
 
 /**
@@ -302,7 +329,7 @@ auto TcpConnection::DrainWriteQueue() -> runtime::Task<void> {
     }
   }
   write_in_progress_ = false;
-  TryFinishAfterPeerClosed();
+  TryFinishAfterReadClosed();
 }
 
 /**
@@ -351,18 +378,23 @@ auto TcpConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> boo
           }
         }
         if (successful_jobs > 0) {
-          self->completion_queue_->Submit(DispatchCompletion{.connection_ = weak_self,
+          self->dispatch_mailbox_->Submit(DispatchCompletion{.target_connection_ = weak_self,
                                                              .response_bytes_ = std::move(batch_response_bytes),
                                                              .completed_jobs_ = successful_jobs,
                                                              .encode_failed_ = false});
         }
         if (encode_failed) {
-          self->completion_queue_->Submit(DispatchCompletion{
-              .connection_ = weak_self, .completed_jobs_ = request_count - successful_jobs, .encode_failed_ = true});
+          self->dispatch_mailbox_->Submit(DispatchCompletion{.target_connection_ = weak_self,
+                                                             .completed_jobs_ = request_count - successful_jobs,
+                                                             .encode_failed_ = true});
         }
       },
       request_count);
   if (!accepted) {
+    if (!executor_->accepting_submissions()) {
+      BeginDrain();
+      return false;
+    }
     for (RawRequest &request : *request_batch) {
       if (!RejectRequestDueToBackpressure(std::move(request), "server global pending job limit exceeded")) {
         return false;
@@ -418,13 +450,13 @@ void TcpConnection::SetClosedReason(ConnectionCloseReason reason) {
 }
 
 /**
- * @brief Closes after peer read shutdown once all pending responses have drained.
+ * @brief Closes after the read side shuts down and all pending responses have drained.
  *
- * This allows a client half-close to receive responses for already submitted requests before the
- * connection records a normal peer-close reason.
+ * This covers both client half-close and server-initiated drain while preserving responses for
+ * requests that already reached the executor.
  */
-void TcpConnection::TryFinishAfterPeerClosed() {
-  if (!peer_read_closed_ || closed_) {
+void TcpConnection::TryFinishAfterReadClosed() {
+  if (!read_closed_ || closed_) {
     return;
   }
 

@@ -161,8 +161,8 @@ class RpcServer final {
   /**
    * @brief Requests server shutdown.
    *
-   * Stop is best-effort and idempotent. It may be called from another thread while `Run()` is blocked in the server
-   * event loop. Shutdown closes the listener, accepted connections, worker pool, and Consul registration in order.
+   * Stop is thread-safe and idempotent. It closes admission and returns after requesting shutdown. `Run()` returns
+   * only after already admitted handlers finish and their responses have been given a chance to drain.
    */
   void Stop();
 

@@ -1,9 +1,11 @@
 #pragma once
 
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <exception>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -12,7 +14,7 @@
 #include "io/uring_context.h"
 #include "protocol/frame_codec.h"
 #include "rpc/raw_message.h"
-#include "transport/dispatch_completion_queue.h"
+#include "transport/dispatch_mailbox.h"
 #include "transport/server_backpressure.h"
 #include "transport/tcp_connection.h"
 #include "transport/thread_pool_executor.h"
@@ -50,6 +52,12 @@ class ConnectionIoLoop final {
   /** @brief Requests loop shutdown. Safe to call from shutdown paths. */
   void Stop() noexcept;
 
+  /** @brief Stops connection reads while keeping the loop alive for response drain. */
+  void BeginDrain();
+
+  /** @brief Waits for all connections to drain, then stops the loop. */
+  void FinishDrain();
+
   /** @brief Posts an accepted socket into this loop for connection creation. */
   void PostStartConnection(io::Socket client_socket);
 
@@ -72,8 +80,14 @@ class ConnectionIoLoop final {
   /** @brief Closes all tracked connections during loop shutdown. */
   void CloseConnections();
 
+  /** @brief Begins graceful drain on the event-loop thread. */
+  void BeginDrainOnContext();
+
+  /** @brief Accounts for one connection reaching its terminal state. */
+  void OnConnectionClosed();
+
   io::UringContext context_;
-  std::shared_ptr<DispatchCompletionQueue> completion_queue_;
+  std::shared_ptr<DispatchMailbox> dispatch_mailbox_;
   RawHandler handler_;
   ThreadPoolExecutor *executor_;
   ConnectionBackpressureLimits limits_;
@@ -83,6 +97,11 @@ class ConnectionIoLoop final {
   std::vector<ConnectionEntry> connections_;
   std::jthread thread_;
   std::exception_ptr error_;
+  std::mutex drain_mutex_;
+  std::condition_variable drain_cv_;
+  std::size_t live_connections_ = 0;
+  bool drain_requested_ = false;
+  bool drain_ready_ = false;
   bool started_ = false;
 };
 
@@ -112,6 +131,12 @@ class ConnectionIoLoopGroup final {
 
   /** @brief Stops all owned loops. */
   void Stop() noexcept;
+
+  /** @brief Stops new reads on every connection loop. */
+  void BeginDrain();
+
+  /** @brief Waits for every connection loop to drain and stop. */
+  void FinishDrain();
 
   /** @brief Dispatches an accepted socket to the next loop. */
   void Dispatch(io::Socket client_socket);

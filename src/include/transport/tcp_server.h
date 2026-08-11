@@ -51,11 +51,17 @@ class TcpServer final {
   /** @brief Binds and starts listening on the server socket. */
   void Listen(std::string_view host, std::uint16_t port);
 
-  /** @brief Runs the accept loop until `Stop()` is requested or accept fails. */
+  /** @brief Runs the accept loop until accepting is stopped or accept fails. */
   [[nodiscard]] auto Run() -> runtime::Task<void>;
 
-  /** @brief Requests shutdown of accept and connection I/O loops. */
-  void Stop();
+  /** @brief Stops accepting new connections without stopping connection I/O loops. */
+  void StopAccepting();
+
+  /** @brief Starts graceful drain on all accepted connections. */
+  void BeginDrain();
+
+  /** @brief Waits for accepted connections to drain and stops their I/O loops. */
+  void FinishDrain();
 
   /** @return Bound listen port after `Listen()`. */
   [[nodiscard]] auto port() const -> std::uint16_t { return port_; }
@@ -85,8 +91,8 @@ class TcpServer final {
   /** @brief Bound listen port. */
   std::uint16_t port_ = 0;
 
-  /** @brief True after shutdown has been requested. */
-  bool stopped_ = false;
+  /** @brief True after the listener has stopped accepting new connections. */
+  bool accept_stopped_ = false;
 };
 
 }  // namespace xrpc
