@@ -24,12 +24,6 @@ struct ConsulRegistrationConfig {
   std::chrono::milliseconds timeout_;
 };
 
-/** @brief Normalized limits and lifecycle settings for each client connection. */
-struct ConnectionConfig {
-  ConnectionBackpressureLimits backpressure_limits_;
-  std::chrono::milliseconds idle_timeout_;
-};
-
 /**
  * @brief Fully normalized options consumed by `RpcServer::Impl`.
  *
@@ -41,7 +35,7 @@ struct ServerConfig {
   std::size_t max_pending_jobs_;
   int backlog_;
   std::size_t io_threads_;
-  ConnectionConfig connection_;
+  ConnectionBackpressureLimits connection_limits_;
   ProtocolLimits protocol_limits_;
   ConsulRegistrationConfig consul_;
 };

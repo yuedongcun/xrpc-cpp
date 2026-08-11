@@ -12,17 +12,14 @@ namespace xrpc {
  * @param executor Worker pool used for handler execution.
  * @param limits Per-connection backpressure limits.
  * @param protocol_limits Frame and payload limits.
- * @param idle_timeout Idle timeout applied to new connections.
  */
 ConnectionIoLoop::ConnectionIoLoop(ServiceRegistry &registry, ThreadPoolExecutor &executor,
-                                   ConnectionBackpressureLimits limits, ProtocolLimits protocol_limits,
-                                   std::chrono::milliseconds idle_timeout)
+                                   ConnectionBackpressureLimits limits, ProtocolLimits protocol_limits)
     : dispatch_mailbox_(std::make_shared<DispatchMailbox>(context_)),
       registry_(&registry),
       executor_(&executor),
       limits_(limits),
-      protocol_limits_(protocol_limits),
-      idle_timeout_(idle_timeout) {}
+      protocol_limits_(protocol_limits) {}
 
 /** @brief Stops the loop thread and closes owned connections. */
 ConnectionIoLoop::~ConnectionIoLoop() { Stop(); }
@@ -148,16 +145,12 @@ void ConnectionIoLoop::StartConnection(io::Socket client_socket) {
     ++live_connections_;
   }
 
-  ServerConnectionOptions options;
-  options.limits_ = limits_;
-  options.dispatch_mailbox_ = dispatch_mailbox_;
-  options.protocol_limits_ = protocol_limits_;
-  options.idle_timeout_ = idle_timeout_;
-  options.on_closed_ = [this]() { OnConnectionClosed(); };
+  const ServerConnectionConfig config{.limits_ = limits_, .protocol_limits_ = protocol_limits_};
   std::shared_ptr<ServerConnection> connection;
   try {
-    connection = std::make_shared<ServerConnection>(context_, *registry_, *executor_, std::move(client_socket),
-                                                    std::move(options));
+    connection =
+        std::make_shared<ServerConnection>(context_, *registry_, *executor_, *dispatch_mailbox_,
+                                           std::move(client_socket), config, [this]() { OnConnectionClosed(); });
   } catch (...) {
     OnConnectionClosed();
     throw;
@@ -179,7 +172,7 @@ void ConnectionIoLoop::CleanupClosedConnections() {
 void ConnectionIoLoop::CloseConnections() {
   for (auto &entry : connections_) {
     if (!entry.connection_->IsClosed()) {
-      entry.connection_->Close(ServerConnectionCloseReason::SocketError);
+      entry.connection_->Close();
     }
   }
   CleanupClosedConnections();

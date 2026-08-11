@@ -65,9 +65,6 @@ auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerConfig {
   if (options.consul_timeout_ < std::chrono::milliseconds::zero()) {
     throw ConfigException("RpcServer consul_timeout must not be negative");
   }
-  if (options.connection_idle_timeout_ < std::chrono::milliseconds::zero()) {
-    throw ConfigException("RpcServer connection_idle_timeout must not be negative");
-  }
   if (options.service_name_.empty()) {
     if (!options.service_id_.empty()) {
       throw ConfigException("RpcServer service_id requires service_name");
@@ -86,14 +83,10 @@ auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerConfig {
       .max_pending_jobs_ = options.max_pending_jobs_global_,
       .backlog_ = static_cast<int>(options.listen_backlog_),
       .io_threads_ = options.connection_io_threads_,
-      .connection_ =
-          ConnectionConfig{
-              .backpressure_limits_ =
-                  ConnectionBackpressureLimits{
-                      .max_inflight_ = options.max_inflight_per_connection_,
-                      .max_write_queue_bytes_ = options.max_write_queue_bytes_per_connection_,
-                  },
-              .idle_timeout_ = options.connection_idle_timeout_,
+      .connection_limits_ =
+          ConnectionBackpressureLimits{
+              .max_inflight_ = options.max_inflight_per_connection_,
+              .max_write_queue_bytes_ = options.max_write_queue_bytes_per_connection_,
           },
       .protocol_limits_ = MakeProtocolLimits(options.max_payload_size_),
       .consul_ =

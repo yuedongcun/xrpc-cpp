@@ -316,15 +316,6 @@ TEST(RpcServerLifecycleTest, RejectsZeroMaxPayloadSizeAtConstruction) {
   EXPECT_EQ(result.status().code(), xrpc::StatusCode::InvalidArgument);
 }
 
-TEST(RpcServerLifecycleTest, RejectsNegativeConnectionIdleTimeoutAtConstruction) {
-  xrpc::RpcServerOptions options;
-  options.connection_idle_timeout_ = std::chrono::milliseconds(-1);
-
-  const xrpc::StatusOr<xrpc::RpcServer> result = xrpc::RpcServer::Create(options);
-  ASSERT_FALSE(result.ok());
-  EXPECT_EQ(result.status().code(), xrpc::StatusCode::InvalidArgument);
-}
-
 TEST(RpcServerLifecycleTest, PerConnectionInflightLimitReturnsResourceExhausted) {
   xrpc::RpcServerOptions options;
   options.worker_threads_ = 1;

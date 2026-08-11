@@ -1,6 +1,5 @@
 #pragma once
 
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -25,50 +24,25 @@ class DispatchMailbox;
 class ServiceRegistry;
 
 /**
- * @brief First reason recorded when a server-side connection closes.
- *
- * The value is diagnostic and remains stable after the first close transition.
+ * @brief Static limits applied to one accepted connection.
  */
-enum class ServerConnectionCloseReason : std::uint8_t {
-  None = 0,
-  PeerClosed,
-  ProtocolError,
-  SocketError,
-  Backpressure,
-  IdleTimeout,
-};
-
-/**
- * @brief Dependencies and limits injected into one accepted connection.
- *
- * The owning connection I/O loop supplies the shared dispatch mailbox used by every connection assigned to that loop.
- */
-struct ServerConnectionOptions final {
+struct ServerConnectionConfig final {
   /** @brief Per-connection inflight and write-queue limits. */
   ConnectionBackpressureLimits limits_;
 
-  /** @brief Mailbox used by worker threads to return encoded responses. */
-  std::shared_ptr<DispatchMailbox> dispatch_mailbox_;
-
   /** @brief Frame limits applied by the connection's `RpcFrameStream`. */
   ProtocolLimits protocol_limits_;
-
-  /** @brief Idle timeout for this connection. Zero disables idle cleanup. */
-  std::chrono::milliseconds idle_timeout_{0};
-
-  /** @brief Notifies the owning I/O loop when this connection reaches its terminal state. */
-  std::function<void()> on_closed_;
 };
 
 /**
  * @brief Event-loop-owned server-side TCP connection.
  *
  * Design note:
- * - Ownership: one shared `ServerConnection` owns its socket, frame stream, write queue, idle timer task, and
- * outstanding dispatch accounting.
+ * - Ownership: one shared `ServerConnection` owns its socket, frame stream, write queue, and outstanding dispatch
+ *   accounting.
  * - Threading: socket/framing/write state stays on the `UringContext` thread; handlers run on `ThreadPoolExecutor`
  *   and return through `DispatchMailbox`.
- * - Backpressure: reads can continue only while inflight jobs and queued writes stay within `ServerConnectionOptions`
+ * - Backpressure: reads can continue only while inflight jobs and queued writes stay within `ServerConnectionConfig`
  *   limits.
  * - Shutdown: `BeginDrain()` stops reads and preserves admitted response writes; `Close()` performs the terminal
  *   socket transition on the event-loop thread.
@@ -77,7 +51,8 @@ class ServerConnection final : public std::enable_shared_from_this<ServerConnect
  public:
   /** @brief Creates a connection from an accepted socket and injected runtime dependencies. */
   ServerConnection(io::UringContext &context, ServiceRegistry &registry, ThreadPoolExecutor &executor,
-                   io::Socket socket, ServerConnectionOptions options);
+                   DispatchMailbox &mailbox, io::Socket socket, ServerConnectionConfig config,
+                   std::function<void()> on_closed);
 
   /** @brief Releases owned socket and coroutine task state. */
   ~ServerConnection();
@@ -95,20 +70,23 @@ class ServerConnection final : public std::enable_shared_from_this<ServerConnect
    */
   [[nodiscard]] auto Run() -> runtime::Task<void>;
 
-  /** @brief Closes the connection with the first recorded close reason. */
-  void Close(ServerConnectionCloseReason reason = ServerConnectionCloseReason::SocketError);
+  /** @brief Closes the connection and cancels pending socket operations. */
+  void Close();
 
   /** @brief Stops reading new requests while allowing admitted responses to drain. */
   void BeginDrain();
 
   /** @return true after the connection has entered the closed state. */
-  [[nodiscard]] auto IsClosed() const -> bool { return closed_; }
-
-  /** @return First close reason recorded for this connection. */
-  [[nodiscard]] auto close_reason() const -> ServerConnectionCloseReason { return close_reason_; }
+  [[nodiscard]] auto IsClosed() const -> bool { return state_ == State::Closed; }
 
  private:
   friend class DispatchMailbox;
+
+  enum class State : std::uint8_t {
+    Active,
+    Draining,
+    Closed,
+  };
 
   /** @brief Handles a worker-completed encoded response on the event-loop thread. */
   void OnEncodedDispatchComplete(std::string &&response_bytes, std::size_t completed_jobs);
@@ -137,35 +115,23 @@ class ServerConnection final : public std::enable_shared_from_this<ServerConnect
   /** @brief Submits a batch of decoded requests to the worker pool. */
   [[nodiscard]] auto SubmitDispatchBatch(std::vector<RawRequest> requests) -> bool;
 
+  /** @brief Dispatches and encodes one admitted batch on a worker thread. */
+  void ExecuteDispatchBatchOnWorker(const std::weak_ptr<ServerConnection> &target, std::vector<RawRequest> &requests);
+
   /** @brief Produces an immediate resource-exhausted response for a rejected request. */
   [[nodiscard]] auto RejectRequestDueToBackpressure(RawRequest &&request, std::string message) -> bool;
 
   /** @brief Encodes a raw response on a worker before handing bytes to the event loop. */
   [[nodiscard]] auto EncodeResponseOnWorker(RawResponse &&response) const -> std::string;
 
-  /** @brief Records the first close reason and leaves it unchanged afterward. */
-  void SetClosedReason(ServerConnectionCloseReason reason);
-
-  /** @brief Finishes shutdown after the read side closes and admitted work drains. */
-  void TryFinishAfterReadClosed();
-
-  /** @brief Starts the idle timer coroutine when idle cleanup is enabled. */
-  void StartIdleTimerIfNeeded();
-
-  /** @brief Waits for idle timeout generations and closes inactive connections. */
-  [[nodiscard]] auto RunIdleTimer() -> runtime::Task<void>;
-
-  /** @brief Marks activity so stale idle-timer wakeups can be ignored. */
-  void TouchActivity() noexcept;
-
-  /** @return true while reads, writes, worker dispatch, or timers still need cleanup. */
-  [[nodiscard]] auto HasPendingWork() const noexcept -> bool;
+  /** @brief Finishes graceful drain after admitted work and response writes complete. */
+  void TryFinishDrain();
 
   /** @brief Event loop that owns this connection's socket operations. */
   io::UringContext *context_;
 
-  /** @brief Worker-to-event-loop dispatch mailbox. */
-  std::shared_ptr<DispatchMailbox> dispatch_mailbox_;
+  /** @brief Worker-to-event-loop dispatch mailbox owned by the connection I/O loop. */
+  DispatchMailbox *mailbox_ = nullptr;
 
   /** @brief Worker pool used for handler dispatch and response encoding. */
   ThreadPoolExecutor *executor_ = nullptr;
@@ -191,14 +157,8 @@ class ServerConnection final : public std::enable_shared_from_this<ServerConnect
   /** @brief Active write-drain coroutine, when a drain is in progress. */
   std::optional<runtime::Task<void>> write_task_;
 
-  /** @brief Idle timeout coroutine, when idle cleanup is enabled. */
-  std::optional<runtime::Task<void>> idle_timer_task_;
-
   /** @brief True while `DrainWriteQueue()` owns the socket send path. */
   bool write_in_progress_ = false;
-
-  /** @brief True after peer EOF or server drain stops the read side. */
-  bool read_closed_ = false;
 
   /** @brief Number of handler jobs submitted to workers but not yet completed on the loop. */
   std::size_t inflight_requests_ = 0;
@@ -206,26 +166,14 @@ class ServerConnection final : public std::enable_shared_from_this<ServerConnect
   /** @brief Total bytes currently queued in `write_queue_`. */
   std::size_t pending_write_bytes_ = 0;
 
-  /** @brief Idle timeout for this connection. Zero disables idle cleanup. */
-  std::chrono::milliseconds idle_timeout_{0};
-
-  /** @brief Incremented on activity so the idle timer can detect stale wakeups. */
-  std::uint64_t activity_generation_ = 0;
-
   /** @brief Per-connection backpressure limits. */
   ConnectionBackpressureLimits limits_;
 
   /** @brief Owner callback invoked exactly once when the connection closes. */
   std::function<void()> on_closed_;
 
-  /** @brief True after server shutdown has stopped this connection from reading new requests. */
-  bool draining_ = false;
-
-  /** @brief Closed flag owned by the event-loop thread. */
-  bool closed_ = false;
-
-  /** @brief First close reason recorded for diagnostics and tests. */
-  ServerConnectionCloseReason close_reason_ = ServerConnectionCloseReason::None;
+  /** @brief Lifecycle state modified only by the owning event-loop thread. */
+  State state_ = State::Active;
 };
 
 }  // namespace xrpc

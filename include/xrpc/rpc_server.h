@@ -17,9 +17,8 @@ namespace xrpc {
 /**
  * @brief Server configuration copied into the runtime before the listening socket is opened.
  *
- * Zero `worker_threads_` means "use hardware concurrency". Zero `connection_idle_timeout_` disables idle connection
- * cleanup. Consul registration fields are optional; when `service_name_` is empty, the server runs without Consul
- * registration.
+ * Zero `worker_threads_` means "use hardware concurrency". Consul registration fields are optional; when
+ * `service_name_` is empty, the server runs without Consul registration.
  */
 struct RpcServerOptions {
   /** @brief Number of handler worker threads, or zero to use hardware concurrency. */
@@ -39,9 +38,6 @@ struct RpcServerOptions {
 
   /** @brief Global cap for handler jobs queued or running in the worker pool. */
   std::size_t max_pending_jobs_global_ = 10000;
-
-  /** @brief Idle timeout for connections. A zero timeout disables idle cleanup. */
-  std::chrono::milliseconds connection_idle_timeout_{0};
 
   /** @brief Maximum accepted request or response payload size. */
   std::size_t max_payload_size_ = DEFAULT_MAX_PAYLOAD_SIZE;

@@ -1,6 +1,5 @@
 #pragma once
 
-#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <exception>
@@ -36,7 +35,7 @@ class ConnectionIoLoop final {
  public:
   /** @brief Creates an unstarted connection I/O loop. */
   ConnectionIoLoop(ServiceRegistry &registry, ThreadPoolExecutor &executor, ConnectionBackpressureLimits limits,
-                   ProtocolLimits protocol_limits, std::chrono::milliseconds idle_timeout);
+                   ProtocolLimits protocol_limits);
 
   /** @brief Stops the loop and closes owned connections. */
   ~ConnectionIoLoop();
@@ -93,7 +92,6 @@ class ConnectionIoLoop final {
   ThreadPoolExecutor *executor_;
   ConnectionBackpressureLimits limits_;
   ProtocolLimits protocol_limits_;
-  std::chrono::milliseconds idle_timeout_{0};
   std::vector<ConnectionEntry> connections_;
   std::jthread thread_;
   std::exception_ptr error_;

@@ -86,8 +86,7 @@ RpcServer::Impl::Impl(const RpcServerOptions &options)
   connection_io_loops_.reserve(config_.io_threads_);
   for (std::size_t index = 0; index < config_.io_threads_; ++index) {
     connection_io_loops_.push_back(
-        std::make_unique<ConnectionIoLoop>(registry_, executor_, config_.connection_.backpressure_limits_,
-                                           config_.protocol_limits_, config_.connection_.idle_timeout_));
+        std::make_unique<ConnectionIoLoop>(registry_, executor_, config_.connection_limits_, config_.protocol_limits_));
   }
 }
 

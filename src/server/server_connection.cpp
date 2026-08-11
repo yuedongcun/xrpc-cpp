@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cassert>
-#include <chrono>
 #include <memory>
 #include <string>
 #include <utility>
@@ -29,29 +28,29 @@ auto MakeMaxWriteBatchBytes() -> std::size_t { return 64U * 1024U; }
  * @brief Creates a connection actor for one accepted TCP socket.
  *
  * All socket I/O runs on `context`, while request handlers run on `executor` and report completions
- * back through `dispatch_mailbox_`.
+ * back through `mailbox`.
  *
  * @param context Event loop owning this connection.
  * @param registry Registered RPC methods dispatched by workers.
  * @param executor Worker pool for handler execution.
+ * @param mailbox Worker-to-I/O-loop completion mailbox owned by the connection loop.
  * @param socket Accepted nonblocking client socket.
- * @param options Protocol limits, backpressure limits, and idle timeout.
+ * @param config Protocol and backpressure limits.
+ * @param on_closed Owner callback invoked at the terminal state.
  */
 ServerConnection::ServerConnection(io::UringContext &context, ServiceRegistry &registry, ThreadPoolExecutor &executor,
-                                   io::Socket socket, ServerConnectionOptions options)
+                                   DispatchMailbox &mailbox, io::Socket socket, ServerConnectionConfig config,
+                                   std::function<void()> on_closed)
     : context_(&context),
-      dispatch_mailbox_(std::move(options.dispatch_mailbox_)),
+      mailbox_(&mailbox),
       executor_(&executor),
       registry_(&registry),
-      frame_stream_(options.protocol_limits_),
-      protocol_limits_(options.protocol_limits_),
+      frame_stream_(config.protocol_limits_),
+      protocol_limits_(config.protocol_limits_),
       socket_(std::move(socket)),
       read_buffer_(MakeReadBufferSize(), '\0'),
-      idle_timeout_(options.idle_timeout_),
-      limits_(options.limits_),
-      on_closed_(std::move(options.on_closed_)) {
-  assert(dispatch_mailbox_ != nullptr);
-}
+      limits_(config.limits_),
+      on_closed_(std::move(on_closed)) {}
 
 /** @brief Connection state is closed by the run loop or owner before destruction. */
 ServerConnection::~ServerConnection() = default;
@@ -62,37 +61,34 @@ ServerConnection::~ServerConnection() = default;
  * @return Coroutine task completed after the connection finishes or closes.
  */
 auto ServerConnection::Run() -> runtime::Task<void> {
-  StartIdleTimerIfNeeded();
-
-  while (!closed_ && !read_closed_) {
+  while (state_ == State::Active) {
     const io::IoResult recv_result = co_await context_->Recv(socket_.fd(), read_buffer_.data(), read_buffer_.size());
-    if (closed_) {
+    if (state_ == State::Closed) {
       co_return;
     }
 
-    if (draining_) {
-      TryFinishAfterReadClosed();
+    if (state_ == State::Draining) {
+      TryFinishDrain();
       co_return;
     }
 
     if (recv_result.result_ == 0) {
-      read_closed_ = true;
+      state_ = State::Draining;
       break;
     }
 
     if (recv_result.result_ < 0) {
-      Close(ServerConnectionCloseReason::SocketError);
+      Close();
       co_return;
     }
 
-    TouchActivity();
     if (!HandleFeedResult(
             frame_stream_.FeedBytes(std::string_view(read_buffer_.data(), recv_result.bytes_transferred_)))) {
       co_return;
     }
   }
 
-  TryFinishAfterReadClosed();
+  TryFinishDrain();
 }
 
 /**
@@ -106,7 +102,7 @@ auto ServerConnection::Run() -> runtime::Task<void> {
  */
 auto ServerConnection::HandleFeedResult(FrameStreamFeedResult &&feed) -> bool {
   if (feed.closed_) {
-    Close(ServerConnectionCloseReason::ProtocolError);
+    Close();
     return false;
   }
 
@@ -115,39 +111,31 @@ auto ServerConnection::HandleFeedResult(FrameStreamFeedResult &&feed) -> bool {
     return true;
   }
 
-  // Batch all requests decoded from this read into one worker task. This is a
-  // throughput tradeoff: fewer executor handoffs and wakeups, at the cost of
-  // coarser scheduling granularity because one worker owns the whole batch.
+  assert(inflight_requests_ <= limits_.max_inflight_);
+  if (request_count > limits_.max_inflight_ - inflight_requests_) {
+    return feed.requests_.ConsumeEach([this](RawRequest request) {
+      return RejectRequestDueToBackpressure(std::move(request), "server per-connection in-flight limit exceeded");
+    });
+  }
+
   std::vector<RawRequest> requests;
   requests.reserve(request_count);
-  const bool accepted_all = feed.requests_.ConsumeEach([this, &requests](RawRequest request) {
-    if (inflight_requests_ + requests.size() >= limits_.max_inflight_) {
-      return RejectRequestDueToBackpressure(std::move(request), "server per-connection in-flight limit exceeded");
-    }
+  [[maybe_unused]] const bool consumed_all = feed.requests_.ConsumeEach([&requests](RawRequest request) {
     requests.push_back(std::move(request));
     return true;
   });
-  if (!accepted_all) {
-    return false;
-  }
-  if (requests.empty()) {
-    return true;
-  }
+  assert(consumed_all);
+  assert(requests.size() == request_count);
   return SubmitDispatchBatch(std::move(requests));
 }
 
-/**
- * @brief Closes the connection and cancels all pending socket operations.
- *
- * @param reason First close reason to record for diagnostics.
- */
-void ServerConnection::Close(ServerConnectionCloseReason reason) {
-  if (closed_) {
+/** @brief Closes the connection and cancels all pending socket operations. */
+void ServerConnection::Close() {
+  if (state_ == State::Closed) {
     return;
   }
 
-  closed_ = true;
-  SetClosedReason(reason);
+  state_ = State::Closed;
   write_queue_.clear();
   pending_write_bytes_ = 0;
   write_in_progress_ = false;
@@ -162,16 +150,15 @@ void ServerConnection::Close(ServerConnectionCloseReason reason) {
  * @brief Stops the read side and keeps the connection alive until admitted responses are written.
  */
 void ServerConnection::BeginDrain() {
-  if (closed_ || draining_) {
+  if (state_ != State::Active) {
     return;
   }
 
-  draining_ = true;
-  read_closed_ = true;
+  state_ = State::Draining;
   if (socket_.valid()) {
     (void)::shutdown(socket_.fd(), SHUT_RD);
   }
-  TryFinishAfterReadClosed();
+  TryFinishDrain();
 }
 
 /**
@@ -182,17 +169,15 @@ void ServerConnection::BeginDrain() {
  */
 void ServerConnection::OnEncodedDispatchComplete(std::string &&response_bytes, std::size_t completed_jobs) {
   ReleaseDispatchJobs(completed_jobs);
-  TouchActivity();
-  if (closed_) {
-    TryFinishAfterReadClosed();
+  if (state_ == State::Closed) {
     return;
   }
   try {
     (void)EnqueueWrite(std::move(response_bytes));
   } catch (...) {
-    Close(ServerConnectionCloseReason::ProtocolError);
+    Close();
   }
-  TryFinishAfterReadClosed();
+  TryFinishDrain();
 }
 
 /**
@@ -202,8 +187,7 @@ void ServerConnection::OnEncodedDispatchComplete(std::string &&response_bytes, s
  */
 void ServerConnection::OnDispatchEncodeFailure(std::size_t completed_jobs) {
   ReleaseDispatchJobs(completed_jobs);
-  Close(ServerConnectionCloseReason::ProtocolError);
-  TryFinishAfterReadClosed();
+  Close();
 }
 
 /**
@@ -212,11 +196,8 @@ void ServerConnection::OnDispatchEncodeFailure(std::size_t completed_jobs) {
  * @param completed_jobs Number of logical dispatch jobs completed or failed.
  */
 void ServerConnection::ReleaseDispatchJobs(std::size_t completed_jobs) {
-  if (inflight_requests_ >= completed_jobs) {
-    inflight_requests_ -= completed_jobs;
-    return;
-  }
-  inflight_requests_ = 0;
+  assert(completed_jobs <= inflight_requests_);
+  inflight_requests_ -= completed_jobs;
 }
 
 /**
@@ -226,7 +207,7 @@ void ServerConnection::ReleaseDispatchJobs(std::size_t completed_jobs) {
  * @return true when bytes were queued, false when the connection is already closed or backpressured.
  */
 auto ServerConnection::EnqueueWrite(std::string bytes) -> bool {
-  if (closed_) {
+  if (state_ == State::Closed) {
     return false;
   }
 
@@ -235,7 +216,6 @@ auto ServerConnection::EnqueueWrite(std::string bytes) -> bool {
   }
 
   write_queue_.push_back(std::move(bytes));
-  TouchActivity();
   if (write_in_progress_) {
     return true;
   }
@@ -253,9 +233,9 @@ auto ServerConnection::EnqueueWrite(std::string bytes) -> bool {
  * @return true when the reservation succeeds, false after closing for backpressure.
  */
 auto ServerConnection::TryReserveWriteBytes(std::size_t bytes) -> bool {
-  if (pending_write_bytes_ > limits_.max_write_queue_bytes_ ||
-      bytes > limits_.max_write_queue_bytes_ - pending_write_bytes_) {
-    Close(ServerConnectionCloseReason::Backpressure);
+  assert(pending_write_bytes_ <= limits_.max_write_queue_bytes_);
+  if (bytes > limits_.max_write_queue_bytes_ - pending_write_bytes_) {
+    Close();
     return false;
   }
 
@@ -269,11 +249,8 @@ auto ServerConnection::TryReserveWriteBytes(std::size_t bytes) -> bool {
  * @param bytes Number of queued bytes represented by the drained frame or batch.
  */
 void ServerConnection::ReleaseWriteBytes(std::size_t bytes) {
-  if (pending_write_bytes_ >= bytes) {
-    pending_write_bytes_ -= bytes;
-    return;
-  }
-  pending_write_bytes_ = 0;
+  assert(bytes <= pending_write_bytes_);
+  pending_write_bytes_ -= bytes;
 }
 
 /**
@@ -285,7 +262,7 @@ void ServerConnection::ReleaseWriteBytes(std::size_t bytes) {
  * @return Coroutine task completed after the current write drain finishes.
  */
 auto ServerConnection::DrainWriteQueue() -> runtime::Task<void> {
-  while (!closed_ && !write_queue_.empty()) {
+  while (state_ != State::Closed && !write_queue_.empty()) {
     std::string frame = std::move(write_queue_.front());
     write_queue_.pop_front();
     std::size_t frame_size = frame.size();
@@ -301,31 +278,25 @@ auto ServerConnection::DrainWriteQueue() -> runtime::Task<void> {
         write_queue_.pop_front();
       }
     }
-    bool sent = true;
     std::size_t offset = 0;
-    while (!closed_ && offset < frame.size()) {
+    while (state_ != State::Closed && offset < frame.size()) {
       const std::string_view remaining(frame.data() + offset, frame.size() - offset);
       const io::IoResult send_result = co_await context_->Send(socket_.fd(), remaining.data(), remaining.size());
+      if (state_ == State::Closed) {
+        co_return;
+      }
       if (send_result.result_ <= 0) {
-        Close(ServerConnectionCloseReason::SocketError);
-        sent = false;
-        break;
+        ReleaseWriteBytes(frame_size);
+        Close();
+        co_return;
       }
 
-      TouchActivity();
       offset += send_result.bytes_transferred_;
     }
-    if (closed_) {
-      sent = false;
-    }
     ReleaseWriteBytes(frame_size);
-    if (!sent) {
-      write_in_progress_ = false;
-      co_return;
-    }
   }
   write_in_progress_ = false;
-  TryFinishAfterReadClosed();
+  TryFinishDrain();
 }
 
 /**
@@ -339,54 +310,17 @@ auto ServerConnection::DrainWriteQueue() -> runtime::Task<void> {
  */
 auto ServerConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> bool {
   const std::size_t request_count = requests.size();
-  if (request_count == 0) {
-    return true;
-  }
+  assert(request_count > 0);
 
   std::weak_ptr<ServerConnection> weak_self = weak_from_this();
   auto request_batch = std::make_shared<std::vector<RawRequest>>(std::move(requests));
   const bool accepted = executor_->TrySubmitBatch(
-      [weak_self, request_batch, request_count]() mutable -> void {
+      [weak_self, request_batch]() mutable -> void {
         std::shared_ptr<ServerConnection> self = weak_self.lock();
         if (!self) {
           return;
         }
-
-        // A worker batch emits one combined write buffer on the success path.
-        // This removes per-response completion and write-queue nodes, but it
-        // makes the first response in the batch wait until the whole batch has
-        // been dispatched and encoded.
-        // This is intentionally not a cross-read coalescing buffer: the batch
-        // is bounded by requests already decoded from one read. If this ever
-        // waits for future reads to fill a batch, it must add a flush deadline
-        // so a partial batch cannot hold the first response indefinitely.
-        std::string batch_response_bytes;
-        std::size_t successful_jobs = 0;
-        bool encode_failed = false;
-
-        for (RawRequest &request : *request_batch) {
-          RawResponse response = self->registry_->Dispatch(std::move(request));
-          try {
-            batch_response_bytes.append(self->EncodeResponseOnWorker(std::move(response)));
-            ++successful_jobs;
-          } catch (...) {
-            encode_failed = true;
-            break;
-          }
-        }
-
-        if (successful_jobs > 0) {
-          self->dispatch_mailbox_->Submit(DispatchCompletion{.target_connection_ = weak_self,
-                                                             .response_bytes_ = std::move(batch_response_bytes),
-                                                             .completed_jobs_ = successful_jobs,
-                                                             .encode_failed_ = false});
-        }
-
-        if (encode_failed) {
-          self->dispatch_mailbox_->Submit(DispatchCompletion{.target_connection_ = weak_self,
-                                                             .completed_jobs_ = request_count - successful_jobs,
-                                                             .encode_failed_ = true});
-        }
+        self->ExecuteDispatchBatchOnWorker(weak_self, *request_batch);
       },
       request_count);
 
@@ -409,6 +343,41 @@ auto ServerConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> 
 }
 
 /**
+ * @brief Dispatches and encodes one admitted request batch on a worker thread.
+ *
+ * Completions are returned through the originating I/O loop's mailbox; this function does not mutate connection-local
+ * lifecycle, inflight, or write state.
+ */
+void ServerConnection::ExecuteDispatchBatchOnWorker(const std::weak_ptr<ServerConnection> &target,
+                                                    std::vector<RawRequest> &requests) {
+  const std::size_t request_count = requests.size();
+  std::string batch_response_bytes;
+  std::size_t successful_jobs = 0;
+
+  for (RawRequest &request : requests) {
+    RawResponse response = registry_->Dispatch(std::move(request));
+    try {
+      batch_response_bytes.append(EncodeResponseOnWorker(std::move(response)));
+      ++successful_jobs;
+    } catch (...) {
+      break;
+    }
+  }
+
+  if (successful_jobs > 0) {
+    mailbox_->Submit(DispatchCompletion{.target_connection_ = target,
+                                        .response_bytes_ = std::move(batch_response_bytes),
+                                        .completed_jobs_ = successful_jobs,
+                                        .encode_failed_ = false});
+  }
+
+  if (successful_jobs < request_count) {
+    mailbox_->Submit(DispatchCompletion{
+        .target_connection_ = target, .completed_jobs_ = request_count - successful_jobs, .encode_failed_ = true});
+  }
+}
+
+/**
  * @brief Encodes and queues a backpressure rejection response for one request.
  *
  * @param request Request rejected before worker execution.
@@ -423,7 +392,7 @@ auto ServerConnection::RejectRequestDueToBackpressure(RawRequest &&request, std:
   try {
     return EnqueueWrite(frame_stream_.EncodeResponse(std::move(response)));
   } catch (...) {
-    Close(ServerConnectionCloseReason::ProtocolError);
+    Close();
     return false;
   }
 }
@@ -440,75 +409,20 @@ auto ServerConnection::EncodeResponseOnWorker(RawResponse &&response) const -> s
 }
 
 /**
- * @brief Stores the first close reason for this connection.
- *
- * @param reason Candidate close reason.
- */
-void ServerConnection::SetClosedReason(ServerConnectionCloseReason reason) {
-  if (close_reason_ == ServerConnectionCloseReason::None) {
-    close_reason_ = reason;
-  }
-}
-
-/**
  * @brief Closes after the read side shuts down and all pending responses have drained.
  *
  * This covers both client half-close and server-initiated drain while preserving responses for
  * requests that already reached the executor.
  */
-void ServerConnection::TryFinishAfterReadClosed() {
-  if (!read_closed_ || closed_) {
+void ServerConnection::TryFinishDrain() {
+  if (state_ != State::Draining) {
     return;
   }
 
   if (inflight_requests_ == 0 && !write_in_progress_ && write_queue_.empty()) {
-    Close(ServerConnectionCloseReason::PeerClosed);
+    assert(pending_write_bytes_ == 0);
+    Close();
   }
-}
-
-/**
- * @brief Starts the idle timer coroutine when idle timeouts are enabled.
- */
-void ServerConnection::StartIdleTimerIfNeeded() {
-  if (idle_timeout_ <= std::chrono::milliseconds::zero() || idle_timer_task_.has_value()) {
-    return;
-  }
-
-  idle_timer_task_.emplace(RunIdleTimer());
-  idle_timer_task_->Start();
-}
-
-/**
- * @brief Closes the connection after an idle period with no pending work.
- *
- * The generation counter avoids resetting kernel timers on every activity; the timer only checks
- * whether any read, write, or dispatch completion occurred during the sleep interval.
- *
- * @return Coroutine task completed when the timer exits or closes the connection.
- */
-auto ServerConnection::RunIdleTimer() -> runtime::Task<void> {
-  while (!closed_) {
-    // The generation avoids resetting or canceling the kernel timeout on every
-    // activity; any read/write/dispatch completion changes the observed value.
-    const std::uint64_t observed_generation = activity_generation_;
-    const io::IoResult result = co_await context_->SleepFor(idle_timeout_);
-    if (closed_ || result.result_ < 0) {
-      co_return;
-    }
-
-    if (activity_generation_ == observed_generation && !HasPendingWork()) {
-      Close(ServerConnectionCloseReason::IdleTimeout);
-      co_return;
-    }
-  }
-}
-
-/** @brief Marks that connection activity occurred for idle-timeout accounting. */
-void ServerConnection::TouchActivity() noexcept { ++activity_generation_; }
-
-/** @return true when dispatch or write state should keep the connection alive. */
-auto ServerConnection::HasPendingWork() const noexcept -> bool {
-  return inflight_requests_ > 0 || write_in_progress_ || !write_queue_.empty() || pending_write_bytes_ > 0;
 }
 
 }  // namespace xrpc
