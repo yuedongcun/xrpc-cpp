@@ -3,7 +3,6 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
-#include <cstdint>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -16,26 +15,12 @@
 namespace xrpc {
 
 /**
- * @brief Worker-pool diagnostics copied from relaxed atomic counters.
- *
- * `rejected_by_pending_limit_` counts logical jobs. A batch of N RPCs submitted as one physical worker task contributes
- * N logical jobs. `max_observed_worker_queue_depth_` tracks queued physical tasks.
- */
-struct ThreadPoolExecutorSnapshot {
-  /** @brief Logical jobs rejected by the global pending-job limit. */
-  std::uint64_t rejected_by_pending_limit_ = 0;
-
-  /** @brief Highest physical queue depth observed on any worker queue. */
-  std::uint64_t max_observed_worker_queue_depth_ = 0;
-};
-
-/**
  * @brief Fixed-size worker pool used for server method dispatch.
  *
  * Design note:
  * - Ownership: each worker owns one private queue; the executor owns all workers and the global pending-job counter.
- * - Backpressure: submission reserves logical jobs before queueing. Rejection is visible to `TcpConnection` so it can
- * send an RPC error instead of growing memory.
+ * - Backpressure: submission reserves logical jobs before queueing. Rejection is visible to `ServerConnection` so it
+ * can send an RPC error instead of growing memory.
  * - Shutdown: `Stop()` flips `stopped_`, wakes all queues, and lets `jthread`s join.
  * - Batching: `TrySubmitBatch()` counts multiple RPCs as one physical worker task.
  */
@@ -73,9 +58,6 @@ class ThreadPoolExecutor final {
   /** @return true while new jobs may still be submitted. */
   [[nodiscard]] auto accepting_submissions() const noexcept -> bool;
 
-  /** @return Snapshot of relaxed worker-pool diagnostics. */
-  [[nodiscard]] auto stats() const -> ThreadPoolExecutorSnapshot;
-
   /** @brief Stops the pool, wakes all workers, and prevents new submissions. */
   void Stop();
 
@@ -111,8 +93,6 @@ class ThreadPoolExecutor final {
   std::atomic<std::size_t> pending_jobs_{0};
   std::atomic_bool accepting_submissions_{true};
   std::atomic_bool stopped_{false};
-  std::atomic<std::uint64_t> rejected_by_pending_limit_{0};
-  std::atomic<std::uint64_t> max_observed_worker_queue_depth_{0};
 };
 
 }  // namespace xrpc

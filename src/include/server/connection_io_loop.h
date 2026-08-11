@@ -16,16 +16,18 @@
 #include "rpc/raw_message.h"
 #include "server/dispatch_mailbox.h"
 #include "server/server_backpressure.h"
-#include "server/tcp_connection.h"
+#include "server/server_connection.h"
 #include "server/thread_pool_executor.h"
 
 namespace xrpc {
+
+class ServiceRegistry;
 
 /**
  * @brief Owns one connection event-loop thread and its assigned TCP connections.
  *
  * Design note:
- * - Ownership: one loop owns one `UringContext` thread and all `TcpConnection` objects assigned to that thread.
+ * - Ownership: one loop owns one `UringContext` thread and all `ServerConnection` objects assigned to that thread.
  * - Threading: accepted sockets are posted into the loop; connection creation, cleanup, and close all run on the
  *   `UringContext` thread.
  * - Failure: event-loop exceptions are captured and rethrown through `RethrowIfFailed()` after `Stop()`.
@@ -33,9 +35,8 @@ namespace xrpc {
 class ConnectionIoLoop final {
  public:
   /** @brief Creates an unstarted connection I/O loop. */
-  ConnectionIoLoop(RawHandler handler, ThreadPoolExecutor &executor, ConnectionBackpressureLimits limits,
-                   ServerBackpressureStats &backpressure_stats, ProtocolLimits protocol_limits,
-                   std::chrono::milliseconds connection_idle_timeout);
+  ConnectionIoLoop(ServiceRegistry &registry, ThreadPoolExecutor &executor, ConnectionBackpressureLimits limits,
+                   ProtocolLimits protocol_limits, std::chrono::milliseconds idle_timeout);
 
   /** @brief Stops the loop and closes owned connections. */
   ~ConnectionIoLoop();
@@ -67,11 +68,11 @@ class ConnectionIoLoop final {
  private:
   /** @brief Live connection and its coroutine task. */
   struct ConnectionEntry {
-    std::shared_ptr<TcpConnection> connection_;
+    std::shared_ptr<ServerConnection> connection_;
     runtime::Task<void> task_;
   };
 
-  /** @brief Creates and starts one `TcpConnection` on this event-loop thread. */
+  /** @brief Creates and starts one `ServerConnection` on this event-loop thread. */
   void StartConnection(io::Socket client_socket);
 
   /** @brief Removes closed connections whose tasks have completed. */
@@ -88,12 +89,11 @@ class ConnectionIoLoop final {
 
   io::UringContext context_;
   std::shared_ptr<DispatchMailbox> dispatch_mailbox_;
-  RawHandler handler_;
+  ServiceRegistry *registry_;
   ThreadPoolExecutor *executor_;
   ConnectionBackpressureLimits limits_;
   ProtocolLimits protocol_limits_;
-  std::chrono::milliseconds connection_idle_timeout_{0};
-  ServerBackpressureStats *backpressure_stats_;
+  std::chrono::milliseconds idle_timeout_{0};
   std::vector<ConnectionEntry> connections_;
   std::jthread thread_;
   std::exception_ptr error_;
@@ -103,50 +103,6 @@ class ConnectionIoLoop final {
   bool drain_requested_ = false;
   bool drain_ready_ = false;
   bool started_ = false;
-};
-
-/**
- * @brief Round-robin dispatcher across connection I/O loops.
- *
- * The group owns loop lifetimes and keeps accepted sockets out of stopped loops by stopping all loops together.
- */
-class ConnectionIoLoopGroup final {
- public:
-  /** @brief Creates `loop_count` unstarted I/O loops. */
-  ConnectionIoLoopGroup(std::size_t loop_count, const RawHandler &handler, ThreadPoolExecutor &executor,
-                        ConnectionBackpressureLimits limits, ServerBackpressureStats &backpressure_stats,
-                        ProtocolLimits protocol_limits, std::chrono::milliseconds connection_idle_timeout);
-
-  /** @brief Stops all loops before destroying them. */
-  ~ConnectionIoLoopGroup();
-
-  ConnectionIoLoopGroup(const ConnectionIoLoopGroup &) = delete;
-  auto operator=(const ConnectionIoLoopGroup &) -> ConnectionIoLoopGroup & = delete;
-
-  ConnectionIoLoopGroup(ConnectionIoLoopGroup &&) = delete;
-  auto operator=(ConnectionIoLoopGroup &&) -> ConnectionIoLoopGroup & = delete;
-
-  /** @brief Starts all owned loops. */
-  void Start();
-
-  /** @brief Stops all owned loops. */
-  void Stop() noexcept;
-
-  /** @brief Stops new reads on every connection loop. */
-  void BeginDrain();
-
-  /** @brief Waits for every connection loop to drain and stop. */
-  void FinishDrain();
-
-  /** @brief Dispatches an accepted socket to the next loop. */
-  void Dispatch(io::Socket client_socket);
-
-  /** @brief Rethrows the first loop failure observed after shutdown. */
-  void RethrowIfFailed() const;
-
- private:
-  std::vector<std::unique_ptr<ConnectionIoLoop>> loops_;
-  std::size_t next_loop_index_ = 0;
 };
 
 }  // namespace xrpc

@@ -22,13 +22,14 @@
 namespace xrpc {
 
 class DispatchMailbox;
+class ServiceRegistry;
 
 /**
  * @brief First reason recorded when a server-side connection closes.
  *
  * The value is diagnostic and remains stable after the first close transition.
  */
-enum class ConnectionCloseReason : std::uint8_t {
+enum class ServerConnectionCloseReason : std::uint8_t {
   None = 0,
   PeerClosed,
   ProtocolError,
@@ -40,15 +41,11 @@ enum class ConnectionCloseReason : std::uint8_t {
 /**
  * @brief Dependencies and limits injected into one accepted connection.
  *
- * The owning connection I/O loop supplies the shared dispatch mailbox and backpressure counters used by every
- * connection assigned to that loop.
+ * The owning connection I/O loop supplies the shared dispatch mailbox used by every connection assigned to that loop.
  */
-struct TcpConnectionOptions final {
+struct ServerConnectionOptions final {
   /** @brief Per-connection inflight and write-queue limits. */
   ConnectionBackpressureLimits limits_;
-
-  /** @brief Shared backpressure stats sink. */
-  ServerBackpressureStats *backpressure_stats_ = nullptr;
 
   /** @brief Mailbox used by worker threads to return encoded responses. */
   std::shared_ptr<DispatchMailbox> dispatch_mailbox_;
@@ -67,29 +64,29 @@ struct TcpConnectionOptions final {
  * @brief Event-loop-owned server-side TCP connection.
  *
  * Design note:
- * - Ownership: one shared `TcpConnection` owns its socket, frame stream, write queue, idle timer task, and outstanding
- *   dispatch accounting.
+ * - Ownership: one shared `ServerConnection` owns its socket, frame stream, write queue, idle timer task, and
+ * outstanding dispatch accounting.
  * - Threading: socket/framing/write state stays on the `UringContext` thread; handlers run on `ThreadPoolExecutor`
  *   and return through `DispatchMailbox`.
- * - Backpressure: reads can continue only while inflight jobs and queued writes stay within `TcpConnectionOptions`
+ * - Backpressure: reads can continue only while inflight jobs and queued writes stay within `ServerConnectionOptions`
  *   limits.
  * - Shutdown: `BeginDrain()` stops reads and preserves admitted response writes; `Close()` performs the terminal
  *   socket transition on the event-loop thread.
  */
-class TcpConnection final : public std::enable_shared_from_this<TcpConnection> {
+class ServerConnection final : public std::enable_shared_from_this<ServerConnection> {
  public:
   /** @brief Creates a connection from an accepted socket and injected runtime dependencies. */
-  TcpConnection(io::UringContext &context, RawHandler handler, ThreadPoolExecutor &executor, io::Socket socket,
-                TcpConnectionOptions options);
+  ServerConnection(io::UringContext &context, ServiceRegistry &registry, ThreadPoolExecutor &executor,
+                   io::Socket socket, ServerConnectionOptions options);
 
   /** @brief Releases owned socket and coroutine task state. */
-  ~TcpConnection();
+  ~ServerConnection();
 
-  TcpConnection(const TcpConnection &) = delete;
-  auto operator=(const TcpConnection &) -> TcpConnection & = delete;
+  ServerConnection(const ServerConnection &) = delete;
+  auto operator=(const ServerConnection &) -> ServerConnection & = delete;
 
-  TcpConnection(TcpConnection &&) noexcept = delete;
-  auto operator=(TcpConnection &&) noexcept -> TcpConnection & = delete;
+  ServerConnection(ServerConnection &&) noexcept = delete;
+  auto operator=(ServerConnection &&) noexcept -> ServerConnection & = delete;
 
   /**
    * @brief Runs the connection read loop coroutine.
@@ -99,7 +96,7 @@ class TcpConnection final : public std::enable_shared_from_this<TcpConnection> {
   [[nodiscard]] auto Run() -> runtime::Task<void>;
 
   /** @brief Closes the connection with the first recorded close reason. */
-  void Close(ConnectionCloseReason reason = ConnectionCloseReason::SocketError);
+  void Close(ServerConnectionCloseReason reason = ServerConnectionCloseReason::SocketError);
 
   /** @brief Stops reading new requests while allowing admitted responses to drain. */
   void BeginDrain();
@@ -108,7 +105,7 @@ class TcpConnection final : public std::enable_shared_from_this<TcpConnection> {
   [[nodiscard]] auto IsClosed() const -> bool { return closed_; }
 
   /** @return First close reason recorded for this connection. */
-  [[nodiscard]] auto close_reason() const -> ConnectionCloseReason { return close_reason_; }
+  [[nodiscard]] auto close_reason() const -> ServerConnectionCloseReason { return close_reason_; }
 
  private:
   friend class DispatchMailbox;
@@ -147,7 +144,7 @@ class TcpConnection final : public std::enable_shared_from_this<TcpConnection> {
   [[nodiscard]] auto EncodeResponseOnWorker(RawResponse &&response) const -> std::string;
 
   /** @brief Records the first close reason and leaves it unchanged afterward. */
-  void SetClosedReason(ConnectionCloseReason reason);
+  void SetClosedReason(ServerConnectionCloseReason reason);
 
   /** @brief Finishes shutdown after the read side closes and admitted work drains. */
   void TryFinishAfterReadClosed();
@@ -173,8 +170,8 @@ class TcpConnection final : public std::enable_shared_from_this<TcpConnection> {
   /** @brief Worker pool used for handler dispatch and response encoding. */
   ThreadPoolExecutor *executor_ = nullptr;
 
-  /** @brief Raw handler dispatched for decoded requests. */
-  RawHandler handler_;
+  /** @brief Registered RPC methods dispatched by worker threads. */
+  ServiceRegistry *registry_ = nullptr;
 
   /** @brief Per-connection RPC framing state and decode buffer owner. */
   RpcFrameStream frame_stream_;
@@ -204,7 +201,7 @@ class TcpConnection final : public std::enable_shared_from_this<TcpConnection> {
   bool read_closed_ = false;
 
   /** @brief Number of handler jobs submitted to workers but not yet completed on the loop. */
-  std::size_t pending_dispatch_jobs_ = 0;
+  std::size_t inflight_requests_ = 0;
 
   /** @brief Total bytes currently queued in `write_queue_`. */
   std::size_t pending_write_bytes_ = 0;
@@ -218,9 +215,6 @@ class TcpConnection final : public std::enable_shared_from_this<TcpConnection> {
   /** @brief Per-connection backpressure limits. */
   ConnectionBackpressureLimits limits_;
 
-  /** @brief Shared backpressure stats owned by the TCP server. */
-  ServerBackpressureStats *backpressure_stats_ = nullptr;
-
   /** @brief Owner callback invoked exactly once when the connection closes. */
   std::function<void()> on_closed_;
 
@@ -231,7 +225,7 @@ class TcpConnection final : public std::enable_shared_from_this<TcpConnection> {
   bool closed_ = false;
 
   /** @brief First close reason recorded for diagnostics and tests. */
-  ConnectionCloseReason close_reason_ = ConnectionCloseReason::None;
+  ServerConnectionCloseReason close_reason_ = ServerConnectionCloseReason::None;
 };
 
 }  // namespace xrpc

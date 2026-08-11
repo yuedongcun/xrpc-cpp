@@ -2,29 +2,27 @@
 
 #include <utility>
 
-#include "common/xrpc_exception.h"
+#include "server/service_registry.h"
 
 namespace xrpc {
 /**
  * @brief Creates one event loop that owns accepted TCP connections.
  *
- * @param handler Raw RPC dispatcher shared by all connections.
+ * @param registry Registered RPC methods shared by all connections.
  * @param executor Worker pool used for handler execution.
- * @param limits Per-connection and global backpressure limits.
- * @param backpressure_stats Shared backpressure diagnostics.
+ * @param limits Per-connection backpressure limits.
  * @param protocol_limits Frame and payload limits.
- * @param connection_idle_timeout Idle timeout applied to new connections.
+ * @param idle_timeout Idle timeout applied to new connections.
  */
-ConnectionIoLoop::ConnectionIoLoop(RawHandler handler, ThreadPoolExecutor &executor,
-                                   ConnectionBackpressureLimits limits, ServerBackpressureStats &backpressure_stats,
-                                   ProtocolLimits protocol_limits, std::chrono::milliseconds connection_idle_timeout)
+ConnectionIoLoop::ConnectionIoLoop(ServiceRegistry &registry, ThreadPoolExecutor &executor,
+                                   ConnectionBackpressureLimits limits, ProtocolLimits protocol_limits,
+                                   std::chrono::milliseconds idle_timeout)
     : dispatch_mailbox_(std::make_shared<DispatchMailbox>(context_)),
-      handler_(std::move(handler)),
+      registry_(&registry),
       executor_(&executor),
       limits_(limits),
       protocol_limits_(protocol_limits),
-      connection_idle_timeout_(connection_idle_timeout),
-      backpressure_stats_(&backpressure_stats) {}
+      idle_timeout_(idle_timeout) {}
 
 /** @brief Stops the loop thread and closes owned connections. */
 ConnectionIoLoop::~ConnectionIoLoop() { Stop(); }
@@ -136,7 +134,7 @@ void ConnectionIoLoop::RethrowIfFailed() const {
 }
 
 /**
- * @brief Creates a `TcpConnection` actor and starts its coroutine task.
+ * @brief Creates a `ServerConnection` actor and starts its coroutine task.
  *
  * @param client_socket Accepted socket already moved onto this loop thread.
  */
@@ -150,17 +148,16 @@ void ConnectionIoLoop::StartConnection(io::Socket client_socket) {
     ++live_connections_;
   }
 
-  TcpConnectionOptions options;
+  ServerConnectionOptions options;
   options.limits_ = limits_;
-  options.backpressure_stats_ = backpressure_stats_;
   options.dispatch_mailbox_ = dispatch_mailbox_;
   options.protocol_limits_ = protocol_limits_;
-  options.idle_timeout_ = connection_idle_timeout_;
+  options.idle_timeout_ = idle_timeout_;
   options.on_closed_ = [this]() { OnConnectionClosed(); };
-  std::shared_ptr<TcpConnection> connection;
+  std::shared_ptr<ServerConnection> connection;
   try {
-    connection =
-        std::make_shared<TcpConnection>(context_, handler_, *executor_, std::move(client_socket), std::move(options));
+    connection = std::make_shared<ServerConnection>(context_, *registry_, *executor_, std::move(client_socket),
+                                                    std::move(options));
   } catch (...) {
     OnConnectionClosed();
     throw;
@@ -182,7 +179,7 @@ void ConnectionIoLoop::CleanupClosedConnections() {
 void ConnectionIoLoop::CloseConnections() {
   for (auto &entry : connections_) {
     if (!entry.connection_->IsClosed()) {
-      entry.connection_->Close(ConnectionCloseReason::SocketError);
+      entry.connection_->Close(ServerConnectionCloseReason::SocketError);
     }
   }
   CleanupClosedConnections();
@@ -209,82 +206,6 @@ void ConnectionIoLoop::OnConnectionClosed() {
     }
   }
   drain_cv_.notify_all();
-}
-
-/**
- * @brief Creates a round-robin group of connection event loops.
- *
- * @param loop_count Number of event-loop threads to own.
- * @param handler Raw RPC dispatcher shared by all loops.
- * @param executor Worker pool used by all connections.
- * @param limits Per-connection and global backpressure limits.
- * @param backpressure_stats Shared backpressure diagnostics.
- * @param protocol_limits Frame and payload limits.
- * @param connection_idle_timeout Idle timeout applied to new connections.
- * @throws ConfigException when `loop_count` is zero.
- */
-ConnectionIoLoopGroup::ConnectionIoLoopGroup(std::size_t loop_count, const RawHandler &handler,
-                                             ThreadPoolExecutor &executor, ConnectionBackpressureLimits limits,
-                                             ServerBackpressureStats &backpressure_stats,
-                                             ProtocolLimits protocol_limits,
-                                             std::chrono::milliseconds connection_idle_timeout) {
-  if (loop_count == 0) {
-    throw ConfigException("server io loop count must be greater than 0");
-  }
-
-  loops_.reserve(loop_count);
-  for (std::size_t index = 0; index < loop_count; ++index) {
-    loops_.push_back(std::make_unique<ConnectionIoLoop>(handler, executor, limits, backpressure_stats, protocol_limits,
-                                                        connection_idle_timeout));
-  }
-}
-
-/** @brief Stops all connection event loops. */
-ConnectionIoLoopGroup::~ConnectionIoLoopGroup() { Stop(); }
-
-/** @brief Starts every owned connection event loop. */
-void ConnectionIoLoopGroup::Start() {
-  for (auto &loop : loops_) {
-    loop->Start();
-  }
-}
-
-/** @brief Requests every connection event loop to stop. */
-void ConnectionIoLoopGroup::Stop() noexcept {
-  for (auto &loop : loops_) {
-    loop->Stop();
-  }
-}
-
-/** @brief Starts graceful drain on all connection loops. */
-void ConnectionIoLoopGroup::BeginDrain() {
-  for (auto &loop : loops_) {
-    loop->BeginDrain();
-  }
-}
-
-/** @brief Waits for all connection loops to drain and stop. */
-void ConnectionIoLoopGroup::FinishDrain() {
-  for (auto &loop : loops_) {
-    loop->FinishDrain();
-  }
-}
-
-/**
- * @brief Dispatches an accepted socket to the next connection loop.
- *
- * @param client_socket Accepted socket from the TCP server accept loop.
- */
-void ConnectionIoLoopGroup::Dispatch(io::Socket client_socket) {
-  loops_[next_loop_index_]->PostStartConnection(std::move(client_socket));
-  next_loop_index_ = (next_loop_index_ + 1) % loops_.size();
-}
-
-/** @brief Rethrows the first stored exception from any connection loop. */
-void ConnectionIoLoopGroup::RethrowIfFailed() const {
-  for (const auto &loop : loops_) {
-    loop->RethrowIfFailed();
-  }
 }
 
 }  // namespace xrpc

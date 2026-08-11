@@ -1,4 +1,4 @@
-#include "server/tcp_connection.h"
+#include "server/server_connection.h"
 
 #include <algorithm>
 #include <cassert>
@@ -12,6 +12,7 @@
 
 #include "rpc/protocol_adapter.h"
 #include "server/dispatch_mailbox.h"
+#include "server/service_registry.h"
 
 namespace xrpc {
 namespace {
@@ -31,38 +32,36 @@ auto MakeMaxWriteBatchBytes() -> std::size_t { return 64U * 1024U; }
  * back through `dispatch_mailbox_`.
  *
  * @param context Event loop owning this connection.
- * @param handler Raw request dispatcher.
+ * @param registry Registered RPC methods dispatched by workers.
  * @param executor Worker pool for handler execution.
  * @param socket Accepted nonblocking client socket.
  * @param options Protocol limits, backpressure limits, and idle timeout.
  */
-TcpConnection::TcpConnection(io::UringContext &context, RawHandler handler, ThreadPoolExecutor &executor,
-                             io::Socket socket, TcpConnectionOptions options)
+ServerConnection::ServerConnection(io::UringContext &context, ServiceRegistry &registry, ThreadPoolExecutor &executor,
+                                   io::Socket socket, ServerConnectionOptions options)
     : context_(&context),
       dispatch_mailbox_(std::move(options.dispatch_mailbox_)),
       executor_(&executor),
-      handler_(std::move(handler)),
+      registry_(&registry),
       frame_stream_(options.protocol_limits_),
       protocol_limits_(options.protocol_limits_),
       socket_(std::move(socket)),
       read_buffer_(MakeReadBufferSize(), '\0'),
       idle_timeout_(options.idle_timeout_),
       limits_(options.limits_),
-      backpressure_stats_(options.backpressure_stats_),
       on_closed_(std::move(options.on_closed_)) {
   assert(dispatch_mailbox_ != nullptr);
-  assert(backpressure_stats_ != nullptr);
 }
 
 /** @brief Connection state is closed by the run loop or owner before destruction. */
-TcpConnection::~TcpConnection() = default;
+ServerConnection::~ServerConnection() = default;
 
 /**
  * @brief Runs the asynchronous read loop until peer close, socket error, or protocol failure.
  *
  * @return Coroutine task completed after the connection finishes or closes.
  */
-auto TcpConnection::Run() -> runtime::Task<void> {
+auto ServerConnection::Run() -> runtime::Task<void> {
   StartIdleTimerIfNeeded();
 
   while (!closed_ && !read_closed_) {
@@ -82,7 +81,7 @@ auto TcpConnection::Run() -> runtime::Task<void> {
     }
 
     if (recv_result.result_ < 0) {
-      Close(ConnectionCloseReason::SocketError);
+      Close(ServerConnectionCloseReason::SocketError);
       co_return;
     }
 
@@ -105,9 +104,9 @@ auto TcpConnection::Run() -> runtime::Task<void> {
  * @param feed Result from `RpcFrameStream::FeedBytes()`.
  * @return true when the connection can continue reading.
  */
-auto TcpConnection::HandleFeedResult(FrameStreamFeedResult &&feed) -> bool {
+auto ServerConnection::HandleFeedResult(FrameStreamFeedResult &&feed) -> bool {
   if (feed.closed_) {
-    Close(ConnectionCloseReason::ProtocolError);
+    Close(ServerConnectionCloseReason::ProtocolError);
     return false;
   }
 
@@ -122,8 +121,7 @@ auto TcpConnection::HandleFeedResult(FrameStreamFeedResult &&feed) -> bool {
   std::vector<RawRequest> requests;
   requests.reserve(request_count);
   const bool accepted_all = feed.requests_.ConsumeEach([this, &requests](RawRequest request) {
-    if (pending_dispatch_jobs_ + requests.size() >= limits_.max_inflight_) {
-      backpressure_stats_->RecordInflightRejection();
+    if (inflight_requests_ + requests.size() >= limits_.max_inflight_) {
       return RejectRequestDueToBackpressure(std::move(request), "server per-connection in-flight limit exceeded");
     }
     requests.push_back(std::move(request));
@@ -143,7 +141,7 @@ auto TcpConnection::HandleFeedResult(FrameStreamFeedResult &&feed) -> bool {
  *
  * @param reason First close reason to record for diagnostics.
  */
-void TcpConnection::Close(ConnectionCloseReason reason) {
+void ServerConnection::Close(ServerConnectionCloseReason reason) {
   if (closed_) {
     return;
   }
@@ -163,7 +161,7 @@ void TcpConnection::Close(ConnectionCloseReason reason) {
 /**
  * @brief Stops the read side and keeps the connection alive until admitted responses are written.
  */
-void TcpConnection::BeginDrain() {
+void ServerConnection::BeginDrain() {
   if (closed_ || draining_) {
     return;
   }
@@ -182,7 +180,7 @@ void TcpConnection::BeginDrain() {
  * @param response_bytes One or more encoded response frames.
  * @param completed_jobs Number of logical requests completed by the worker batch.
  */
-void TcpConnection::OnEncodedDispatchComplete(std::string &&response_bytes, std::size_t completed_jobs) {
+void ServerConnection::OnEncodedDispatchComplete(std::string &&response_bytes, std::size_t completed_jobs) {
   ReleaseDispatchJobs(completed_jobs);
   TouchActivity();
   if (closed_) {
@@ -192,7 +190,7 @@ void TcpConnection::OnEncodedDispatchComplete(std::string &&response_bytes, std:
   try {
     (void)EnqueueWrite(std::move(response_bytes));
   } catch (...) {
-    Close(ConnectionCloseReason::ProtocolError);
+    Close(ServerConnectionCloseReason::ProtocolError);
   }
   TryFinishAfterReadClosed();
 }
@@ -202,9 +200,9 @@ void TcpConnection::OnEncodedDispatchComplete(std::string &&response_bytes, std:
  *
  * @param completed_jobs Number of logical requests removed from in-flight accounting.
  */
-void TcpConnection::OnDispatchEncodeFailure(std::size_t completed_jobs) {
+void ServerConnection::OnDispatchEncodeFailure(std::size_t completed_jobs) {
   ReleaseDispatchJobs(completed_jobs);
-  Close(ConnectionCloseReason::ProtocolError);
+  Close(ServerConnectionCloseReason::ProtocolError);
   TryFinishAfterReadClosed();
 }
 
@@ -213,12 +211,12 @@ void TcpConnection::OnDispatchEncodeFailure(std::size_t completed_jobs) {
  *
  * @param completed_jobs Number of logical dispatch jobs completed or failed.
  */
-void TcpConnection::ReleaseDispatchJobs(std::size_t completed_jobs) {
-  if (pending_dispatch_jobs_ >= completed_jobs) {
-    pending_dispatch_jobs_ -= completed_jobs;
+void ServerConnection::ReleaseDispatchJobs(std::size_t completed_jobs) {
+  if (inflight_requests_ >= completed_jobs) {
+    inflight_requests_ -= completed_jobs;
     return;
   }
-  pending_dispatch_jobs_ = 0;
+  inflight_requests_ = 0;
 }
 
 /**
@@ -227,7 +225,7 @@ void TcpConnection::ReleaseDispatchJobs(std::size_t completed_jobs) {
  * @param bytes Encoded response frame bytes.
  * @return true when bytes were queued, false when the connection is already closed or backpressured.
  */
-auto TcpConnection::EnqueueWrite(std::string bytes) -> bool {
+auto ServerConnection::EnqueueWrite(std::string bytes) -> bool {
   if (closed_) {
     return false;
   }
@@ -254,16 +252,14 @@ auto TcpConnection::EnqueueWrite(std::string bytes) -> bool {
  * @param bytes Number of bytes about to be queued.
  * @return true when the reservation succeeds, false after closing for backpressure.
  */
-auto TcpConnection::TryReserveWriteBytes(std::size_t bytes) -> bool {
+auto ServerConnection::TryReserveWriteBytes(std::size_t bytes) -> bool {
   if (pending_write_bytes_ > limits_.max_write_queue_bytes_ ||
       bytes > limits_.max_write_queue_bytes_ - pending_write_bytes_) {
-    backpressure_stats_->RecordWriteQueueClosure();
-    Close(ConnectionCloseReason::Backpressure);
+    Close(ServerConnectionCloseReason::Backpressure);
     return false;
   }
 
   pending_write_bytes_ += bytes;
-  backpressure_stats_->ObserveWriteQueueBytes(pending_write_bytes_);
   return true;
 }
 
@@ -272,7 +268,7 @@ auto TcpConnection::TryReserveWriteBytes(std::size_t bytes) -> bool {
  *
  * @param bytes Number of queued bytes represented by the drained frame or batch.
  */
-void TcpConnection::ReleaseWriteBytes(std::size_t bytes) {
+void ServerConnection::ReleaseWriteBytes(std::size_t bytes) {
   if (pending_write_bytes_ >= bytes) {
     pending_write_bytes_ -= bytes;
     return;
@@ -288,7 +284,7 @@ void TcpConnection::ReleaseWriteBytes(std::size_t bytes) {
  *
  * @return Coroutine task completed after the current write drain finishes.
  */
-auto TcpConnection::DrainWriteQueue() -> runtime::Task<void> {
+auto ServerConnection::DrainWriteQueue() -> runtime::Task<void> {
   while (!closed_ && !write_queue_.empty()) {
     std::string frame = std::move(write_queue_.front());
     write_queue_.pop_front();
@@ -311,7 +307,7 @@ auto TcpConnection::DrainWriteQueue() -> runtime::Task<void> {
       const std::string_view remaining(frame.data() + offset, frame.size() - offset);
       const io::IoResult send_result = co_await context_->Send(socket_.fd(), remaining.data(), remaining.size());
       if (send_result.result_ <= 0) {
-        Close(ConnectionCloseReason::SocketError);
+        Close(ServerConnectionCloseReason::SocketError);
         sent = false;
         break;
       }
@@ -341,17 +337,17 @@ auto TcpConnection::DrainWriteQueue() -> runtime::Task<void> {
  * @param requests Requests decoded from one read.
  * @return true when the connection can continue reading.
  */
-auto TcpConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> bool {
+auto ServerConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> bool {
   const std::size_t request_count = requests.size();
   if (request_count == 0) {
     return true;
   }
 
-  std::weak_ptr<TcpConnection> weak_self = weak_from_this();
+  std::weak_ptr<ServerConnection> weak_self = weak_from_this();
   auto request_batch = std::make_shared<std::vector<RawRequest>>(std::move(requests));
   const bool accepted = executor_->TrySubmitBatch(
-      [weak_self, request_batch, request_count]() mutable {
-        std::shared_ptr<TcpConnection> self = weak_self.lock();
+      [weak_self, request_batch, request_count]() mutable -> void {
+        std::shared_ptr<ServerConnection> self = weak_self.lock();
         if (!self) {
           return;
         }
@@ -367,8 +363,9 @@ auto TcpConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> boo
         std::string batch_response_bytes;
         std::size_t successful_jobs = 0;
         bool encode_failed = false;
+
         for (RawRequest &request : *request_batch) {
-          RawResponse response = self->handler_(std::move(request));
+          RawResponse response = self->registry_->Dispatch(std::move(request));
           try {
             batch_response_bytes.append(self->EncodeResponseOnWorker(std::move(response)));
             ++successful_jobs;
@@ -377,12 +374,14 @@ auto TcpConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> boo
             break;
           }
         }
+
         if (successful_jobs > 0) {
           self->dispatch_mailbox_->Submit(DispatchCompletion{.target_connection_ = weak_self,
                                                              .response_bytes_ = std::move(batch_response_bytes),
                                                              .completed_jobs_ = successful_jobs,
                                                              .encode_failed_ = false});
         }
+
         if (encode_failed) {
           self->dispatch_mailbox_->Submit(DispatchCompletion{.target_connection_ = weak_self,
                                                              .completed_jobs_ = request_count - successful_jobs,
@@ -390,6 +389,8 @@ auto TcpConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> boo
         }
       },
       request_count);
+
+  // fail path
   if (!accepted) {
     if (!executor_->accepting_submissions()) {
       BeginDrain();
@@ -402,8 +403,8 @@ auto TcpConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> boo
     }
     return true;
   }
-  pending_dispatch_jobs_ += request_count;
-  backpressure_stats_->ObserveInflight(pending_dispatch_jobs_);
+
+  inflight_requests_ += request_count;
   return true;
 }
 
@@ -414,7 +415,7 @@ auto TcpConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> boo
  * @param message Public failure message.
  * @return true when the rejection response was queued successfully.
  */
-auto TcpConnection::RejectRequestDueToBackpressure(RawRequest &&request, std::string message) -> bool {
+auto ServerConnection::RejectRequestDueToBackpressure(RawRequest &&request, std::string message) -> bool {
   RawResponse response;
   response.request_id_ = request.request_id_;
   response.status_ = {StatusCode::ResourceExhausted, std::move(message)};
@@ -422,7 +423,7 @@ auto TcpConnection::RejectRequestDueToBackpressure(RawRequest &&request, std::st
   try {
     return EnqueueWrite(frame_stream_.EncodeResponse(std::move(response)));
   } catch (...) {
-    Close(ConnectionCloseReason::ProtocolError);
+    Close(ServerConnectionCloseReason::ProtocolError);
     return false;
   }
 }
@@ -433,7 +434,7 @@ auto TcpConnection::RejectRequestDueToBackpressure(RawRequest &&request, std::st
  * @param response Raw response returned by the handler.
  * @return Encoded response frame bytes.
  */
-auto TcpConnection::EncodeResponseOnWorker(RawResponse &&response) const -> std::string {
+auto ServerConnection::EncodeResponseOnWorker(RawResponse &&response) const -> std::string {
   FrameCodec codec(protocol_limits_);
   return codec.EncodeResponse(ToProtocolResponse(std::move(response)));
 }
@@ -443,8 +444,8 @@ auto TcpConnection::EncodeResponseOnWorker(RawResponse &&response) const -> std:
  *
  * @param reason Candidate close reason.
  */
-void TcpConnection::SetClosedReason(ConnectionCloseReason reason) {
-  if (close_reason_ == ConnectionCloseReason::None) {
+void ServerConnection::SetClosedReason(ServerConnectionCloseReason reason) {
+  if (close_reason_ == ServerConnectionCloseReason::None) {
     close_reason_ = reason;
   }
 }
@@ -455,20 +456,20 @@ void TcpConnection::SetClosedReason(ConnectionCloseReason reason) {
  * This covers both client half-close and server-initiated drain while preserving responses for
  * requests that already reached the executor.
  */
-void TcpConnection::TryFinishAfterReadClosed() {
+void ServerConnection::TryFinishAfterReadClosed() {
   if (!read_closed_ || closed_) {
     return;
   }
 
-  if (pending_dispatch_jobs_ == 0 && !write_in_progress_ && write_queue_.empty()) {
-    Close(ConnectionCloseReason::PeerClosed);
+  if (inflight_requests_ == 0 && !write_in_progress_ && write_queue_.empty()) {
+    Close(ServerConnectionCloseReason::PeerClosed);
   }
 }
 
 /**
  * @brief Starts the idle timer coroutine when idle timeouts are enabled.
  */
-void TcpConnection::StartIdleTimerIfNeeded() {
+void ServerConnection::StartIdleTimerIfNeeded() {
   if (idle_timeout_ <= std::chrono::milliseconds::zero() || idle_timer_task_.has_value()) {
     return;
   }
@@ -485,7 +486,7 @@ void TcpConnection::StartIdleTimerIfNeeded() {
  *
  * @return Coroutine task completed when the timer exits or closes the connection.
  */
-auto TcpConnection::RunIdleTimer() -> runtime::Task<void> {
+auto ServerConnection::RunIdleTimer() -> runtime::Task<void> {
   while (!closed_) {
     // The generation avoids resetting or canceling the kernel timeout on every
     // activity; any read/write/dispatch completion changes the observed value.
@@ -496,18 +497,18 @@ auto TcpConnection::RunIdleTimer() -> runtime::Task<void> {
     }
 
     if (activity_generation_ == observed_generation && !HasPendingWork()) {
-      Close(ConnectionCloseReason::IdleTimeout);
+      Close(ServerConnectionCloseReason::IdleTimeout);
       co_return;
     }
   }
 }
 
 /** @brief Marks that connection activity occurred for idle-timeout accounting. */
-void TcpConnection::TouchActivity() noexcept { ++activity_generation_; }
+void ServerConnection::TouchActivity() noexcept { ++activity_generation_; }
 
 /** @return true when dispatch or write state should keep the connection alive. */
-auto TcpConnection::HasPendingWork() const noexcept -> bool {
-  return pending_dispatch_jobs_ > 0 || write_in_progress_ || !write_queue_.empty() || pending_write_bytes_ > 0;
+auto ServerConnection::HasPendingWork() const noexcept -> bool {
+  return inflight_requests_ > 0 || write_in_progress_ || !write_queue_.empty() || pending_write_bytes_ > 0;
 }
 
 }  // namespace xrpc

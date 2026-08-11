@@ -1,4 +1,4 @@
-#include "server/server_runtime_config.h"
+#include "server/server_config.h"
 
 #include <unistd.h>
 
@@ -36,15 +36,14 @@ auto ResolveWorkerThreads(std::size_t worker_threads) -> std::size_t {
 /**
  * @brief Validates public server options and resolves internal runtime configuration.
  *
- * The returned configuration is the shape consumed by `ServerRuntime`, `TcpServer`, worker
- * pool, protocol codec, and optional Consul registration. Later runtime code can rely on all
- * numeric resource limits being non-zero and all optional Consul fields being internally coherent.
+ * Later server code can rely on all numeric resource limits being non-zero and all optional Consul fields being
+ * internally coherent.
  *
  * @param options User-facing server options.
  * @return Normalized server configuration.
  * @throws ConfigException when any option combination is invalid.
  */
-auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerRuntimeConfig {
+auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerConfig {
   if (options.listen_backlog_ == 0) {
     throw ConfigException("RpcServer listen_backlog must be greater than 0");
   }
@@ -82,27 +81,30 @@ auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerRuntimeCon
   } else if (options.consul_address_.empty()) {
     throw ConfigException("RpcServer consul_address must not be empty when service registration is enabled");
   }
-  return ServerRuntimeConfig{
+  return ServerConfig{
       .worker_threads_ = ResolveWorkerThreads(options.worker_threads_),
-      .max_pending_jobs_global_ = options.max_pending_jobs_global_,
-      .transport_ =
-          TcpServerConfig{
-              .listen_backlog_ = static_cast<int>(options.listen_backlog_),
+      .max_pending_jobs_ = options.max_pending_jobs_global_,
+      .backlog_ = static_cast<int>(options.listen_backlog_),
+      .io_threads_ = options.connection_io_threads_,
+      .connection_ =
+          ConnectionConfig{
               .backpressure_limits_ =
                   ConnectionBackpressureLimits{
                       .max_inflight_ = options.max_inflight_per_connection_,
                       .max_write_queue_bytes_ = options.max_write_queue_bytes_per_connection_,
                   },
-              .connection_io_threads_ = options.connection_io_threads_,
-              .protocol_limits_ = MakeProtocolLimits(options.max_payload_size_),
-              .connection_idle_timeout_ = options.connection_idle_timeout_,
+              .idle_timeout_ = options.connection_idle_timeout_,
           },
-      .service_name_ = options.service_name_,
-      .service_id_ = options.service_id_,
-      .service_address_ = options.service_address_,
-      .service_port_ = options.service_port_,
-      .consul_address_ = options.consul_address_,
-      .consul_timeout_ = options.consul_timeout_,
+      .protocol_limits_ = MakeProtocolLimits(options.max_payload_size_),
+      .consul_ =
+          ConsulRegistrationConfig{
+              .service_name_ = options.service_name_,
+              .service_id_ = options.service_id_,
+              .service_address_ = options.service_address_,
+              .service_port_ = options.service_port_,
+              .agent_address_ = options.consul_address_,
+              .timeout_ = options.consul_timeout_,
+          },
   };
 }
 
@@ -112,7 +114,7 @@ auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerRuntimeCon
  * @param config Normalized server configuration.
  * @return true when a non-empty service name enables registration.
  */
-auto ServiceRegistrationEnabled(const ServerRuntimeConfig &config) -> bool { return !config.service_name_.empty(); }
+auto ServiceRegistrationEnabled(const ServerConfig &config) -> bool { return !config.consul_.service_name_.empty(); }
 
 /**
  * @brief Builds the final Consul registrar options after the listen socket is bound.
@@ -127,18 +129,18 @@ auto ServiceRegistrationEnabled(const ServerRuntimeConfig &config) -> bool { ret
  * @throws LifecycleException when service registration is disabled.
  * @throws ConfigException when the advertised address or port cannot be derived safely.
  */
-auto ResolveRegistrarOptions(const ServerRuntimeConfig &config, std::string_view host, std::uint16_t listen_port)
+auto ResolveRegistrarOptions(const ServerConfig &config, std::string_view host, std::uint16_t listen_port)
     -> ConsulRegistrar::Options {
   if (!ServiceRegistrationEnabled(config)) {
     throw LifecycleException("service registration is not enabled");
   }
 
-  const std::uint16_t service_port = config.service_port_ == 0 ? listen_port : config.service_port_;
+  const std::uint16_t service_port = config.consul_.service_port_ == 0 ? listen_port : config.consul_.service_port_;
   if (service_port != listen_port) {
     throw ConfigException("service_port must equal listening port in phase one");
   }
 
-  std::string service_address = config.service_address_;
+  std::string service_address = config.consul_.service_address_;
   if (service_address.empty()) {
     if (host.empty() || IsWildcardAddress(host)) {
       throw ConfigException("service_address is required when listen host is wildcard");
@@ -146,18 +148,18 @@ auto ResolveRegistrarOptions(const ServerRuntimeConfig &config, std::string_view
     service_address = std::string(host);
   }
 
-  std::string service_id = config.service_id_;
+  std::string service_id = config.consul_.service_id_;
   if (service_id.empty()) {
-    service_id = config.service_name_ + "_" + service_address + "_" + std::to_string(service_port) + "_" +
+    service_id = config.consul_.service_name_ + "_" + service_address + "_" + std::to_string(service_port) + "_" +
                  std::to_string(static_cast<std::int64_t>(::getpid()));
   }
 
   return ConsulRegistrar::Options{
-      .service_name_ = config.service_name_,
+      .service_name_ = config.consul_.service_name_,
       .service_id_ = std::move(service_id),
       .service_address_ = std::move(service_address),
       .service_port_ = service_port,
-      .timeout_ = config.consul_timeout_,
+      .timeout_ = config.consul_.timeout_,
   };
 }
 

@@ -41,15 +41,13 @@ set(XRPC_SOURCES
     naming/consul_resolver.cpp
     naming/consul_registrar.cpp
     server/service_registry.cpp
-    server/server_runtime_config.cpp
-    server/server_runtime.cpp
+    server/server_config.cpp
     server/rpc_frame_stream.cpp
     server/rpc_server.cpp
     server/connection_io_loop.cpp
     server/dispatch_mailbox.cpp
     server/thread_pool_executor.cpp
-    server/tcp_connection.cpp
-    server/tcp_server.cpp
+    server/server_connection.cpp
 )
 
 add_library(xrpc STATIC ${XRPC_SOURCES} $<TARGET_OBJECTS:xrpc_proto>)

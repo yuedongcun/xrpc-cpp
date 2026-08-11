@@ -2,7 +2,7 @@
 
 #include <utility>
 
-#include "server/tcp_connection.h"
+#include "server/server_connection.h"
 
 namespace xrpc {
 
@@ -62,7 +62,7 @@ void DispatchMailbox::Disable() {
 /**
  * @brief Drains queued worker completions on the owning io_uring context thread.
  *
- * This method invokes `TcpConnection` callbacks without holding the mailbox mutex so workers can keep
+ * This method invokes `ServerConnection` callbacks without holding the mailbox mutex so workers can keep
  * submitting completions while connection code enqueues response bytes.
  */
 void DispatchMailbox::DrainOnContext() {
@@ -80,7 +80,7 @@ void DispatchMailbox::DrainOnContext() {
     }
 
     for (DispatchCompletion &completion : drain_completions_) {
-      std::shared_ptr<TcpConnection> connection = completion.target_connection_.lock();
+      std::shared_ptr<ServerConnection> connection = completion.target_connection_.lock();
       if (!connection) {
         continue;
       }

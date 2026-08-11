@@ -152,18 +152,6 @@ auto main(int argc, char **argv) -> int {
       server_thread.join();
     }
 
-    const xrpc::RpcServerStats stats = server.stats();
-    std::printf(
-        "backpressure rejected_inflight=%llu rejected_global_pending=%llu closed_write_queue=%llu "
-        "max_inflight=%llu max_write_queue_bytes=%llu\n",
-        static_cast<unsigned long long>(stats.rejected_by_inflight_limit_),
-        static_cast<unsigned long long>(stats.rejected_by_global_pending_limit_),
-        static_cast<unsigned long long>(stats.closed_by_write_queue_high_watermark_),
-        static_cast<unsigned long long>(stats.max_observed_inflight_),
-        static_cast<unsigned long long>(stats.max_observed_write_queue_bytes_));
-    std::printf("worker_queue max_depth=%llu\n",
-                static_cast<unsigned long long>(stats.max_observed_worker_queue_depth_));
-    std::fflush(stdout);
     return 0;
   } catch (const std::exception &ex) {
     std::fprintf(stderr, "%s\n%s\n", ex.what(), xrpc::benchmark::Usage(argv[0]).c_str());

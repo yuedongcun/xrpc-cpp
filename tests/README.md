@@ -9,7 +9,7 @@
 - `common/task_test.cpp`
 - `io/uring_awaitable_test.cpp`
 - `protocol/protocol_test.cpp`
-- `server/tcp_connection_io_uring_test.cpp`
+- `server/server_connection_io_uring_test.cpp`
 - `server/rpc_frame_stream_test.cpp`
 - `server/rpc_server_lifecycle_test.cpp`
 - `client/endpoint_selector_test.cpp`

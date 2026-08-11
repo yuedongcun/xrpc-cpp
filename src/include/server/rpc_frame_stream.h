@@ -68,7 +68,7 @@ struct FrameStreamFeedResult {
  * @brief Per-connection framing state for decoding requests and encoding responses over a TCP byte stream.
  *
  * The frame stream owns one byte buffer and one request-header decode cache, so callers must feed bytes from only one
- * TCP stream. It is not synchronized; the owning `TcpConnection` keeps access on the event-loop thread.
+ * TCP stream. It is not synchronized; the owning `ServerConnection` keeps access on the event-loop thread.
  */
 class RpcFrameStream final {
  public:

@@ -325,7 +325,7 @@ TEST(RpcServerLifecycleTest, RejectsNegativeConnectionIdleTimeoutAtConstruction)
   EXPECT_EQ(result.status().code(), xrpc::StatusCode::InvalidArgument);
 }
 
-TEST(RpcServerLifecycleTest, PublicStatsExposePerConnectionInflightBackpressure) {
+TEST(RpcServerLifecycleTest, PerConnectionInflightLimitReturnsResourceExhausted) {
   xrpc::RpcServerOptions options;
   options.worker_threads_ = 1;
   options.max_inflight_per_connection_ = 1;
@@ -370,24 +370,15 @@ TEST(RpcServerLifecycleTest, PublicStatsExposePerConnectionInflightBackpressure)
     ASSERT_TRUE(decoded.response_.has_value());
     EXPECT_EQ(decoded.response_->request_id_, 2U);
     EXPECT_EQ(decoded.response_->error_code_, static_cast<std::int32_t>(xrpc::StatusCode::ResourceExhausted));
-    const xrpc::RpcServerStats stats = server.stats();
-    EXPECT_EQ(stats.rejected_by_inflight_limit_, 1U);
-    EXPECT_EQ(stats.rejected_by_global_pending_limit_, 0U);
   }
 
   release_handler.set_value();
   client_socket.Close();
   server.Stop();
   run_thread.join();
-
-  const xrpc::RpcServerStats stats = server.stats();
-  EXPECT_EQ(stats.rejected_by_inflight_limit_, 1U);
-  EXPECT_EQ(stats.rejected_by_global_pending_limit_, 0U);
-  EXPECT_EQ(stats.closed_by_write_queue_high_watermark_, 0U);
-  EXPECT_GE(stats.max_observed_inflight_, 1U);
 }
 
-TEST(RpcServerLifecycleTest, PublicStatsExposeGlobalPendingBackpressure) {
+TEST(RpcServerLifecycleTest, GlobalPendingLimitReturnsResourceExhausted) {
   xrpc::RpcServerOptions options;
   options.worker_threads_ = 1;
   options.max_pending_jobs_global_ = 1;
@@ -452,8 +443,4 @@ TEST(RpcServerLifecycleTest, PublicStatsExposeGlobalPendingBackpressure) {
 
   server.Stop();
   run_thread.join();
-
-  const xrpc::RpcServerStats stats = server.stats();
-  EXPECT_EQ(stats.rejected_by_inflight_limit_, 0U);
-  EXPECT_EQ(stats.rejected_by_global_pending_limit_, 1U);
 }

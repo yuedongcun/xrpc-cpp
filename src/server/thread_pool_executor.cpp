@@ -1,30 +1,11 @@
 #include "server/thread_pool_executor.h"
 
-#include <cstdint>
 #include <stdexcept>
 #include <utility>
 
 #include "common/xrpc_exception.h"
 
 namespace xrpc {
-namespace {
-
-/**
- * @brief Atomically records the maximum observed value.
- *
- * @param maximum Relaxed diagnostic counter to update.
- * @param value Candidate maximum value.
- */
-void ObserveMaximum(std::atomic<std::uint64_t> &maximum, std::size_t value) {
-  std::uint64_t observed = maximum.load(std::memory_order_relaxed);
-  const auto candidate = static_cast<std::uint64_t>(value);
-  while (observed < candidate &&
-         !maximum.compare_exchange_weak(observed, candidate, std::memory_order_relaxed, std::memory_order_relaxed)) {
-  }
-}
-
-}  // namespace
-
 /**
  * @brief Starts a fixed-size worker pool with a global pending logical-job limit.
  *
@@ -89,7 +70,6 @@ auto ThreadPoolExecutor::TrySubmitBatch(std::function<void()> job, std::size_t l
     }
     queue.jobs_.push(WorkerJob{.run_ = std::move(job), .logical_jobs_ = logical_jobs});
     const std::size_t queue_depth = queue.pending_jobs_.fetch_add(1, std::memory_order_relaxed) + 1;
-    ObserveMaximum(max_observed_worker_queue_depth_, queue_depth);
   } catch (...) {
     ReleasePendingJobs(logical_jobs);
     throw;
@@ -111,14 +91,6 @@ void ThreadPoolExecutor::CloseSubmissions() noexcept {
 /** @return true while new jobs may still be admitted. */
 auto ThreadPoolExecutor::accepting_submissions() const noexcept -> bool {
   return accepting_submissions_.load(std::memory_order_acquire);
-}
-
-/** @return Snapshot of worker-pool counters used by server diagnostics. */
-auto ThreadPoolExecutor::stats() const -> ThreadPoolExecutorSnapshot {
-  return ThreadPoolExecutorSnapshot{
-      .rejected_by_pending_limit_ = rejected_by_pending_limit_.load(std::memory_order_relaxed),
-      .max_observed_worker_queue_depth_ = max_observed_worker_queue_depth_.load(std::memory_order_relaxed),
-  };
 }
 
 /**
@@ -159,7 +131,6 @@ auto ThreadPoolExecutor::TryReservePendingJobs(std::size_t logical_jobs) -> std:
   std::size_t pending = pending_jobs_.load(std::memory_order_relaxed);
   while (true) {
     if (pending > max_pending_jobs_ || logical_jobs > max_pending_jobs_ - pending) {
-      rejected_by_pending_limit_.fetch_add(logical_jobs, std::memory_order_relaxed);
       return std::nullopt;
     }
     if (pending_jobs_.compare_exchange_weak(pending, pending + logical_jobs, std::memory_order_acq_rel,

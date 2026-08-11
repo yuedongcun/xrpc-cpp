@@ -66,33 +66,6 @@ struct RpcServerOptions {
 };
 
 /**
- * @brief Snapshot of server-side resource guard and worker-pool diagnostics.
- *
- * Counters are monotonic diagnostics, except `max_*` fields which record high-water marks observed since server
- * construction. The values are intended for tests and operational debugging; they are not synchronization
- * primitives.
- */
-struct RpcServerStats {
-  /** @brief Requests rejected because one connection exceeded its in-flight job limit. */
-  std::uint64_t rejected_by_inflight_limit_ = 0;
-
-  /** @brief Logical RPC jobs rejected because the worker pool exceeded its global pending-job limit. */
-  std::uint64_t rejected_by_global_pending_limit_ = 0;
-
-  /** @brief Connections closed after their queued response bytes exceeded the configured watermark. */
-  std::uint64_t closed_by_write_queue_high_watermark_ = 0;
-
-  /** @brief Highest per-connection in-flight job count observed. */
-  std::uint64_t max_observed_inflight_ = 0;
-
-  /** @brief Highest queued response byte count observed on one connection. */
-  std::uint64_t max_observed_write_queue_bytes_ = 0;
-
-  /** @brief Highest physical task depth observed on one worker queue. */
-  std::uint64_t max_observed_worker_queue_depth_ = 0;
-};
-
-/**
  * @brief Synchronous RPC server facade that owns the listening runtime and method registry.
  *
  * `RpcServer` is move-only because it owns event loops, worker threads, accepted sockets, and optional Consul
@@ -170,19 +143,16 @@ class RpcServer final {
   /** @return The bound TCP port after `Listen()` succeeds. */
   [[nodiscard]] auto port() const -> StatusOr<std::uint16_t>;
 
-  /** @return A point-in-time snapshot of server resource guard diagnostics. */
-  [[nodiscard]] auto stats() const -> RpcServerStats;
-
  private:
-  class ServerRuntime;
+  class Impl;
 
-  /** @brief Creates a facade from a successfully constructed private runtime. */
-  explicit RpcServer(std::unique_ptr<ServerRuntime> runtime);
+  /** @brief Creates a facade from a successfully constructed implementation. */
+  explicit RpcServer(std::unique_ptr<Impl> impl);
 
   /** @brief Registers one type-erased method descriptor with the private runtime. */
   [[nodiscard]] auto RegisterMethod(MethodRegistration registration) -> Status;
 
-  std::unique_ptr<ServerRuntime> runtime_;
+  std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace xrpc

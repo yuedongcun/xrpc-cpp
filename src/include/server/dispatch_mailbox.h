@@ -10,21 +10,21 @@
 
 namespace xrpc {
 
-class TcpConnection;
+class ServerConnection;
 
 /**
  * @brief Method-dispatch completion produced by a worker thread.
  *
  * Design note:
- * - Ownership: `TcpConnection` holds a shared mailbox; worker completions hold weak connection references so closed
+ * - Ownership: `ServerConnection` holds a shared mailbox; worker completions hold weak connection references so closed
  *   connections can disappear safely.
  * - Threading: workers call `Submit()`, which posts one drain callback onto the `UringContext` thread; only that drain
- *   touches `TcpConnection` state.
+ *   touches `ServerConnection` state.
  * - Batching: multiple worker completions are drained together to avoid posting one event-loop callback per RPC.
  */
 struct DispatchCompletion {
   /** @brief Weak connection reference; expired means the connection closed before completion. */
-  std::weak_ptr<TcpConnection> target_connection_;
+  std::weak_ptr<ServerConnection> target_connection_;
 
   /** @brief Encoded response bytes ready to enqueue on the connection. */
   std::string response_bytes_;
