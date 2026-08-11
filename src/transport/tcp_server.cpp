@@ -2,6 +2,7 @@
 
 #include <fcntl.h>
 #include <cassert>
+#include <exception>
 #include <memory>
 #include <utility>
 
@@ -16,17 +17,15 @@ namespace xrpc {
 /**
  * @brief Creates a TCP server from normalized transport settings.
  *
- * The accept loop runs on `accept_context`; accepted sockets are handed to a connection I/O loop group so
- * request parsing, writes, and idle cleanup can be spread across event-loop threads.
+ * Accepted sockets are handed to a connection I/O loop group so request parsing, writes, and idle cleanup can be
+ * spread across event-loop threads.
  *
- * @param accept_context Accept-loop io_uring context.
  * @param handler Raw RPC handler invoked by connections.
  * @param executor Worker pool used for request dispatch.
  * @param config Listener and connection transport settings.
  */
-TcpServer::TcpServer(io::UringContext &accept_context, RawHandler handler, ThreadPoolExecutor &executor,
-                     TcpServerConfig config)
-    : accept_context_(&accept_context), config_(config) {
+TcpServer::TcpServer(const RawHandler &handler, ThreadPoolExecutor &executor, TcpServerConfig config)
+    : config_(config) {
   assert(config_.listen_backlog_ > 0);
   assert(config_.connection_io_threads_ > 0);
   connection_io_loop_group_ = std::make_unique<ConnectionIoLoopGroup>(
@@ -54,41 +53,63 @@ void TcpServer::Listen(std::string_view host, std::uint16_t port) {
 }
 
 /**
- * @brief Accepts clients until `Stop()` cancels the listening socket.
- *
- * @return Coroutine task completed after the connection-loop group stops.
- * @throws LifecycleException when called before `Listen()`.
+ * @brief Publishes the accept coroutine onto the owned context.
  */
-auto TcpServer::Run() -> runtime::Task<void> {
+void TcpServer::Start() {
   if (!listen_socket_.valid()) {
-    throw LifecycleException("TcpServer::Run called before Listen");
+    throw LifecycleException("TcpServer::Start called before Listen");
+  }
+  if (accept_task_.has_value()) {
+    throw LifecycleException("TcpServer::Start called more than once");
   }
 
-  accept_stopped_ = false;
-  connection_io_loop_group_->Start();
+  accept_task_.emplace(AcceptLoop());
+  accept_context_.Post([this]() { accept_task_->Start(); });
+}
 
-  while (!accept_stopped_) {
-    const io::IoResult accept_result = co_await accept_context_->Accept(listen_socket_.fd());
+/** @brief Runs the owned accept context and propagates accept-loop failures. */
+void TcpServer::Run() {
+  if (!accept_task_.has_value()) {
+    throw LifecycleException("TcpServer::Run called before Start");
+  }
 
-    if (accept_result.result_ < 0) {
-      if (!accept_stopped_) {
-        StopAccepting();
+  accept_context_.Run();
+  accept_task_->Wait();
+  accept_task_->Result();
+}
+
+/** @brief Posts accept shutdown onto the owned event-loop thread. */
+void TcpServer::RequestStopAccepting() {
+  accept_context_.Post([this]() { StopAccepting(); });
+}
+
+/** @brief Accepts clients until the listening socket is stopped or accept fails. */
+auto TcpServer::AcceptLoop() -> runtime::Task<void> {
+  try {
+    accept_stopped_ = false;
+    connection_io_loop_group_->Start();
+
+    while (!accept_stopped_) {
+      const io::IoResult accept_result = co_await accept_context_.Accept(listen_socket_.fd());
+
+      if (accept_result.result_ < 0) {
+        if (!accept_stopped_) {
+          StopAccepting();
+        }
+        break;
       }
-      break;
+
+      io::Socket client_socket(accept_result.result_);
+      SetSocketFlags(client_socket.fd());
+      connection_io_loop_group_->Dispatch(std::move(client_socket));
     }
 
-    io::Socket client_socket(accept_result.result_);
-    SetSocketFlags(client_socket.fd());
-    connection_io_loop_group_->Dispatch(std::move(client_socket));
-  }
-
-  try {
     BeginDrain();
   } catch (...) {
-    accept_context_->Stop();
+    accept_context_.Stop();
     throw;
   }
-  accept_context_->Stop();
+  accept_context_.Stop();
 }
 
 /**
@@ -103,7 +124,7 @@ void TcpServer::StopAccepting() {
   }
 
   accept_stopped_ = true;
-  accept_context_->CancelFd(listen_socket_.fd());
+  accept_context_.CancelFd(listen_socket_.fd());
   listen_socket_.Close();
 }
 
@@ -112,8 +133,25 @@ void TcpServer::BeginDrain() { connection_io_loop_group_->BeginDrain(); }
 
 /** @brief Waits for accepted responses to drain before stopping connection loops. */
 void TcpServer::FinishDrain() {
-  connection_io_loop_group_->FinishDrain();
-  connection_io_loop_group_->RethrowIfFailed();
+  std::exception_ptr failure;
+  try {
+    connection_io_loop_group_->FinishDrain();
+    connection_io_loop_group_->RethrowIfFailed();
+  } catch (...) {
+    failure = std::current_exception();
+  }
+
+  try {
+    accept_context_.Stop();
+  } catch (...) {
+    if (!failure) {
+      failure = std::current_exception();
+    }
+  }
+
+  if (failure) {
+    std::rethrow_exception(failure);
+  }
 }
 
 /**

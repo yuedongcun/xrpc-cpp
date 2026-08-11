@@ -19,13 +19,13 @@ auto MakeDispatchHandler(ServiceRegistry &registry) -> RawHandler {
 /**
  * @brief Builds all server runtime components from normalized options.
  *
- * The runtime wires the registry into `TcpServer` through a raw handler, while the TCP server owns connection I/O
- * and the executor owns method-dispatch worker threads.
+ * The runtime wires the registry into `TcpServer` through a raw handler. The TCP server owns transport I/O, while the
+ * executor owns method-dispatch worker threads.
  */
 RpcServer::ServerRuntime::ServerRuntime(const RpcServerOptions &options)
     : config_(NormalizeServerOptions(options)),
       executor_(config_.worker_threads_, config_.max_pending_jobs_global_),
-      server_(accept_context_, MakeDispatchHandler(registry_), executor_, config_.transport_) {}
+      server_(MakeDispatchHandler(registry_), executor_, config_.transport_) {}
 
 /** @brief Stops an unstarted runtime or waits for an active Run() coordinator. */
 RpcServer::ServerRuntime::~ServerRuntime() {
@@ -102,8 +102,7 @@ void RpcServer::ServerRuntime::Run() {
     }
 
     try {
-      server_task_.emplace(server_.Run());
-      StartServerTaskOnAcceptContext();
+      server_.Start();
     } catch (...) {
       ShutdownComponentsBestEffort();
       state_ = State::Stopped;
@@ -115,9 +114,7 @@ void RpcServer::ServerRuntime::Run() {
 
   std::exception_ptr failure;
   try {
-    accept_context_.Run();
-    server_task_->Wait();
-    server_task_->Result();
+    server_.Run();
   } catch (...) {
     failure = std::current_exception();
   }
@@ -149,7 +146,7 @@ void RpcServer::ServerRuntime::Stop() {
     case State::Running:
       state_ = State::Stopping;
       executor_.CloseSubmissions();
-      RequestServerStopOnAcceptContext();
+      server_.RequestStopAccepting();
       return;
 
     case State::Stopping:
@@ -239,7 +236,6 @@ void RpcServer::ServerRuntime::ShutdownComponents() {
   (void)TryDeregisterService();
   attempt([this]() { executor_.Stop(); });
   attempt([this]() { server_.FinishDrain(); });
-  attempt([this]() { accept_context_.Stop(); });
 
   if (failure) {
     std::rethrow_exception(failure);
@@ -267,20 +263,6 @@ auto RpcServer::ServerRuntime::TryDeregisterService() noexcept -> Status {
   } catch (...) {
     return CaughtExceptionToStatus("Consul service deregistration failed");
   }
-}
-
-/**
- * @brief Posts accept coroutine startup onto the event-loop thread.
- */
-void RpcServer::ServerRuntime::StartServerTaskOnAcceptContext() {
-  accept_context_.Post([this]() { server_task_->Start(); });
-}
-
-/**
- * @brief Posts TCP server stop onto the event-loop thread.
- */
-void RpcServer::ServerRuntime::RequestServerStopOnAcceptContext() {
-  accept_context_.Post([this]() { server_.StopAccepting(); });
 }
 
 }  // namespace xrpc

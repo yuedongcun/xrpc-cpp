@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string_view>
 
 #include "common/task.h"
@@ -30,14 +31,13 @@ struct TcpServerConfig {
 /**
  * @brief Accept loop for the listening socket.
  *
- * Accepted sockets are handed to a `ConnectionIoLoopGroup` so connection I/O can scale independently of accept. The
- * server itself owns the listening socket, shared stats, and connection-loop group; each accepted connection owns its
- * socket after dispatch.
+ * The server owns the accept context and coroutine, listening socket, shared stats, and connection-loop group.
+ * Accepted sockets are handed to a connection I/O loop so connection processing can scale independently of accept.
  */
 class TcpServer final {
  public:
-  /** @brief Creates a server from its accept context, request handler, executor, and transport config. */
-  TcpServer(io::UringContext &accept_context, RawHandler handler, ThreadPoolExecutor &executor, TcpServerConfig config);
+  /** @brief Creates a TCP runtime from its request handler, executor, and transport config. */
+  TcpServer(const RawHandler &handler, ThreadPoolExecutor &executor, TcpServerConfig config);
 
   /** @brief Stops accepting and closes connection loops before destroying state. */
   ~TcpServer();
@@ -51,8 +51,14 @@ class TcpServer final {
   /** @brief Binds and starts listening on the server socket. */
   void Listen(std::string_view host, std::uint16_t port);
 
-  /** @brief Runs the accept loop until accepting is stopped or accept fails. */
-  [[nodiscard]] auto Run() -> runtime::Task<void>;
+  /** @brief Publishes the accept coroutine before the runtime enters its blocking loop. */
+  void Start();
+
+  /** @brief Drives the owned accept context until accepting stops or fails. */
+  void Run();
+
+  /** @brief Posts an accept-stop request from another thread. */
+  void RequestStopAccepting();
 
   /** @brief Stops accepting new connections without stopping connection I/O loops. */
   void StopAccepting();
@@ -70,11 +76,17 @@ class TcpServer final {
   [[nodiscard]] auto stats() const -> ServerBackpressureSnapshot { return backpressure_stats_.Snapshot(); }
 
  private:
+  /** @brief Accepts sockets and dispatches them to connection I/O loops. */
+  [[nodiscard]] auto AcceptLoop() -> runtime::Task<void>;
+
   /** @brief Applies non-blocking and close-on-exec flags to an accepted socket. */
   void SetSocketFlags(int fd) const;
 
-  /** @brief Context that owns the accept coroutine. */
-  io::UringContext *accept_context_;
+  /** @brief Event-loop runtime dedicated to accepting TCP connections. */
+  io::UringContext accept_context_;
+
+  /** @brief Accept coroutine driven by `accept_context_`. */
+  std::optional<runtime::Task<void>> accept_task_;
 
   /** @brief Transport settings used by the listener and accepted connections. */
   TcpServerConfig config_;

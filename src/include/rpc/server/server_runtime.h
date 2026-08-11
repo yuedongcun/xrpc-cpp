@@ -4,14 +4,11 @@
 #include <cstddef>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <string>
 #include <string_view>
 
 #include <xrpc/rpc_server.h>
 
-#include "common/task.h"
-#include "io/uring_context.h"
 #include "rpc/naming/consul_registrar.h"
 #include "rpc/raw_message.h"
 #include "rpc/server/server_runtime_config.h"
@@ -25,8 +22,8 @@ namespace xrpc {
  * @brief Private server runtime owned by the public `RpcServer` facade.
  *
  * Design note:
- * - Ownership: `RpcServer` owns this runtime; the runtime owns the registry, accept loop, worker pool, TCP server,
- *   and optional Consul registrar.
+ * - Ownership: `RpcServer` owns this runtime; the runtime owns the registry, worker pool, TCP transport runtime, and
+ *   optional Consul registrar.
  * - State: public lifecycle methods are serialized and checked against `State`.
  * - Threading: accept and connection I/O stay on their io_uring loops, while handlers run on `ThreadPoolExecutor`.
  * - Shutdown: before `Run()`, `Stop()` closes the runtime directly; while running, `Run()` owns graceful drain and
@@ -83,18 +80,10 @@ class RpcServer::ServerRuntime final {
   /** @brief Deregisters the Consul service if one was registered. */
   [[nodiscard]] auto TryDeregisterService() noexcept -> Status;
 
-  /** @brief Starts the TCP accept coroutine on the accept context. */
-  void StartServerTaskOnAcceptContext();
-
-  /** @brief Posts TCP server stop onto the accept context. */
-  void RequestServerStopOnAcceptContext();
-
   ServerRuntimeConfig config_;
   ServiceRegistry registry_;
-  io::UringContext accept_context_;
   ThreadPoolExecutor executor_;
   TcpServer server_;
-  std::optional<runtime::Task<void>> server_task_;
   std::unique_ptr<ConsulRegistrar> registrar_;
   std::mutex lifecycle_mutex_;
   std::condition_variable lifecycle_cv_;
