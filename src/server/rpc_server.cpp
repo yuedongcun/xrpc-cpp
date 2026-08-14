@@ -235,7 +235,7 @@ auto RpcServer::Impl::AcceptLoop() -> runtime::Task<void> {
 }
 
 void RpcServer::Impl::RequestStopAccepting() {
-  accept_context_.Post([this]() { StopAccepting(); });
+  accept_context_.Post([this]() -> void { StopAccepting(); });
 }
 
 void RpcServer::Impl::StopAccepting() {

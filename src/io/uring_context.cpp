@@ -13,8 +13,8 @@
 
 #include <liburing.h>
 
-#include "io/uring_context_runtime.h"
 #include "common/xrpc_exception.h"
+#include "io/uring_context_runtime.h"
 
 namespace xrpc::io {
 

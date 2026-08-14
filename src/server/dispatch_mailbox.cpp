@@ -36,7 +36,7 @@ void DispatchMailbox::Submit(DispatchCompletion completion) {
   // currently queued, then loop once more for completions submitted meanwhile.
   drain_posted_ = true;
   std::weak_ptr<DispatchMailbox> weak_mailbox = weak_from_this();
-  context_->Post([weak_mailbox]() {
+  context_->Post([weak_mailbox]() -> void {
     std::shared_ptr<DispatchMailbox> mailbox = weak_mailbox.lock();
     if (!mailbox) {
       return;

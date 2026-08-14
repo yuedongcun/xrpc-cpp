@@ -35,7 +35,7 @@ void ConnectionIoLoop::Start() {
   }
 
   started_ = true;
-  thread_ = std::jthread([this]() {
+  thread_ = std::jthread([this]() -> void {
     try {
       context_.Run();
     } catch (...) {
@@ -77,15 +77,15 @@ void ConnectionIoLoop::BeginDrain() {
       return;
     }
     if (drain_requested_) {
-      drain_cv_.wait(lock, [this] { return drain_ready_; });
+      drain_cv_.wait(lock, [this]() -> bool { return drain_ready_; });
       return;
     }
     drain_requested_ = true;
   }
 
-  context_.Post([this]() { BeginDrainOnContext(); });
+  context_.Post([this]() -> void { BeginDrainOnContext(); });
   std::unique_lock lock(drain_mutex_);
-  drain_cv_.wait(lock, [this] { return drain_ready_; });
+  drain_cv_.wait(lock, [this]() -> bool { return drain_ready_; });
 }
 
 /** @brief Waits for admitted work and response writes before stopping the loop. */
@@ -93,16 +93,18 @@ void ConnectionIoLoop::FinishDrain() {
   BeginDrain();
   {
     std::unique_lock lock(drain_mutex_);
-    drain_cv_.wait(lock, [this] { return live_connections_ == 0; });
+    drain_cv_.wait(lock, [this]() -> bool { return live_connections_ == 0; });
   }
 
   if (!started_) {
     return;
   }
   context_.Stop();
+
   if (thread_.joinable()) {
     thread_.join();
   }
+
   dispatch_mailbox_->Disable();
   connections_.clear();
   started_ = false;
@@ -117,7 +119,7 @@ void ConnectionIoLoop::PostStartConnection(io::Socket client_socket) {
   // Post requires a copyable callable. The socket is move-only, so wrap it in a
   // shared holder until the loop thread consumes it.
   auto socket_holder = std::make_shared<io::Socket>(std::move(client_socket));
-  context_.Post([this, socket_holder]() {
+  context_.Post([this, socket_holder]() -> void {
     CleanupClosedConnections();
     StartConnection(std::move(*socket_holder));
   });
@@ -148,9 +150,9 @@ void ConnectionIoLoop::StartConnection(io::Socket client_socket) {
   const ServerConnectionConfig config{.limits_ = limits_, .protocol_limits_ = protocol_limits_};
   std::shared_ptr<ServerConnection> connection;
   try {
-    connection =
-        std::make_shared<ServerConnection>(context_, *registry_, *executor_, *dispatch_mailbox_,
-                                           std::move(client_socket), config, [this]() { OnConnectionClosed(); });
+    connection = std::make_shared<ServerConnection>(context_, *registry_, *executor_, *dispatch_mailbox_,
+                                                    std::move(client_socket), config,
+                                                    [this]() -> void { OnConnectionClosed(); });
   } catch (...) {
     OnConnectionClosed();
     throw;
@@ -162,8 +164,9 @@ void ConnectionIoLoop::StartConnection(io::Socket client_socket) {
 
 /** @brief Removes closed connections whose coroutine tasks have completed. */
 void ConnectionIoLoop::CleanupClosedConnections() {
-  std::erase_if(connections_,
-                [](const ConnectionEntry &entry) { return entry.connection_->IsClosed() && entry.task_.Done(); });
+  std::erase_if(connections_, [](const ConnectionEntry &entry) -> bool {
+    return entry.connection_->IsClosed() && entry.task_.Done();
+  });
 }
 
 /**

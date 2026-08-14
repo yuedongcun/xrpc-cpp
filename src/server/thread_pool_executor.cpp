@@ -184,7 +184,8 @@ void ThreadPoolExecutor::WorkerLoop(WorkerQueue &queue) {
     WorkerJob job;
     {
       std::unique_lock<std::mutex> lock(queue.mutex_);
-      queue.cv_.wait(lock, [this, &queue] { return stopped_.load(std::memory_order_acquire) || !queue.jobs_.empty(); });
+      queue.cv_.wait(
+          lock, [this, &queue]() -> bool { return stopped_.load(std::memory_order_acquire) || !queue.jobs_.empty(); });
       if (stopped_.load(std::memory_order_relaxed) && queue.jobs_.empty()) {
         return;
       }

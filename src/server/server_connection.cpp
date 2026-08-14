@@ -113,14 +113,14 @@ auto ServerConnection::HandleFeedResult(FrameStreamFeedResult &&feed) -> bool {
 
   assert(inflight_requests_ <= limits_.max_inflight_);
   if (request_count > limits_.max_inflight_ - inflight_requests_) {
-    return feed.requests_.ConsumeEach([this](RawRequest request) {
+    return feed.requests_.ConsumeEach([this](RawRequest request) -> bool {
       return RejectRequestDueToBackpressure(std::move(request), "server per-connection in-flight limit exceeded");
     });
   }
 
   std::vector<RawRequest> requests;
   requests.reserve(request_count);
-  [[maybe_unused]] const bool consumed_all = feed.requests_.ConsumeEach([&requests](RawRequest request) {
+  [[maybe_unused]] const bool consumed_all = feed.requests_.ConsumeEach([&requests](RawRequest request) -> bool {
     requests.push_back(std::move(request));
     return true;
   });
