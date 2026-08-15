@@ -27,7 +27,7 @@ enum class RequestCommitState : std::uint8_t {
 /**
  * @brief Transport-level failure plus retry safety metadata.
  *
- * Keeping `commit_state_` with failures lets `ClientChannel` make retry decisions centrally, independent of which
+ * Keeping `commit_state_` with failures lets `RpcClient::Impl` make retry decisions centrally, independent of which
  * transport stage produced the failure.
  */
 struct CallFailure {

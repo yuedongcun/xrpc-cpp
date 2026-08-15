@@ -1,4 +1,4 @@
-#include "naming/consul_registrar.h"
+#include "discovery/consul_registrar.h"
 
 #include <nlohmann/json.hpp>
 

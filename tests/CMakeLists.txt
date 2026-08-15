@@ -53,7 +53,6 @@ xrpc_add_test(protocol_test protocol/protocol_test.cpp TIMEOUT ${XRPC_TEST_UNIT_
 xrpc_add_test(server_connection_io_uring_test server/server_connection_io_uring_test.cpp TIMEOUT ${XRPC_TEST_INTEGRATION_TIMEOUT})
 xrpc_add_test(rpc_frame_stream_test server/rpc_frame_stream_test.cpp TIMEOUT ${XRPC_TEST_UNIT_TIMEOUT})
 xrpc_add_test(rpc_server_lifecycle_test server/rpc_server_lifecycle_test.cpp TIMEOUT ${XRPC_TEST_INTEGRATION_TIMEOUT})
-xrpc_add_test(endpoint_selector_test client/endpoint_selector_test.cpp TIMEOUT ${XRPC_TEST_UNIT_TIMEOUT})
 xrpc_add_test(rpc_client_endpoint_test client/rpc_client_endpoint_test.cpp TIMEOUT ${XRPC_TEST_INTEGRATION_TIMEOUT})
 xrpc_add_test(
     rpc_client_thread_safety_test
@@ -62,8 +61,8 @@ xrpc_add_test(
 )
 
 xrpc_add_test(
-    consul_resolver_integration_test
-    naming/consul_resolver_integration_test.cpp
+    consul_discovery_integration_test
+    discovery/consul_discovery_integration_test.cpp
     TIMEOUT ${XRPC_TEST_EXTERNAL_TIMEOUT}
 )
-set_tests_properties(consul_resolver_integration_test PROPERTIES LABELS external)
+set_tests_properties(consul_discovery_integration_test PROPERTIES LABELS external)

@@ -8,8 +8,8 @@
 #include <thread>
 #include <vector>
 
-#include "naming/consul_http_client.h"
-#include "naming/endpoint_resolver.h"
+#include "discovery/consul_http_client.h"
+#include "discovery/service_discovery.h"
 
 namespace xrpc {
 
@@ -23,7 +23,7 @@ namespace xrpc {
  *   is available.
  * - Failure: failed refreshes keep the previous snapshot and update `last_error_`.
  */
-class ConsulResolver final : public EndpointResolver {
+class ConsulDiscovery final : public ServiceDiscovery {
  public:
   /**
    * @brief Creates a resolver using the default Consul HTTP client.
@@ -32,14 +32,14 @@ class ConsulResolver final : public EndpointResolver {
    * @param consul_address Consul agent host:port.
    * @param refresh_interval Maximum wait/backoff interval between refreshes.
    */
-  ConsulResolver(std::string service_name, const std::string &consul_address,
-                 std::chrono::milliseconds refresh_interval);
+  ConsulDiscovery(std::string service_name, const std::string &consul_address,
+                  std::chrono::milliseconds refresh_interval);
 
   /** @brief Stops the refresh thread before destroying resolver state. */
-  ~ConsulResolver() override;
+  ~ConsulDiscovery() override;
 
-  ConsulResolver(const ConsulResolver &) = delete;
-  auto operator=(const ConsulResolver &) -> ConsulResolver & = delete;
+  ConsulDiscovery(const ConsulDiscovery &) = delete;
+  auto operator=(const ConsulDiscovery &) -> ConsulDiscovery & = delete;
 
   /** @brief Performs the first fetch and starts the background refresh loop. */
   [[nodiscard]] auto Start() -> Status override;

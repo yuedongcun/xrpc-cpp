@@ -31,19 +31,18 @@ set(XRPC_SOURCES
     common/xrpc_exception.cpp
     rpc/protocol_adapter.cpp
     client/client_config.cpp
-    client/endpoint_selector.cpp
-    client/client_channel.cpp
     client/tcp_transport.cpp
-    client/rpc_client_runtime.cpp
+    client/rpc_client_impl.cpp
     client/rpc_client.cpp
-    naming/endpoint_resolver.cpp
-    naming/consul_http_client.cpp
-    naming/consul_resolver.cpp
-    naming/consul_registrar.cpp
+    discovery/service_discovery.cpp
+    discovery/consul_http_client.cpp
+    discovery/consul_discovery.cpp
+    discovery/consul_registrar.cpp
     server/service_registry.cpp
     server/server_config.cpp
     server/rpc_frame_stream.cpp
     server/rpc_server.cpp
+    server/rpc_server_impl.cpp
     server/connection_io_loop.cpp
     server/dispatch_mailbox.cpp
     server/thread_pool_executor.cpp

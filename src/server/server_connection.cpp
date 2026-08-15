@@ -82,8 +82,9 @@ auto ServerConnection::Run() -> runtime::Task<void> {
       co_return;
     }
 
-    if (!HandleFeedResult(
-            frame_stream_.FeedBytes(std::string_view(read_buffer_.data(), recv_result.bytes_transferred_)))) {
+    const std::string_view received_bytes(read_buffer_.data(), recv_result.bytes_transferred_);
+    FrameStreamFeedResult feed_result = frame_stream_.FeedBytes(received_bytes);
+    if (!HandleFeedResult(std::move(feed_result))) {
       co_return;
     }
   }
@@ -315,7 +316,7 @@ auto ServerConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> 
   std::weak_ptr<ServerConnection> weak_self = weak_from_this();
   auto request_batch = std::make_shared<std::vector<RawRequest>>(std::move(requests));
   const bool accepted = executor_->TrySubmitBatch(
-      [weak_self, request_batch]() mutable -> void {
+      [weak_self, request_batch]() -> void {
         std::shared_ptr<ServerConnection> self = weak_self.lock();
         if (!self) {
           return;
@@ -338,6 +339,7 @@ auto ServerConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> 
     return true;
   }
 
+  // success path
   inflight_requests_ += request_count;
   return true;
 }

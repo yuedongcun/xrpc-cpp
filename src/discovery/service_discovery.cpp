@@ -1,4 +1,4 @@
-#include "naming/endpoint_resolver.h"
+#include "discovery/service_discovery.h"
 
 #include <algorithm>
 #include <cctype>
@@ -9,7 +9,7 @@
 
 #include "common/xrpc_exception.h"
 
-#include "naming/consul_resolver.h"
+#include "discovery/consul_discovery.h"
 
 namespace xrpc {
 
@@ -21,12 +21,6 @@ constexpr std::string_view LIST_SCHEME = "list://";
 /** @brief URI scheme for a Consul service-name target. */
 constexpr std::string_view CONSUL_SCHEME = "consul://";
 
-/**
- * @brief Removes leading and trailing ASCII whitespace from a borrowed string view.
- *
- * @param value Input view to trim.
- * @return View into `value` with surrounding whitespace removed.
- */
 auto Trim(std::string_view value) -> std::string_view {
   while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())) != 0) {
     value.remove_prefix(1);
@@ -37,13 +31,6 @@ auto Trim(std::string_view value) -> std::string_view {
   return value;
 }
 
-/**
- * @brief Tests whether a target uses a resolver scheme.
- *
- * @param value Full client target string.
- * @param prefix Scheme prefix to match.
- * @return true when `value` begins with `prefix`.
- */
 auto StartsWith(std::string_view value, std::string_view prefix) -> bool { return value.starts_with(prefix); }
 
 /**
@@ -112,14 +99,14 @@ auto ParseListTarget(std::string_view target) -> std::vector<Endpoint> {
   return CanonicalizeEndpoints(std::move(endpoints));
 }
 
-class StaticResolver final : public EndpointResolver {
+class StaticDiscovery final : public ServiceDiscovery {
  public:
   /**
    * @brief Creates a resolver that always returns one fixed endpoint snapshot.
    *
    * @param endpoints Sorted unique endpoints parsed from a `list://` target.
    */
-  explicit StaticResolver(std::vector<Endpoint> endpoints) : endpoints_(std::move(endpoints)) {}
+  explicit StaticDiscovery(std::vector<Endpoint> endpoints) : endpoints_(std::move(endpoints)) {}
 
   /** @brief Static endpoints need no background startup work. */
   [[nodiscard]] auto Start() -> Status override { return Status::Ok(); }
@@ -171,18 +158,20 @@ auto CanonicalizeEndpoints(std::vector<Endpoint> endpoints) -> std::vector<Endpo
  * @return Resolver instance ready for `Start()`.
  * @throws ConfigException when the target or resolver settings are invalid.
  */
-auto MakeEndpointResolver(std::string_view target, const std::string &consul_address,
-                          std::chrono::milliseconds refresh_interval) -> std::unique_ptr<EndpointResolver> {
+auto MakeServiceDiscovery(std::string_view target, const std::string &consul_address,
+                          std::chrono::milliseconds refresh_interval) -> std::unique_ptr<ServiceDiscovery> {
   target = Trim(target);
+
   if (StartsWith(target, LIST_SCHEME)) {
-    return std::make_unique<StaticResolver>(ParseListTarget(target));
+    return std::make_unique<StaticDiscovery>(ParseListTarget(target));
   }
+
   if (StartsWith(target, CONSUL_SCHEME)) {
     std::string service_name(Trim(target.substr(CONSUL_SCHEME.size())));
     if (service_name.empty()) {
       throw ConfigException("consul target requires a service name");
     }
-    return std::make_unique<ConsulResolver>(std::move(service_name), consul_address, refresh_interval);
+    return std::make_unique<ConsulDiscovery>(std::move(service_name), consul_address, refresh_interval);
   }
   throw ConfigException("unsupported RpcClient target scheme");
 }

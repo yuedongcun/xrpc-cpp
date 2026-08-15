@@ -189,15 +189,6 @@ TcpTransport::TcpTransport(std::string host, std::uint16_t port, ProtocolLimits 
 TcpTransport::~TcpTransport() { Close(); }
 
 /**
- * @brief Ensures a TCP connection exists using the call timeout.
- *
- * @param options Effective call options for connection deadline.
- */
-void TcpTransport::EnsureConnected(const EffectiveCallOptions &options) {
-  EnsureConnectedWithTimeout(options.timeout_);
-}
-
-/**
  * @brief Sends one raw RPC request and waits for the matching response.
  *
  * The pending call is registered before the write so the reader thread can complete even a very
@@ -537,7 +528,7 @@ auto TcpTransport::WriteRequestFrame(std::uint64_t request_id, std::string_view 
     (void)RemovePending(request_id);
     Close();
     // send() may fail after writing a prefix of the frame. Treat it as MaybeSent
-    // so ClientChannel does not retry and risk duplicate execution.
+    // so RpcClient::Impl does not retry and risk duplicate execution.
     return MakeCallFailure(std::move(*send_status), RequestCommitState::MaybeSent);
   }
 

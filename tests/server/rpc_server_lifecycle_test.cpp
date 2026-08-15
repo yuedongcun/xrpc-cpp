@@ -405,8 +405,6 @@ TEST(RpcServerLifecycleTest, GlobalPendingLimitReturnsResourceExhausted) {
   xrpc::StatusOr<xrpc::RpcClient> client_result = xrpc::RpcClient::Create(client_options);
   ASSERT_TRUE(client_result.ok()) << client_result.status().message();
   xrpc::RpcClient client = std::move(client_result).value();
-  const xrpc::Status init_status = client.Init();
-  ASSERT_TRUE(init_status.ok()) << init_status.message();
 
   std::optional<xrpc::StatusOr<xrpc::test::EchoResponse>> first_response;
   std::jthread first_call_thread([&]() {

@@ -109,12 +109,7 @@ auto MakeClient(const ClientConfig &config) -> std::unique_ptr<RpcClient> {
   if (!client_result.ok()) {
     throw std::runtime_error("RpcClient creation failed: " + client_result.status().message());
   }
-  auto client = std::make_unique<RpcClient>(std::move(client_result).value());
-  const Status init_status = client->Init();
-  if (!init_status.ok()) {
-    throw std::runtime_error("RpcClient initialization failed: " + init_status.message());
-  }
-  return client;
+  return std::make_unique<RpcClient>(std::move(client_result).value());
 }
 
 void WarmClient(RpcClient &client, const std::string &message) {

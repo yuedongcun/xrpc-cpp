@@ -14,11 +14,6 @@ auto main() -> int {
     return 1;
   }
   xrpc::RpcClient client = std::move(client_result).value();
-  const xrpc::Status init_status = client.Init();
-  if (!init_status.ok()) {
-    std::cerr << "init failed: " << init_status.message() << '\n';
-    return 1;
-  }
 
   xrpc::example::EchoRequest request;
   request.set_message("hello from Call");

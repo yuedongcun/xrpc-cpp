@@ -12,13 +12,12 @@
 - `server/server_connection_io_uring_test.cpp`
 - `server/rpc_frame_stream_test.cpp`
 - `server/rpc_server_lifecycle_test.cpp`
-- `client/endpoint_selector_test.cpp`
 - `client/rpc_client_endpoint_test.cpp`
 - `client/rpc_client_thread_safety_test.cpp`
 
 外部测试：
 
-- `naming/consul_resolver_integration_test.cpp`
+- `discovery/consul_discovery_integration_test.cpp`
 
 `tests/package_consumer/` 保留为安装后 `find_package(xrpc CONFIG REQUIRED)` 的消费验证，不算入默认测试集。
 

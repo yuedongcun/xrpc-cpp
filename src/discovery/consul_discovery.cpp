@@ -1,4 +1,4 @@
-#include "naming/consul_resolver.h"
+#include "discovery/consul_discovery.h"
 
 #include <algorithm>
 #include <charconv>
@@ -98,26 +98,26 @@ auto ParseEndpoints(const std::string &body) -> std::vector<Endpoint> {
  * @param consul_address Consul agent address in `host:port` form.
  * @param refresh_interval Maximum blocking-query wait interval.
  */
-ConsulResolver::ConsulResolver(std::string service_name, const std::string &consul_address,
-                               std::chrono::milliseconds refresh_interval)
+ConsulDiscovery::ConsulDiscovery(std::string service_name, const std::string &consul_address,
+                                 std::chrono::milliseconds refresh_interval)
     : service_name_(std::move(service_name)), http_client_(consul_address), refresh_interval_(refresh_interval) {}
 
 /** @brief Stops the refresh thread before destroying resolver state. */
-ConsulResolver::~ConsulResolver() { Stop(); }
+ConsulDiscovery::~ConsulDiscovery() { Stop(); }
 
 /**
  * @brief Performs the initial fetch and starts the background refresh loop.
  *
  * @return Status from the initial non-blocking fetch.
  */
-auto ConsulResolver::Start() -> Status {
+auto ConsulDiscovery::Start() -> Status {
   const Status status = Fetch(false);
   refresh_thread_ = std::jthread([this](std::stop_token stop_token) { RefreshLoop(stop_token); });
   return status;
 }
 
 /** @brief Requests refresh-loop shutdown and joins the thread. */
-void ConsulResolver::Stop() {
+void ConsulDiscovery::Stop() {
   refresh_thread_.request_stop();
   if (refresh_thread_.joinable()) {
     refresh_thread_.join();
@@ -125,13 +125,13 @@ void ConsulResolver::Stop() {
 }
 
 /** @return Copy of the latest healthy endpoint snapshot. */
-auto ConsulResolver::Snapshot() const -> std::vector<Endpoint> {
+auto ConsulDiscovery::Snapshot() const -> std::vector<Endpoint> {
   std::lock_guard lock(mutex_);
   return snapshot_;
 }
 
 /** @return Last refresh error text, or empty string after a successful refresh. */
-auto ConsulResolver::last_error() const -> std::string {
+auto ConsulDiscovery::last_error() const -> std::string {
   std::lock_guard lock(mutex_);
   return last_error_;
 }
@@ -145,7 +145,7 @@ auto ConsulResolver::last_error() const -> std::string {
  * @param blocking true to issue a blocking query based on the last Consul index.
  * @return OK after a successfully parsed response, otherwise server/protocol status.
  */
-auto ConsulResolver::Fetch(bool blocking) -> Status {
+auto ConsulDiscovery::Fetch(bool blocking) -> Status {
   // Blocking queries use the last Consul index to wait for changes instead of
   // polling at a fixed rate. The timeout includes a small error backoff margin.
   const std::chrono::milliseconds request_timeout =
@@ -181,7 +181,7 @@ auto ConsulResolver::Fetch(bool blocking) -> Status {
  *
  * @param stop_token Cooperative stop token owned by the refresh jthread.
  */
-void ConsulResolver::RefreshLoop(std::stop_token stop_token) {
+void ConsulDiscovery::RefreshLoop(std::stop_token stop_token) {
   while (!stop_token.stop_requested()) {
     const Status status = Fetch(true);
     if (!status.ok() && !stop_token.stop_requested()) {
@@ -196,7 +196,7 @@ void ConsulResolver::RefreshLoop(std::stop_token stop_token) {
  * @param endpoints Canonicalized endpoint snapshot.
  * @param index Consul blocking-query index, or zero when unavailable.
  */
-void ConsulResolver::SetSnapshot(std::vector<Endpoint> endpoints, std::uint64_t index) {
+void ConsulDiscovery::SetSnapshot(std::vector<Endpoint> endpoints, std::uint64_t index) {
   std::lock_guard lock(mutex_);
   snapshot_ = std::move(endpoints);
   if (index != 0) {
@@ -209,7 +209,7 @@ void ConsulResolver::SetSnapshot(std::vector<Endpoint> endpoints, std::uint64_t 
  *
  * @param error Error text to expose through `last_error()`, or empty after success.
  */
-void ConsulResolver::SetLastError(std::string error) {
+void ConsulDiscovery::SetLastError(std::string error) {
   std::lock_guard lock(mutex_);
   last_error_ = std::move(error);
 }
@@ -220,7 +220,7 @@ void ConsulResolver::SetLastError(std::string error) {
  * @param blocking true to include `index` and `wait` query parameters when an index is known.
  * @return Absolute Consul HTTP API path.
  */
-auto ConsulResolver::QueryPath(bool blocking) const -> std::string {
+auto ConsulDiscovery::QueryPath(bool blocking) const -> std::string {
   std::uint64_t index = 0;
   {
     std::lock_guard lock(mutex_);

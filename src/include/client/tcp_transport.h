@@ -10,10 +10,10 @@
 #include <thread>
 #include <unordered_map>
 
-#include "io/socket.h"
-#include "protocol/frame_codec.h"
 #include "client/effective_call_options.h"
 #include "client/raw_call_result.h"
+#include "io/socket.h"
+#include "protocol/frame_codec.h"
 #include "rpc/raw_message.h"
 
 namespace xrpc {
@@ -45,13 +45,6 @@ class TcpTransport final {
 
   /** @brief Closes the socket, wakes pending calls, and joins the reader thread. */
   ~TcpTransport();
-
-  /**
-   * @brief Opens the socket and starts the reader thread if not already connected.
-   *
-   * @param options Effective call options used for connection timeout.
-   */
-  void EnsureConnected(const EffectiveCallOptions &options);
 
   /**
    * @brief Sends one request and waits for its response or failure.

@@ -37,13 +37,6 @@ class EchoTestServer final {
     }
   }
 
-  void AcceptAndCloseConnections(std::size_t connection_count) {
-    for (std::size_t i = 0; i < connection_count; ++i) {
-      xrpc::io::Socket socket = listener_.Accept();
-      socket.Close();
-    }
-  }
-
   void ServeOnce() { ServeConnections(1); }
   void ServeConnectionRequestBatches(const std::vector<std::size_t> &requests_per_connection) {
     for (std::size_t request_count : requests_per_connection) {
@@ -162,34 +155,6 @@ TEST(RpcClientEndpointTest, CallFallsBackToNextEndpointOnConnectFailure) {
     EXPECT_EQ(response.value().message(), "echo: hello");
   }
 
-  server_thread.join();
-  if (server_error) {
-    std::rethrow_exception(server_error);
-  }
-}
-
-TEST(RpcClientEndpointTest, InitUsesDefaultMultiplexedConnection) {
-  EchoTestServer server;
-  server.Listen();
-
-  std::exception_ptr server_error;
-  std::jthread server_thread([&]() {
-    try {
-      server.AcceptAndCloseConnections(1);
-    } catch (...) {
-      server_error = std::current_exception();
-    }
-  });
-
-  xrpc::RpcClientOptions options;
-  options.target_ = "list://127.0.0.1:" + std::to_string(server.port());
-
-  xrpc::StatusOr<xrpc::RpcClient> client_result = xrpc::RpcClient::Create(options);
-  ASSERT_TRUE(client_result.ok()) << client_result.status().message();
-  xrpc::RpcClient client = std::move(client_result).value();
-  const xrpc::Status status = client.Init();
-
-  EXPECT_TRUE(status.ok()) << status.message();
   server_thread.join();
   if (server_error) {
     std::rethrow_exception(server_error);

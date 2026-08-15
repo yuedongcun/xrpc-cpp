@@ -41,22 +41,18 @@ struct Endpoint {
  * count for an endpoint.
  */
 struct RpcClientOptions {
-  /** @brief Endpoint source such as a static list target or a resolver URI. */
+  /** Discovery **/
   std::string target_;
-
-  /** @brief Consul agent address used only for Consul resolver targets. */
   std::string consul_address_{"127.0.0.1:8500"};
-
-  /** @brief Interval used by polling resolvers after the first endpoint snapshot. */
   std::chrono::milliseconds discovery_refresh_interval_{5000};
 
-  /** @brief Default call timeout. A zero timeout leaves calls without a client-side deadline. */
+  /** Call **/
   std::chrono::milliseconds timeout_{0};
 
-  /** @brief Maximum accepted request or response payload size for this client. */
+  /** Protocol **/
   std::size_t max_payload_size_ = DEFAULT_MAX_PAYLOAD_SIZE;
 
-  /** @brief Per-endpoint limit for outstanding calls waiting on a transport response. */
+  /** Transport **/
   std::size_t max_inflight_per_endpoint_ = 1024;
 };
 
@@ -80,8 +76,8 @@ class RpcClient final {
   /**
    * @brief Creates a client from explicit options.
    *
-   * Construction validates configuration that can be checked locally. Resolver startup and the first endpoint snapshot
-   * are performed by `Init()` or lazily by the first call path that needs routing.
+   * Construction validates local configuration and starts endpoint discovery. TCP connections are established lazily
+   * by the first call routed to each endpoint.
    *
    * @param options Client runtime, discovery, and protocol configuration.
    */
@@ -98,16 +94,6 @@ class RpcClient final {
 
   /** @brief Replaces this client's runtime with another client's runtime. */
   auto operator=(RpcClient &&) noexcept -> RpcClient &;
-
-  /**
-   * @brief Initializes discovery and applies the first endpoint snapshot when a resolver is configured.
-   *
-   * Static endpoint clients may call this eagerly, but payload calls can still connect lazily. Calling `Init()` more
-   * than once is safe; subsequent calls observe the already initialized runtime.
-   *
-   * @return `Status::Ok()` on success, or a resolver/configuration status when no usable endpoints can be loaded.
-   */
-  [[nodiscard]] auto Init() -> Status;
 
   /**
    * @brief Sends a raw payload request using default call options.
@@ -201,12 +187,12 @@ class RpcClient final {
   }
 
  private:
-  class ClientRuntime;
+  class Impl;
 
   /** @brief Creates a facade from a successfully constructed private runtime. */
-  explicit RpcClient(std::unique_ptr<ClientRuntime> runtime);
+  explicit RpcClient(std::unique_ptr<Impl> impl);
 
-  std::unique_ptr<ClientRuntime> runtime_;
+  std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace xrpc

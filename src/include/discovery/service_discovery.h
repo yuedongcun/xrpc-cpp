@@ -12,17 +12,17 @@
 namespace xrpc {
 
 /**
- * @brief Endpoint discovery interface used by `RpcClient::ClientRuntime`.
+ * @brief Publishes the current endpoint set for one client target.
  *
  * Design note:
- * - Ownership: `RpcClientRuntime` owns one resolver chosen from the target string.
- * - Snapshot: `Snapshot()` returns a copy so channel routing can update without holding resolver locks.
- * - Failure: `Start()` may fail, but runtime can still defer the first resolver failure and let calls report endpoint
+ * - Ownership: `RpcClient::Impl` owns one discovery source chosen from the target string.
+ * - Snapshot: `Snapshot()` returns a copy so client routing does not borrow discovery state.
+ * - Failure: `Start()` may fail, but the client can defer the first discovery failure and let calls report endpoint
  *   unavailability.
  */
-class EndpointResolver {
+class ServiceDiscovery {
  public:
-  virtual ~EndpointResolver() = default;
+  virtual ~ServiceDiscovery() = default;
 
   /** @brief Starts resolver work and performs any required initial refresh. */
   [[nodiscard]] virtual auto Start() -> Status = 0;
@@ -40,9 +40,9 @@ class EndpointResolver {
 /** @return Canonicalized endpoints with invalid and duplicate entries removed. */
 [[nodiscard]] auto CanonicalizeEndpoints(std::vector<Endpoint> endpoints) -> std::vector<Endpoint>;
 
-/** @return Concrete resolver implementation selected by the target URI. */
-[[nodiscard]] auto MakeEndpointResolver(std::string_view target, const std::string &consul_address,
+/** @return Concrete discovery implementation selected by the target URI. */
+[[nodiscard]] auto MakeServiceDiscovery(std::string_view target, const std::string &consul_address,
                                         std::chrono::milliseconds refresh_interval)
-    -> std::unique_ptr<EndpointResolver>;
+    -> std::unique_ptr<ServiceDiscovery>;
 
 }  // namespace xrpc

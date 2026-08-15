@@ -4,7 +4,7 @@
 #include <string>
 #include <utility>
 
-#include "client/rpc_client_runtime.h"
+#include "client/rpc_client_impl.h"
 #include "common/xrpc_exception.h"
 
 namespace xrpc {
@@ -33,15 +33,15 @@ auto RpcClient::Create(std::string host, std::uint16_t port) -> StatusOr<RpcClie
  */
 auto RpcClient::Create(const RpcClientOptions &options) -> StatusOr<RpcClient> {
   try {
-    return StatusOr<RpcClient>(RpcClient(std::make_unique<ClientRuntime>(options)));
+    return StatusOr<RpcClient>(RpcClient(std::make_unique<Impl>(options)));
   } catch (...) {
     return StatusOr<RpcClient>(CaughtExceptionToStatus("failed to create RPC client"));
   }
 }
 
-RpcClient::RpcClient(std::unique_ptr<ClientRuntime> runtime) : runtime_(std::move(runtime)) {}
+RpcClient::RpcClient(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 
-/** @brief Stops resolver and transport state through `ClientRuntime` destruction. */
+/** @brief Stops discovery and transport state through `Impl` destruction. */
 RpcClient::~RpcClient() = default;
 
 /** @brief Moves ownership of the private runtime from another facade. */
@@ -49,19 +49,6 @@ RpcClient::RpcClient(RpcClient &&) noexcept = default;
 
 /** @brief Replaces this facade's runtime with another facade's runtime. */
 auto RpcClient::operator=(RpcClient &&) noexcept -> RpcClient & = default;
-
-/**
- * @brief Initializes resolver state and the first channel endpoint snapshot.
- *
- * @return `Status::Ok()` when the client can issue calls, otherwise a resolver/configuration status.
- */
-auto RpcClient::Init() -> Status {
-  try {
-    return runtime_->Init();
-  } catch (...) {
-    return CaughtExceptionToStatus("failed to initialize RPC client");
-  }
-}
 
 /**
  * @brief Sends a raw payload request through the private runtime and returns only the response body.
@@ -75,7 +62,7 @@ auto RpcClient::Init() -> Status {
 auto RpcClient::CallPayload(std::string service_name, std::string method_name, std::string payload,
                             const CallOptions &options) -> StatusOr<std::string> {
   try {
-    return runtime_->Call(std::move(service_name), std::move(method_name), std::move(payload), options);
+    return impl_->Call(std::move(service_name), std::move(method_name), std::move(payload), options);
   } catch (...) {
     return StatusOr<std::string>(CaughtExceptionToStatus("RPC call failed"));
   }

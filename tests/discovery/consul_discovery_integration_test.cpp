@@ -119,7 +119,7 @@ auto Echo(const xrpc::test::EchoRequest &request) -> xrpc::test::EchoResponse {
 
 }  // namespace
 
-TEST(ConsulResolverIntegrationTest, DiscoversRegisteredEndpointAndCallsEcho) {
+TEST(ConsulDiscoveryIntegrationTest, DiscoversRegisteredEndpointAndCallsEcho) {
   if (!ConsulIntegrationEnabled()) {
     GTEST_SKIP() << "set XRPC_ENABLE_CONSUL_TESTS=1 to run live Consul integration tests";
   }

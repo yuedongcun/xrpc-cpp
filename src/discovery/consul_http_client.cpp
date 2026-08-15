@@ -1,4 +1,4 @@
-#include "naming/consul_http_client.h"
+#include "discovery/consul_http_client.h"
 
 #include <algorithm>
 #include <cctype>
