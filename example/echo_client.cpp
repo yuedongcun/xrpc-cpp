@@ -8,7 +8,9 @@
 auto main() -> int {
   constexpr std::uint16_t port = 9000;
 
-  auto client_result = xrpc::RpcClient::Create("127.0.0.1", port);
+  xrpc::RpcClientOptions options;
+  options.target_ = "list://127.0.0.1:" + std::to_string(port);
+  auto client_result = xrpc::RpcClient::Create(options);
   if (!client_result.ok()) {
     std::cerr << "create failed: " << client_result.status().message() << '\n';
     return 1;

@@ -66,14 +66,6 @@ struct RpcClientOptions {
 class RpcClient final {
  public:
   /**
-   * @brief Creates a client for one static TCP endpoint.
-   *
-   * @param host DNS name or numeric address of the server.
-   * @param port TCP port in host byte order.
-   */
-  [[nodiscard]] static auto Create(std::string host, std::uint16_t port) -> StatusOr<RpcClient>;
-
-  /**
    * @brief Creates a client from explicit options.
    *
    * Construction validates local configuration and starts endpoint discovery. TCP connections are established lazily

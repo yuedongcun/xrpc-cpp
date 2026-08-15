@@ -52,7 +52,7 @@ auto ThreadPoolExecutor::TrySubmitBatch(std::function<void()> job, std::size_t l
   if (logical_jobs == 0) {
     throw std::invalid_argument("ThreadPoolExecutor::TrySubmitBatch requires at least one logical job");
   }
-  if (!accepting_submissions_.load(std::memory_order_acquire)) {
+  if (!accepting_submissions_.load()) {
     return false;
   }
 
@@ -64,12 +64,12 @@ auto ThreadPoolExecutor::TrySubmitBatch(std::function<void()> job, std::size_t l
   WorkerQueue &queue = SelectWorkerQueue();
   try {
     std::lock_guard<std::mutex> lock(queue.mutex_);
-    if (!accepting_submissions_.load(std::memory_order_relaxed)) {
+    if (!accepting_submissions_.load()) {
       ReleasePendingJobs(logical_jobs);
       return false;
     }
     queue.jobs_.push(WorkerJob{.run_ = std::move(job), .logical_jobs_ = logical_jobs});
-    const std::size_t queue_depth = queue.pending_jobs_.fetch_add(1, std::memory_order_relaxed) + 1;
+    const std::size_t queue_depth = queue.pending_jobs_.fetch_add(1) + 1;
   } catch (...) {
     ReleasePendingJobs(logical_jobs);
     throw;
@@ -80,7 +80,7 @@ auto ThreadPoolExecutor::TrySubmitBatch(std::function<void()> job, std::size_t l
 
 /** @brief Closes the admission gate without canceling queued or running jobs. */
 void ThreadPoolExecutor::CloseSubmissions() noexcept {
-  accepting_submissions_.store(false, std::memory_order_release);
+  accepting_submissions_.store(false);
   for (const auto &queue : worker_queues_) {
     // Synchronize with submissions that passed the first admission check. When
     // this method returns, no producer can still append a job to a worker queue.
@@ -90,29 +90,28 @@ void ThreadPoolExecutor::CloseSubmissions() noexcept {
 
 /** @return true while new jobs may still be admitted. */
 auto ThreadPoolExecutor::accepting_submissions() const noexcept -> bool {
-  return accepting_submissions_.load(std::memory_order_acquire);
+  return accepting_submissions_.load();
 }
 
 /**
  * @brief Selects the worker queue for a newly accepted job.
  *
  * The algorithm starts with round-robin fairness, then opportunistically prefers a visibly shorter
- * queue using relaxed counters. Exact ordering is unnecessary because the global admission guard has
- * already protected resource bounds.
+ * queue. Exact queue ordering is unnecessary because the global admission guard has already protected
+ * resource bounds.
  *
  * @return Worker queue that should receive the next job.
  */
 auto ThreadPoolExecutor::SelectWorkerQueue() -> WorkerQueue & {
   const std::size_t worker_count = worker_queues_.size();
-  const std::size_t start = next_worker_index_.fetch_add(1, std::memory_order_relaxed) % worker_count;
+  const std::size_t start = next_worker_index_.fetch_add(1) % worker_count;
   std::size_t selected = start;
-  std::size_t selected_pending = worker_queues_[selected]->pending_jobs_.load(std::memory_order_relaxed);
+  std::size_t selected_pending = worker_queues_[selected]->pending_jobs_.load();
 
-  // Start round-robin for fairness, then prefer a shorter queue when one is
-  // visible through relaxed counters.
+  // Start round-robin for fairness, then prefer a shorter visible queue.
   for (std::size_t offset = 1; offset < worker_count && selected_pending > 0; ++offset) {
     const std::size_t candidate = (start + offset) % worker_count;
-    const std::size_t candidate_pending = worker_queues_[candidate]->pending_jobs_.load(std::memory_order_relaxed);
+    const std::size_t candidate_pending = worker_queues_[candidate]->pending_jobs_.load();
     if (candidate_pending < selected_pending) {
       selected = candidate;
       selected_pending = candidate_pending;
@@ -128,13 +127,12 @@ auto ThreadPoolExecutor::SelectWorkerQueue() -> WorkerQueue & {
  * @return Pending count after reservation, or empty when the global limit is full.
  */
 auto ThreadPoolExecutor::TryReservePendingJobs(std::size_t logical_jobs) -> std::optional<std::size_t> {
-  std::size_t pending = pending_jobs_.load(std::memory_order_relaxed);
+  std::size_t pending = pending_jobs_.load();
   while (true) {
     if (pending > max_pending_jobs_ || logical_jobs > max_pending_jobs_ - pending) {
       return std::nullopt;
     }
-    if (pending_jobs_.compare_exchange_weak(pending, pending + logical_jobs, std::memory_order_acq_rel,
-                                            std::memory_order_relaxed)) {
+    if (pending_jobs_.compare_exchange_weak(pending, pending + logical_jobs)) {
       return pending + logical_jobs;
     }
   }
@@ -146,7 +144,7 @@ auto ThreadPoolExecutor::TryReservePendingJobs(std::size_t logical_jobs) -> std:
  * @param logical_jobs Number of logical RPC jobs to remove from pending accounting.
  */
 void ThreadPoolExecutor::ReleasePendingJobs(std::size_t logical_jobs) {
-  pending_jobs_.fetch_sub(logical_jobs, std::memory_order_release);
+  pending_jobs_.fetch_sub(logical_jobs);
 }
 
 /**
@@ -156,7 +154,7 @@ void ThreadPoolExecutor::ReleasePendingJobs(std::size_t logical_jobs) {
  */
 void ThreadPoolExecutor::Stop() {
   CloseSubmissions();
-  if (stopped_.exchange(true, std::memory_order_acq_rel)) {
+  if (stopped_.exchange(true)) {
     return;
   }
   for (const auto &queue : worker_queues_) {
@@ -185,8 +183,8 @@ void ThreadPoolExecutor::WorkerLoop(WorkerQueue &queue) {
     {
       std::unique_lock<std::mutex> lock(queue.mutex_);
       queue.cv_.wait(
-          lock, [this, &queue]() -> bool { return stopped_.load(std::memory_order_acquire) || !queue.jobs_.empty(); });
-      if (stopped_.load(std::memory_order_relaxed) && queue.jobs_.empty()) {
+          lock, [this, &queue]() -> bool { return stopped_.load() || !queue.jobs_.empty(); });
+      if (stopped_.load() && queue.jobs_.empty()) {
         return;
       }
 
@@ -197,7 +195,7 @@ void ThreadPoolExecutor::WorkerLoop(WorkerQueue &queue) {
     }
 
     job.run_();
-    queue.pending_jobs_.fetch_sub(1, std::memory_order_relaxed);
+    queue.pending_jobs_.fetch_sub(1);
     ReleasePendingJobs(job.logical_jobs_);
   }
 }

@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <memory>
 #include <optional>
-#include <ranges>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -31,9 +30,7 @@ RpcClient::Impl::Impl(const RpcClientOptions &options)
 
 RpcClient::Impl::~Impl() { discovery_->Stop(); }
 
-auto RpcClient::Impl::NextRequestId() -> std::uint64_t {
-  return next_request_id_.fetch_add(1, std::memory_order_relaxed);
-}
+auto RpcClient::Impl::NextRequestId() -> std::uint64_t { return next_request_id_.fetch_add(1); }
 
 auto RpcClient::Impl::Call(std::string service_name, std::string method_name, std::string payload,
                            const CallOptions &options) -> StatusOr<std::string> {
@@ -131,9 +128,8 @@ auto RpcClient::Impl::CallEndpoints(const RawRequest &request, const CallOptions
   const std::optional<std::size_t> sticky_start =
       effective_options.sticky_key_.empty() ? std::nullopt
                                             : SelectStickyStart(effective_options.sticky_key_, endpoints->hash_ring_);
-  const std::size_t start = sticky_start.has_value()
-                                ? *sticky_start
-                                : next_endpoint_index_.fetch_add(1, std::memory_order_relaxed) % endpoint_count;
+  const std::size_t start =
+      sticky_start.has_value() ? *sticky_start : next_endpoint_index_.fetch_add(1) % endpoint_count;
 
   for (std::size_t offset = 0; offset < endpoint_count; ++offset) {
     const std::size_t index = (start + offset) % endpoint_count;
@@ -181,7 +177,7 @@ auto RpcClient::Impl::BuildHashRing(const std::vector<std::shared_ptr<EndpointSl
       });
     }
   }
-  std::ranges::sort(hash_ring, [](const HashRingEntry &lhs, const HashRingEntry &rhs) {
+  std::ranges::sort(hash_ring, [](const HashRingEntry &lhs, const HashRingEntry &rhs) -> bool {
     if (lhs.hash_ != rhs.hash_) {
       return lhs.hash_ < rhs.hash_;
     }
@@ -198,7 +194,9 @@ auto RpcClient::Impl::SelectStickyStart(std::string_view sticky_key, const std::
 
   const std::uint64_t key_hash = Fnv1a64(sticky_key);
   const auto entry =
-      std::ranges::lower_bound(hash_ring, key_hash, {}, [](const HashRingEntry &item) { return item.hash_; });
+      std::ranges::lower_bound(hash_ring, key_hash, {}, [](const HashRingEntry &item) -> std::uint64_t {
+        return item.hash_;
+      });
   return entry == hash_ring.end() ? hash_ring.front().endpoint_index_ : entry->endpoint_index_;
 }
 

@@ -10,23 +10,6 @@
 namespace xrpc {
 
 /**
- * @brief Creates a client that targets one static TCP endpoint.
- *
- * The public convenience constructor is expressed as a `list://` target so the rest of the runtime
- * can use the same resolver/channel path as multi-endpoint clients.
- *
- * @param host Server host name or numeric address.
- * @param port Server TCP port.
- */
-auto RpcClient::Create(std::string host, std::uint16_t port) -> StatusOr<RpcClient> {
-  try {
-    return Create(RpcClientOptions{.target_ = "list://" + std::move(host) + ":" + std::to_string(port)});
-  } catch (...) {
-    return StatusOr<RpcClient>(CaughtExceptionToStatus("failed to create RPC client"));
-  }
-}
-
-/**
  * @brief Creates the private client runtime from explicit public options.
  *
  * @param options Target, resolver, protocol, timeout, and concurrency settings.

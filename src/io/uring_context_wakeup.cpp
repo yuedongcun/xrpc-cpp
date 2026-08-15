@@ -50,7 +50,7 @@ void UringContext::Runtime::RequestStop() {
       return;
     }
     accepting_posts_ = false;
-    stop_requested_.store(true, std::memory_order_release);
+    stop_requested_.store(true);
   }
 
   SignalWakeup();
@@ -128,7 +128,7 @@ void UringContext::Runtime::ProcessWakeupCqe(const Operation &operation, io_urin
   io_uring_cqe_seen(&ring_, cqe);
 
   if (result.result_ < 0) {
-    if (stop_requested_.load(std::memory_order_acquire) && result.error_code_ == ECANCELED) {
+    if (stop_requested_.load() && result.error_code_ == ECANCELED) {
       return;
     }
     throw InternalException(MakeErrorMessage("eventfd poll", result.error_code_));
@@ -139,7 +139,7 @@ void UringContext::Runtime::ProcessWakeupCqe(const Operation &operation, io_urin
 
   DrainWakeupCounter();
   DrainPosted();
-  if (stop_requested_.load(std::memory_order_acquire)) {
+  if (stop_requested_.load()) {
     // Timeout SQEs can otherwise keep the loop alive until their deadlines.
     // Cancel them once shutdown has started.
     SubmitCancelPendingTimeouts();

@@ -53,7 +53,7 @@ void UringContext::Runtime::SubmitOperation(std::unique_ptr<Operation> operation
   bool tracked_timeout = false;
   try {
     AssertRunThread("io_uring submission");
-    if (stop_requested_.load(std::memory_order_acquire)) {
+    if (stop_requested_.load()) {
       // After Stop(), new awaitables complete synchronously as canceled
       // instead of leaking an operation that will never be submitted.
       CompleteAwaitableState(*operation, MakeCancelledResult(*operation));

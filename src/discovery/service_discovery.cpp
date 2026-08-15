@@ -136,13 +136,13 @@ class StaticDiscovery final : public ServiceDiscovery {
  * @return Sorted unique endpoints.
  */
 auto CanonicalizeEndpoints(std::vector<Endpoint> endpoints) -> std::vector<Endpoint> {
-  std::ranges::sort(endpoints, [](const Endpoint &lhs, const Endpoint &rhs) {
+  std::ranges::sort(endpoints, [](const Endpoint &lhs, const Endpoint &rhs) -> bool {
     if (lhs.host_ != rhs.host_) {
       return lhs.host_ < rhs.host_;
     }
     return lhs.port_ < rhs.port_;
   });
-  const auto end = std::ranges::unique(endpoints, [](const Endpoint &lhs, const Endpoint &rhs) {
+  const auto end = std::ranges::unique(endpoints, [](const Endpoint &lhs, const Endpoint &rhs) -> bool {
     return lhs.host_ == rhs.host_ && lhs.port_ == rhs.port_;
   });
   endpoints.erase(end.begin(), end.end());

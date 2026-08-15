@@ -88,9 +88,6 @@ class TcpTransport final {
   /** @brief Closes the socket while the state mutex is held. */
   void CloseSocketLocked();
 
-  /** @brief Best-effort shutdown used to wake blocking socket operations. */
-  void ShutdownSocketReadWriteBestEffort() noexcept;
-
   /** @brief Adds a pending call if the per-endpoint in-flight limit permits it. */
   [[nodiscard]] auto TryRegisterPending(std::uint64_t request_id, std::shared_ptr<PendingCall> pending) -> bool;
 

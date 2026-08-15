@@ -80,13 +80,13 @@ UringContext::Runtime::~Runtime() {
  */
 void UringContext::Runtime::BeginRun() {
   const void *expected = nullptr;
-  if (!run_thread_token_.compare_exchange_strong(expected, CurrentThreadToken(), std::memory_order_acq_rel)) {
+  if (!run_thread_token_.compare_exchange_strong(expected, CurrentThreadToken())) {
     throw LifecycleException("UringContext::Run is not reentrant");
   }
 }
 
 /** @brief Clears the run-thread token after `Run()` exits. */
-void UringContext::Runtime::EndRun() { run_thread_token_.store(nullptr, std::memory_order_release); }
+void UringContext::Runtime::EndRun() { run_thread_token_.store(nullptr); }
 
 /**
  * @brief Verifies that an action is executing on the run thread.
@@ -95,14 +95,14 @@ void UringContext::Runtime::EndRun() { run_thread_token_.store(nullptr, std::mem
  * @throws LifecycleException when called from any other thread.
  */
 void UringContext::Runtime::AssertRunThread(std::string_view action) const {
-  if (run_thread_token_.load(std::memory_order_acquire) != CurrentThreadToken()) {
+  if (run_thread_token_.load() != CurrentThreadToken()) {
     throw LifecycleException(std::string(action) + " must run on the UringContext thread");
   }
 }
 
 /** @return true while a thread is inside `UringContext::Run()`. */
 auto UringContext::Runtime::IsRunning() const -> bool {
-  return run_thread_token_.load(std::memory_order_acquire) != nullptr;
+  return run_thread_token_.load() != nullptr;
 }
 
 /**
@@ -128,7 +128,7 @@ void UringContext::Run() {
 
     // The loop exits only after Stop() has been requested and every submitted
     // user operation plus the internal wakeup poll has produced a CQE.
-    while (!runtime_->stop_requested_.load(std::memory_order_acquire) || runtime_->pending_io_operations_ > 0 ||
+    while (!runtime_->stop_requested_.load() || runtime_->pending_io_operations_ > 0 ||
            runtime_->wakeup_poll_pending_) {
       io_uring_cqe *cqe = nullptr;
       const int ret = io_uring_wait_cqe(&runtime_->ring_, &cqe);

@@ -195,8 +195,9 @@ TEST(RpcClientEndpointTest, MultiplexedConnectionRoutesByStickyKeyAndReusesPerEn
   request.set_message("hello");
 
   xrpc::CallOptions options_a;
-  const std::vector<std::string> endpoint_ids = {MakeLoopbackEndpointId(endpoint0_server.port()),
-                                                 MakeLoopbackEndpointId(endpoint1_server.port())};
+  std::vector<std::string> endpoint_ids = {MakeLoopbackEndpointId(endpoint0_server.port()),
+                                           MakeLoopbackEndpointId(endpoint1_server.port())};
+  std::sort(endpoint_ids.begin(), endpoint_ids.end());
   options_a.sticky_key_ = StickyKeyForEndpoint(MakeLoopbackEndpointId(endpoint0_server.port()), endpoint_ids);
 
   xrpc::CallOptions options_b;

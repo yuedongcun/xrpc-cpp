@@ -253,7 +253,7 @@ void TcpTransport::EnsureConnectedWithTimeout(std::chrono::milliseconds timeout)
   socket.Connect(host_, port_, timeout);
   socket_ = std::move(socket);
   const int fd = socket_.fd();
-  reader_thread_ = std::jthread([this, fd]() { ReaderLoop(fd); });
+  reader_thread_ = std::jthread([this, fd]() -> void { ReaderLoop(fd); });
 }
 
 /** @return Connected socket file descriptor, or -1 when disconnected. */
@@ -315,6 +315,7 @@ void TcpTransport::ReaderLoop(int fd) {
   char chunk[4096];
 
   while (true) {
+    // Decode Loop
     while (true) {
       const DecodeResult decoded = codec.TryDecode(buffer);
       if (decoded.error_ == ProtocolError::NeedMoreData) {
@@ -372,22 +373,12 @@ void TcpTransport::CloseSocketLocked() {
   if (!socket_.valid()) {
     return;
   }
-  ShutdownSocketReadWriteBestEffort();
-  socket_.Close();
-}
-
-/**
- * @brief Attempts to shut down both socket directions without throwing.
- *
- * This is used on close paths where releasing the file descriptor matters more than reporting a
- * secondary shutdown failure.
- */
-void TcpTransport::ShutdownSocketReadWriteBestEffort() noexcept {
   try {
     socket_.ShutdownReadWrite();
   } catch (...) {
-    // Shutdown is best-effort here; Close() below still releases the fd.
+    // Shutdown only wakes blocked I/O; closing the descriptor remains required.
   }
+  socket_.Close();
 }
 
 /**
@@ -483,7 +474,7 @@ void TcpTransport::FailAllPending(const Status &status, RequestCommitState commi
 auto TcpTransport::WaitForResult(const std::shared_ptr<PendingCall> &pending, std::uint64_t request_id,
                                  const EffectiveCallOptions &options) -> RawCallResult {
   std::unique_lock lock(pending->mutex_);
-  const auto has_result = [&pending]() { return pending->result_.has_value(); };
+  const auto has_result = [&pending]() -> bool { return pending->result_.has_value(); };
 
   if (options.deadline_.has_value()) {
     if (!pending->cv_.wait_until(lock, *options.deadline_, has_result)) {
