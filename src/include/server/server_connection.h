@@ -13,7 +13,7 @@
 #include "io/socket.h"
 #include "io/uring_context.h"
 #include "protocol/frame_codec.h"
-#include "rpc/raw_message.h"
+#include "protocol/protocol_message.h"
 #include "server/rpc_frame_stream.h"
 #include "server/server_backpressure.h"
 #include "server/thread_pool_executor.h"

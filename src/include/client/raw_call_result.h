@@ -6,7 +6,7 @@
 
 #include <xrpc/status.h>
 
-#include "rpc/raw_message.h"
+#include "protocol/protocol_message.h"
 
 namespace xrpc {
 

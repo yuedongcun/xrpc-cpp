@@ -41,7 +41,7 @@ auto MakeRequestFrame(std::string message, std::uint64_t request_id) -> std::str
   xrpc::test::EchoRequest request;
   request.set_message(std::move(message));
 
-  xrpc::ProtocolRequest protocol_request;
+  xrpc::RawRequest protocol_request;
   protocol_request.request_id_ = request_id;
   protocol_request.service_name_ = "EchoService";
   protocol_request.method_name_ = "Echo";
@@ -360,7 +360,7 @@ TEST(RpcServerLifecycleTest, PerConnectionInflightLimitReturnsResourceExhausted)
     ASSERT_EQ(decoded.error_, xrpc::ProtocolError::Ok);
     ASSERT_TRUE(decoded.response_.has_value());
     EXPECT_EQ(decoded.response_->request_id_, 2U);
-    EXPECT_EQ(decoded.response_->error_code_, static_cast<std::int32_t>(xrpc::StatusCode::ResourceExhausted));
+    EXPECT_EQ(decoded.response_->status_.code(), xrpc::StatusCode::ResourceExhausted);
   }
 
   release_handler.set_value();

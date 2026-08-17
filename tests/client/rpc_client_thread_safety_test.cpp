@@ -40,7 +40,7 @@ class EchoTestServer final {
     xrpc::io::Socket socket = listener_.Accept();
     std::string buffer;
     xrpc::FrameCodec codec;
-    std::vector<xrpc::ProtocolRequest> requests;
+    std::vector<xrpc::RawRequest> requests;
     requests.reserve(request_count);
     for (std::size_t handled = 0; handled < request_count; ++handled) {
       requests.push_back(ReadRequest(socket, buffer, codec));
@@ -57,7 +57,7 @@ class EchoTestServer final {
     xrpc::io::Socket socket = listener_.Accept();
     std::string buffer;
     xrpc::FrameCodec codec;
-    const xrpc::ProtocolRequest request = ReadRequest(socket, buffer, codec);
+    const xrpc::RawRequest request = ReadRequest(socket, buffer, codec);
     request_received.set_value();
 
     release_response.wait();
@@ -73,8 +73,7 @@ class EchoTestServer final {
   }
 
  private:
-  static auto ReadRequest(xrpc::io::Socket &socket, std::string &buffer, xrpc::FrameCodec &codec)
-      -> xrpc::ProtocolRequest {
+  static auto ReadRequest(xrpc::io::Socket &socket, std::string &buffer, xrpc::FrameCodec &codec) -> xrpc::RawRequest {
     char chunk[4096];
     while (true) {
       const xrpc::DecodeResult decoded = codec.TryDecode(buffer);
@@ -83,7 +82,7 @@ class EchoTestServer final {
           throw std::runtime_error("expected request frame");
         }
 
-        xrpc::ProtocolRequest request = *decoded.request_;
+        xrpc::RawRequest request = *decoded.request_;
         buffer.erase(0, decoded.consumed_);
         return request;
       }
@@ -100,7 +99,7 @@ class EchoTestServer final {
     }
   }
 
-  static auto MakeEchoResponse(const xrpc::ProtocolRequest &request) -> xrpc::ProtocolResponse {
+  static auto MakeEchoResponse(const xrpc::RawRequest &request) -> xrpc::RawResponse {
     xrpc::test::EchoRequest echo_request;
     if (!echo_request.ParseFromString(request.payload_)) {
       throw std::runtime_error("failed to parse test request");
@@ -109,10 +108,9 @@ class EchoTestServer final {
     xrpc::test::EchoResponse echo_response;
     echo_response.set_message("echo: " + echo_request.message());
 
-    xrpc::ProtocolResponse response;
+    xrpc::RawResponse response;
     response.request_id_ = request.request_id_;
-    response.error_code_ = 0;
-    response.error_text_.clear();
+    response.status_ = xrpc::Status::Ok();
     response.payload_ = echo_response.SerializeAsString();
     return response;
   }

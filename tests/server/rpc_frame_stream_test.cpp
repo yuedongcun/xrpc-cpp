@@ -13,7 +13,7 @@
 namespace {
 
 auto MakeRequestFrame(std::string payload, std::uint64_t request_id) -> std::string {
-  xrpc::ProtocolRequest protocol_req;
+  xrpc::RawRequest protocol_req;
   protocol_req.request_id_ = request_id;
   protocol_req.service_name_ = "EchoService";
   protocol_req.method_name_ = "Echo";
@@ -23,7 +23,7 @@ auto MakeRequestFrame(std::string payload, std::uint64_t request_id) -> std::str
   return codec.EncodeRequest(protocol_req);
 }
 
-auto DecodeResponseFrame(const std::string &frame) -> xrpc::ProtocolResponse {
+auto DecodeResponseFrame(const std::string &frame) -> xrpc::RawResponse {
   xrpc::FrameCodec codec;
   xrpc::DecodeResult decoded = codec.TryDecode(frame);
   EXPECT_EQ(decoded.error_, xrpc::ProtocolError::Ok);
@@ -53,7 +53,7 @@ TEST(RpcFrameStreamTest, FeedBytesHandlesRepeatedAndChangedRequestHeaders) {
   const std::string repeated_one = MakeRequestFrame("hello-1", 101);
   const std::string repeated_two = MakeRequestFrame("hello-2", 102);
 
-  xrpc::ProtocolRequest different_header_request;
+  xrpc::RawRequest different_header_request;
   different_header_request.request_id_ = 103;
   different_header_request.service_name_ = "OtherService";
   different_header_request.method_name_ = "OtherMethod";
@@ -127,7 +127,7 @@ TEST(RpcFrameStreamTest, FeedBytesClosesFrameStreamWhenDeclaredPayloadExceedsDef
 TEST(RpcFrameStreamTest, FeedBytesClosesFrameStreamWhenPayloadExceedsConfiguredLimit) {
   xrpc::RpcFrameStream frame_stream(xrpc::MakeProtocolLimits(3));
 
-  xrpc::ProtocolRequest request;
+  xrpc::RawRequest request;
   request.request_id_ = 501;
   request.service_name_ = "EchoService";
   request.method_name_ = "Echo";
@@ -149,9 +149,9 @@ TEST(RpcFrameStreamTest, EncodeResponseBuildsResponseFrame) {
   response.payload_ = "payload";
 
   const std::string frame = frame_stream.EncodeResponse(std::move(response));
-  const xrpc::ProtocolResponse decoded = DecodeResponseFrame(frame);
+  const xrpc::RawResponse decoded = DecodeResponseFrame(frame);
   EXPECT_EQ(decoded.request_id_, 301U);
-  EXPECT_EQ(decoded.error_code_, 0);
+  EXPECT_TRUE(decoded.status_.ok());
   EXPECT_EQ(decoded.payload_, "payload");
 }
 
@@ -162,9 +162,9 @@ TEST(RpcFrameStreamTest, EncodeResponseMapsRawErrorStatus) {
   raw_response.status_ = {xrpc::StatusCode::Internal, "handler failed"};
 
   const std::string response_frame = frame_stream.EncodeResponse(std::move(raw_response));
-  const xrpc::ProtocolResponse response = DecodeResponseFrame(response_frame);
+  const xrpc::RawResponse response = DecodeResponseFrame(response_frame);
 
   EXPECT_EQ(response.request_id_, 402U);
-  EXPECT_EQ(response.error_code_, static_cast<std::int32_t>(xrpc::StatusCode::Internal));
-  EXPECT_EQ(response.error_text_, "handler failed");
+  EXPECT_EQ(response.status_.code(), xrpc::StatusCode::Internal);
+  EXPECT_EQ(response.status_.message(), "handler failed");
 }

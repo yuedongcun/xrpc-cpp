@@ -13,7 +13,6 @@
 
 #include "io/socket_error.h"
 #include "protocol/protocol_message.h"
-#include "rpc/protocol_adapter.h"
 
 namespace xrpc {
 namespace {
@@ -155,19 +154,6 @@ auto RecvSome(int fd, char *buffer, std::size_t buffer_size) -> ssize_t {
   }
 }
 
-/**
- * @brief Converts a successfully decoded protocol response into the raw client model.
- *
- * @param decoded Frame decoder result with optional response payload.
- * @return Raw response when the frame contained a response message.
- */
-auto DecodeResponse(const DecodeResult &decoded) -> std::optional<RawResponse> {
-  if (!decoded.response_.has_value()) {
-    return std::nullopt;
-  }
-  return ToRawResponse(*decoded.response_);
-}
-
 }  // namespace
 
 /**
@@ -207,7 +193,7 @@ auto TcpTransport::Call(const RawRequest &request, const EffectiveCallOptions &o
   FrameCodec codec(protocol_limits_);
   std::string request_frame;
   try {
-    request_frame = codec.EncodeRequest(ToProtocolRequest(request));
+    request_frame = codec.EncodeRequest(request);
   } catch (...) {
     return fail(CaughtExceptionToStatus("failed to encode request frame"), RequestCommitState::NotSent);
   }
@@ -317,7 +303,7 @@ void TcpTransport::ReaderLoop(int fd) {
   while (true) {
     // Decode Loop
     while (true) {
-      const DecodeResult decoded = codec.TryDecode(buffer);
+      DecodeResult decoded = codec.TryDecode(buffer);
       if (decoded.error_ == ProtocolError::NeedMoreData) {
         break;
       }
@@ -326,14 +312,13 @@ void TcpTransport::ReaderLoop(int fd) {
         return;
       }
 
-      std::optional<RawResponse> response = DecodeResponse(decoded);
-      if (!response.has_value()) {
-        CloseFromReader(fd, {StatusCode::DataLoss, "response frame did not contain ProtocolResponse"});
+      if (!decoded.response_.has_value()) {
+        CloseFromReader(fd, {StatusCode::DataLoss, "response frame did not contain an RPC response"});
         return;
       }
 
-      const std::uint64_t request_id = response->request_id_;
-      CompletePending(request_id, MakeCallSuccess(std::move(*response)));
+      const std::uint64_t request_id = decoded.response_->request_id_;
+      CompletePending(request_id, MakeCallSuccess(std::move(*decoded.response_)));
       buffer.erase(0, decoded.consumed_);
     }
 

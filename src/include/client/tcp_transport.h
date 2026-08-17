@@ -14,7 +14,7 @@
 #include "client/raw_call_result.h"
 #include "io/socket.h"
 #include "protocol/frame_codec.h"
-#include "rpc/raw_message.h"
+#include "protocol/protocol_message.h"
 
 namespace xrpc {
 

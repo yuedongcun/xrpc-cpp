@@ -3,10 +3,9 @@
 #include <string>
 #include <utility>
 
+#include "common/xrpc_exception.h"
 #include "protocol/frame_codec.h"
 #include "protocol/protocol_message.h"
-#include "rpc/protocol_adapter.h"
-#include "common/xrpc_exception.h"
 
 namespace xrpc {
 
@@ -112,7 +111,7 @@ auto RpcFrameStream::FeedBytes(std::string_view bytes) -> FrameStreamFeedResult 
  */
 auto RpcFrameStream::EncodeResponse(RawResponse &&response) const -> std::string {
   FrameCodec codec(protocol_limits_);
-  return codec.EncodeResponse(ToProtocolResponse(std::move(response)));
+  return codec.EncodeResponse(response);
 }
 
 /**
@@ -136,7 +135,7 @@ auto RpcFrameStream::DrainReadableRequests() -> RawRequestBatch {
     }
 
     buffer_.Consume(decoded.consumed_);
-    requests.Push(ToRawRequest(std::move(*decoded.request_)));
+    requests.Push(std::move(*decoded.request_));
   }
 
   return requests;

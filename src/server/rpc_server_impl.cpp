@@ -9,9 +9,8 @@
 #include <utility>
 
 #include "common/xrpc_exception.h"
-#include "naming/consul/consul_registrar.h"
 #include "io/socket.h"
-#include "rpc/raw_message.h"
+#include "naming/consul/consul_registrar.h"
 
 namespace xrpc {
 

@@ -5,6 +5,8 @@
 #include <string>
 #include <string_view>
 
+#include <protocol/xrpc/xrpc_header.pb.h>
+
 #include "common/xrpc_exception.h"
 
 #include "protocol/fixed_header.h"
@@ -84,7 +86,7 @@ TEST(FixedHeaderRobustTest, EncodedLayoutUsesNetworkByteOrder) {
 TEST(FrameCodecRobustTest, EveryPrefixOfAValidFrameNeedsMoreData) {
   FrameCodec codec;
 
-  ProtocolRequest req;
+  RawRequest req;
   req.request_id_ = 100;
   req.service_name_ = "CalculatorService";
   req.method_name_ = "Add";
@@ -109,16 +111,15 @@ TEST(FrameCodecRobustTest, EveryPrefixOfAValidFrameNeedsMoreData) {
 TEST(FrameCodecRobustTest, DecodeTwoFramesFromOneBufferUsingConsumed) {
   FrameCodec codec;
 
-  ProtocolRequest req1;
+  RawRequest req1;
   req1.request_id_ = 1;
   req1.service_name_ = "S1";
   req1.method_name_ = "M1";
   req1.payload_ = "payload-1";
 
-  ProtocolResponse resp2;
+  RawResponse resp2;
   resp2.request_id_ = 2;
-  resp2.error_code_ = 0;
-  resp2.error_text_ = "";
+  resp2.status_ = Status::Ok();
   resp2.payload_ = "payload-2";
 
   std::string frame1 = codec.EncodeRequest(req1);
@@ -145,18 +146,17 @@ TEST(FrameCodecRobustTest, DecodeTwoFramesFromOneBufferUsingConsumed) {
 
   const auto &decoded_resp = *second.response_;
   EXPECT_EQ(decoded_resp.request_id_, 2U);
-  EXPECT_EQ(decoded_resp.error_code_, 0);
-  EXPECT_EQ(decoded_resp.error_text_, "");
+  EXPECT_TRUE(decoded_resp.status_.ok());
+  EXPECT_EQ(decoded_resp.status_.message(), "");
   EXPECT_EQ(decoded_resp.payload_, "payload-2");
 }
 
 TEST(FrameCodecRobustTest, OkResponseWithEmptyErrorTextUsesEmptyHeader) {
   FrameCodec codec;
 
-  ProtocolResponse response;
+  RawResponse response;
   response.request_id_ = 333;
-  response.error_code_ = 0;
-  response.error_text_ = "";
+  response.status_ = Status::Ok();
   response.payload_ = "payload";
 
   const std::string frame = codec.EncodeResponse(response);
@@ -173,18 +173,17 @@ TEST(FrameCodecRobustTest, OkResponseWithEmptyErrorTextUsesEmptyHeader) {
 
   const auto &decoded = *result.response_;
   EXPECT_EQ(decoded.request_id_, response.request_id_);
-  EXPECT_EQ(decoded.error_code_, 0);
-  EXPECT_EQ(decoded.error_text_, "");
+  EXPECT_TRUE(decoded.status_.ok());
+  EXPECT_EQ(decoded.status_.message(), "");
   EXPECT_EQ(decoded.payload_, response.payload_);
 }
 
 TEST(FrameCodecRobustTest, NonOkResponseKeepsEncodedHeader) {
   FrameCodec codec;
 
-  ProtocolResponse response;
+  RawResponse response;
   response.request_id_ = 444;
-  response.error_code_ = 14;
-  response.error_text_ = "unavailable";
+  response.status_ = {StatusCode::Unavailable, "unavailable"};
   response.payload_ = "";
 
   const std::string frame = codec.EncodeResponse(response);
@@ -200,15 +199,15 @@ TEST(FrameCodecRobustTest, NonOkResponseKeepsEncodedHeader) {
 
   const auto &decoded = *result.response_;
   EXPECT_EQ(decoded.request_id_, response.request_id_);
-  EXPECT_EQ(decoded.error_code_, response.error_code_);
-  EXPECT_EQ(decoded.error_text_, response.error_text_);
+  EXPECT_EQ(decoded.status_.code(), response.status_.code());
+  EXPECT_EQ(decoded.status_.message(), response.status_.message());
   EXPECT_EQ(decoded.payload_, "");
 }
 
 TEST(FrameCodecRobustTest, DecodeOneFrameAndLeaveTrailingGarbageUnconsumed) {
   FrameCodec codec;
 
-  ProtocolRequest req;
+  RawRequest req;
   req.request_id_ = 7;
   req.service_name_ = "EchoService";
   req.method_name_ = "Echo";
@@ -304,7 +303,7 @@ TEST(FrameCodecRobustTest, OversizedCombinedFrameIsRejectedBeforeBodyArrives) {
 TEST(FrameCodecRobustTest, EncodingHonorsPayloadLimit) {
   const ProtocolLimits limits{.max_header_size_ = 64, .max_payload_size_ = 3, .max_frame_size_ = 128};
   FrameCodec codec(limits);
-  ProtocolRequest request;
+  RawRequest request;
   request.request_id_ = 1;
   request.service_name_ = "S";
   request.method_name_ = "M";
@@ -357,6 +356,23 @@ TEST(FrameCodecRobustTest, CorruptedResponseHeaderReturnsDecodeError) {
   EXPECT_FALSE(result.HasMessage());
 }
 
+TEST(FrameCodecRobustTest, UnknownResponseStatusBecomesDataLoss) {
+  FrameCodec codec;
+  RpcResponseHeader header;
+  header.set_error_code(99);
+  header.set_error_text("unknown status");
+
+  std::string header_bytes;
+  ASSERT_TRUE(header.SerializeToString(&header_bytes));
+  const std::string frame = MakeRawFrame(MessageType::Response, header_bytes, "payload", 223);
+
+  const DecodeResult result = codec.TryDecode(frame);
+  ASSERT_EQ(result.error_, ProtocolError::Ok);
+  ASSERT_TRUE(result.response_.has_value());
+  EXPECT_EQ(result.response_->status_.code(), StatusCode::DataLoss);
+  EXPECT_EQ(result.response_->status_.message(), "response contains an invalid RPC status code");
+}
+
 TEST(FrameCodecRobustTest, PayloadMayContainNullBytesAndNonTextBytes) {
   FrameCodec codec;
 
@@ -368,7 +384,7 @@ TEST(FrameCodecRobustTest, PayloadMayContainNullBytesAndNonTextBytes) {
   payload.push_back('\0');
   payload.push_back(static_cast<char>(0x80));
 
-  ProtocolRequest req;
+  RawRequest req;
   req.request_id_ = 888;
   req.service_name_ = "BinaryService";
   req.method_name_ = "Upload";
@@ -391,7 +407,7 @@ TEST(FrameCodecRobustTest, PayloadMayContainNullBytesAndNonTextBytes) {
 TEST(FrameCodecRobustTest, CompleteFixedHeaderButIncompleteHeaderBytesNeedsMoreData) {
   FrameCodec codec;
 
-  ProtocolRequest req;
+  RawRequest req;
   req.request_id_ = 9;
   req.service_name_ = "S";
   req.method_name_ = "M";
@@ -411,7 +427,7 @@ TEST(FrameCodecRobustTest, CompleteFixedHeaderButIncompleteHeaderBytesNeedsMoreD
 TEST(FrameCodecRobustTest, IncompletePayloadNeedsMoreData) {
   FrameCodec codec;
 
-  ProtocolRequest req;
+  RawRequest req;
   req.request_id_ = 10;
   req.service_name_ = "S";
   req.method_name_ = "M";

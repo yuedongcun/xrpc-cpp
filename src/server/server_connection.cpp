@@ -9,7 +9,6 @@
 
 #include <sys/socket.h>
 
-#include "rpc/protocol_adapter.h"
 #include "server/dispatch_mailbox.h"
 #include "server/service_registry.h"
 
@@ -407,7 +406,7 @@ auto ServerConnection::RejectRequestDueToBackpressure(RawRequest &&request, std:
  */
 auto ServerConnection::EncodeResponseOnWorker(RawResponse &&response) const -> std::string {
   FrameCodec codec(protocol_limits_);
-  return codec.EncodeResponse(ToProtocolResponse(std::move(response)));
+  return codec.EncodeResponse(response);
 }
 
 /**

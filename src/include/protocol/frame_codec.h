@@ -88,10 +88,10 @@ class FrameCodec final {
   explicit FrameCodec(ProtocolLimits limits);
 
   /** @return Encoded request frame bytes ready for a TCP stream. */
-  auto EncodeRequest(const ProtocolRequest &req) -> std::string;
+  auto EncodeRequest(const RawRequest &request) -> std::string;
 
   /** @return Encoded response frame bytes ready for a TCP stream. */
-  auto EncodeResponse(const ProtocolResponse &resp) -> std::string;
+  auto EncodeResponse(const RawResponse &response) -> std::string;
 
   /**
    * @brief Attempts to decode one request or response frame.

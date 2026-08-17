@@ -73,7 +73,7 @@ auto MakeRequestFrame(std::string message, std::uint64_t request_id) -> std::str
   xrpc::test::EchoRequest request;
   request.set_message(std::move(message));
 
-  xrpc::ProtocolRequest protocol_request;
+  xrpc::RawRequest protocol_request;
   protocol_request.request_id_ = request_id;
   protocol_request.service_name_ = "EchoService";
   protocol_request.method_name_ = "Echo";
@@ -172,7 +172,7 @@ auto DecodeEchoMessage(std::string_view frame, std::uint64_t expected_request_id
 
   const auto &protocol_response = *decoded.response_;
   EXPECT_EQ(protocol_response.request_id_, expected_request_id);
-  EXPECT_EQ(protocol_response.error_code_, 0);
+  EXPECT_TRUE(protocol_response.status_.ok());
   xrpc::test::EchoResponse response;
   EXPECT_TRUE(response.ParseFromString(protocol_response.payload_));
   return response.message();
@@ -186,7 +186,7 @@ auto DecodeResponseStatus(std::string_view frame, std::uint64_t expected_request
 
   const auto &protocol_response = *decoded.response_;
   EXPECT_EQ(protocol_response.request_id_, expected_request_id);
-  return {static_cast<xrpc::StatusCode>(protocol_response.error_code_), protocol_response.error_text_};
+  return protocol_response.status_;
 }
 
 struct ConnectedPair {
@@ -362,7 +362,7 @@ TEST(ServerConnectionTest, HandlesConcurrentResponsesWithThreadPoolExecutor) {
 
   xrpc::test::EchoRequest slow_request;
   slow_request.set_message("slow");
-  xrpc::ProtocolRequest slow_protocol_request;
+  xrpc::RawRequest slow_protocol_request;
   slow_protocol_request.request_id_ = 31;
   slow_protocol_request.service_name_ = "EchoService";
   slow_protocol_request.method_name_ = "SlowEcho";
@@ -370,7 +370,7 @@ TEST(ServerConnectionTest, HandlesConcurrentResponsesWithThreadPoolExecutor) {
 
   xrpc::test::EchoRequest fast_request;
   fast_request.set_message("fast");
-  xrpc::ProtocolRequest fast_protocol_request;
+  xrpc::RawRequest fast_protocol_request;
   fast_protocol_request.request_id_ = 32;
   fast_protocol_request.service_name_ = "EchoService";
   fast_protocol_request.method_name_ = "Echo";
@@ -478,12 +478,12 @@ TEST(ServerConnectionTest, RejectsEntireReadBatchWhenInflightLimitWouldBeExceede
 
   xrpc::test::EchoRequest request;
   request.set_message("slow");
-  xrpc::ProtocolRequest protocol_request;
+  xrpc::RawRequest protocol_request;
   protocol_request.request_id_ = 51;
   protocol_request.service_name_ = "EchoService";
   protocol_request.method_name_ = "SlowEcho";
   protocol_request.payload_ = request.SerializeAsString();
-  xrpc::ProtocolRequest rejected_protocol_request = protocol_request;
+  xrpc::RawRequest rejected_protocol_request = protocol_request;
   rejected_protocol_request.request_id_ = 52;
   xrpc::FrameCodec codec;
   pair.client_socket_.WriteAll(codec.EncodeRequest(protocol_request) + codec.EncodeRequest(rejected_protocol_request));

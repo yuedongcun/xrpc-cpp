@@ -62,10 +62,9 @@ class EchoTestServer final {
           xrpc::test::EchoResponse echo_response;
           echo_response.set_message("echo: " + echo_request.message());
 
-          xrpc::ProtocolResponse response;
+          xrpc::RawResponse response;
           response.request_id_ = request.request_id_;
-          response.error_code_ = 0;
-          response.error_text_.clear();
+          response.status_ = xrpc::Status::Ok();
           response.payload_ = echo_response.SerializeAsString();
 
           socket.WriteAll(codec.EncodeResponse(response));

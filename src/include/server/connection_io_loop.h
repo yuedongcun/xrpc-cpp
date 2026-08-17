@@ -12,7 +12,7 @@
 #include "io/socket.h"
 #include "io/uring_context.h"
 #include "protocol/frame_codec.h"
-#include "rpc/raw_message.h"
+#include "protocol/protocol_message.h"
 #include "server/dispatch_mailbox.h"
 #include "server/server_backpressure.h"
 #include "server/server_connection.h"

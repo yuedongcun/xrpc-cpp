@@ -1,11 +1,15 @@
 #pragma once
 
+#include <functional>
 #include <string>
 #include <unordered_map>
 
-#include "rpc/raw_message.h"
+#include "protocol/protocol_message.h"
 
 namespace xrpc {
+
+/** @brief Server method signature used by the service registry. */
+using RawHandler = std::function<RawResponse(RawRequest)>;
 
 /**
  * @brief Owns all registered services and performs raw request dispatch.

@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "protocol/frame_codec.h"
-#include "rpc/raw_message.h"
+#include "protocol/protocol_message.h"
 
 namespace xrpc {
 
