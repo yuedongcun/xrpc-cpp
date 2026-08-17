@@ -62,7 +62,7 @@ xrpc_add_test(
 
 xrpc_add_test(
     consul_discovery_integration_test
-    discovery/consul_discovery_integration_test.cpp
+    naming/consul_discovery_integration_test.cpp
     TIMEOUT ${XRPC_TEST_EXTERNAL_TIMEOUT}
 )
 set_tests_properties(consul_discovery_integration_test PROPERTIES LABELS external)

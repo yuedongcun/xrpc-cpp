@@ -17,7 +17,7 @@
 #include "client/effective_call_options.h"
 #include "client/raw_call_result.h"
 #include "client/tcp_transport.h"
-#include "discovery/service_discovery.h"
+#include "naming/service_discovery.h"
 #include "protocol/frame_codec.h"
 #include "rpc/raw_message.h"
 

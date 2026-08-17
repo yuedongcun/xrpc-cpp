@@ -34,10 +34,11 @@ set(XRPC_SOURCES
     client/tcp_transport.cpp
     client/rpc_client_impl.cpp
     client/rpc_client.cpp
-    discovery/service_discovery.cpp
-    discovery/consul_http_client.cpp
-    discovery/consul_discovery.cpp
-    discovery/consul_registrar.cpp
+    naming/service_discovery.cpp
+    naming/static_discovery.cpp
+    naming/consul/consul_http_client.cpp
+    naming/consul/consul_discovery.cpp
+    naming/consul/consul_registrar.cpp
     server/service_registry.cpp
     server/server_config.cpp
     server/rpc_frame_stream.cpp

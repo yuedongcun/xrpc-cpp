@@ -5,7 +5,7 @@
 
 #include <xrpc/status.h>
 
-#include "discovery/consul_http_client.h"
+#include "naming/consul/consul_http_client.h"
 
 namespace xrpc {
 

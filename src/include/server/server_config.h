@@ -8,7 +8,7 @@
 
 #include <xrpc/rpc_server.h>
 
-#include "discovery/consul_registrar.h"
+#include "naming/consul/consul_registrar.h"
 #include "protocol/frame_codec.h"
 #include "server/server_backpressure.h"
 

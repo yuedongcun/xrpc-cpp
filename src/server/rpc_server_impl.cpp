@@ -9,7 +9,7 @@
 #include <utility>
 
 #include "common/xrpc_exception.h"
-#include "discovery/consul_registrar.h"
+#include "naming/consul/consul_registrar.h"
 #include "io/socket.h"
 #include "rpc/raw_message.h"
 

@@ -8,8 +8,8 @@
 #include <thread>
 #include <vector>
 
-#include "discovery/consul_http_client.h"
-#include "discovery/service_discovery.h"
+#include "naming/consul/consul_http_client.h"
+#include "naming/service_discovery.h"
 
 namespace xrpc {
 
@@ -58,7 +58,7 @@ class ConsulDiscovery final : public ServiceDiscovery {
   [[nodiscard]] auto Fetch(bool blocking) -> Status;
 
   /** @brief Background loop that refreshes service endpoints until stopped. */
-  void RefreshLoop(std::stop_token stop_token);
+  void RefreshLoop(const std::stop_token &stop_token);
 
   /** @brief Publishes a new endpoint snapshot and Consul index under the mutex. */
   void SetSnapshot(std::vector<Endpoint> endpoints, std::uint64_t index);

@@ -1,4 +1,4 @@
-#include "discovery/consul_registrar.h"
+#include "naming/consul/consul_registrar.h"
 
 #include <nlohmann/json.hpp>
 
@@ -19,7 +19,7 @@ ConsulRegistrar::ConsulRegistrar(const std::string &consul_address) : http_clien
  * @return `Status::Ok()` on successful Consul write, otherwise validation or agent failure status.
  */
 auto ConsulRegistrar::Register(const Options &options) -> Status {
-  const Status validation_status = ValidateOptions(options);
+  Status validation_status = ValidateOptions(options);
   if (!validation_status.ok()) {
     return validation_status;
   }

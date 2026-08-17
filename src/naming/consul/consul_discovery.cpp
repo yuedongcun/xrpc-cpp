@@ -1,4 +1,4 @@
-#include "discovery/consul_discovery.h"
+#include "naming/consul/consul_discovery.h"
 
 #include <algorithm>
 #include <charconv>
@@ -181,7 +181,7 @@ auto ConsulDiscovery::Fetch(bool blocking) -> Status {
  *
  * @param stop_token Cooperative stop token owned by the refresh jthread.
  */
-void ConsulDiscovery::RefreshLoop(std::stop_token stop_token) {
+void ConsulDiscovery::RefreshLoop(const std::stop_token &stop_token) {
   while (!stop_token.stop_requested()) {
     const Status status = Fetch(true);
     if (!status.ok() && !stop_token.stop_requested()) {

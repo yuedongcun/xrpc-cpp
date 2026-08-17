@@ -1,4 +1,4 @@
-#include "discovery/consul_http_client.h"
+#include "naming/consul/consul_http_client.h"
 
 #include <algorithm>
 #include <cctype>
@@ -286,9 +286,7 @@ auto ConsulHttpClient::SendRequest(std::string_view method, std::string_view pat
     std::string body_buffer = buffer.substr(header_end + 4);
 
     const std::size_t status_line_end = header_block.find("\r\n");
-    const std::string_view status_line = status_line_end == std::string::npos
-                                             ? std::string_view(header_block)
-                                             : std::string_view(header_block.data(), status_line_end);
+    const std::string_view status_line = std::string_view(header_block).substr(0, status_line_end);
     const std::size_t first_space = status_line.find(' ');
     const std::size_t second_space = status_line.find(' ', first_space + 1);
     if (first_space == std::string_view::npos || second_space == std::string_view::npos) {
