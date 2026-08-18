@@ -152,19 +152,15 @@ auto DecodeStatus(std::int32_t code, std::string message) -> Status {
   switch (static_cast<StatusCode>(code)) {
     case StatusCode::Ok:
       return Status::Ok();
-    case StatusCode::Cancelled:
     case StatusCode::InvalidArgument:
     case StatusCode::DeadlineExceeded:
     case StatusCode::NotFound:
-    case StatusCode::AlreadyExists:
-    case StatusCode::PermissionDenied:
     case StatusCode::ResourceExhausted:
     case StatusCode::FailedPrecondition:
     case StatusCode::Unimplemented:
     case StatusCode::Internal:
     case StatusCode::Unavailable:
     case StatusCode::DataLoss:
-    case StatusCode::Unauthenticated:
       return {static_cast<StatusCode>(code), std::move(message)};
   }
   return {StatusCode::DataLoss, "response contains an invalid RPC status code"};

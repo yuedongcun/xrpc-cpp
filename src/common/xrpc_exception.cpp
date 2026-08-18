@@ -6,8 +6,6 @@ namespace xrpc {
 
 XrpcException::XrpcException(StatusCode code, const std::string &message) : std::runtime_error(message), code_(code) {}
 
-auto XrpcException::code() const noexcept -> StatusCode { return code_; }
-
 auto XrpcException::status() const -> Status { return {code_, what()}; }
 
 auto ExceptionToStatus(const XrpcException &exception) -> Status { return exception.status(); }

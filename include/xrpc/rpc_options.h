@@ -1,5 +1,10 @@
 #pragma once
 
+/**
+ * @file rpc_options.h
+ * @brief Shared call options and protocol limits for public RPC APIs.
+ */
+
 #include <chrono>
 #include <cstddef>
 #include <string>

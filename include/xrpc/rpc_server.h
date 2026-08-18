@@ -1,5 +1,10 @@
 #pragma once
 
+/**
+ * @file rpc_server.h
+ * @brief Public RPC server API and service registration helpers.
+ */
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>

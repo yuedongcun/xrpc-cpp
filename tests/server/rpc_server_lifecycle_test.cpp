@@ -135,7 +135,7 @@ TEST(RpcServerLifecycleTest, StopDrainsAdmittedHandlerAndWritesResponse) {
   std::shared_future<void> release_handler_future = release_handler.get_future().share();
   const xrpc::Status registration_status = server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
       "EchoService", "Echo", [&](const xrpc::test::EchoRequest &request) {
-        if (handler_calls.fetch_add(1, std::memory_order_relaxed) == 0) {
+        if (handler_calls.fetch_add(1) == 0) {
           handler_started.set_value();
         }
         release_handler_future.wait();
@@ -181,7 +181,7 @@ TEST(RpcServerLifecycleTest, StopDrainsAdmittedHandlerAndWritesResponse) {
 
   ASSERT_EQ(run_finished_future.wait_for(WaitTimeout), std::future_status::ready);
   EXPECT_TRUE(run_finished_future.get().ok());
-  EXPECT_EQ(handler_calls.load(std::memory_order_relaxed), 1U);
+        EXPECT_EQ(handler_calls.load(), 1U);
   run_thread.join();
 }
 
@@ -230,20 +230,20 @@ TEST(RpcServerLifecycleTest, ConcurrentListenAndRegisterMethodAreSerialized) {
   xrpc::Status register_status;
 
   std::jthread listen_thread([&]() {
-    while (!start.load(std::memory_order_acquire)) {
+    while (!start.load()) {
       std::this_thread::yield();
     }
     listen_status = server.Listen("127.0.0.1", 0);
   });
   std::jthread register_thread([&]() {
-    while (!start.load(std::memory_order_acquire)) {
+    while (!start.load()) {
       std::this_thread::yield();
     }
     register_status =
         server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>("EchoService", "Echo", Echo);
   });
 
-  start.store(true, std::memory_order_release);
+    start.store(true);
   listen_thread.join();
   register_thread.join();
 
@@ -332,7 +332,7 @@ TEST(RpcServerLifecycleTest, PerConnectionInflightLimitReturnsResourceExhausted)
 
   const xrpc::Status registration_status = server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
       "EchoService", "Echo", [&](const xrpc::test::EchoRequest &request) {
-        if (!first_handler_started.exchange(true, std::memory_order_acq_rel)) {
+        if (!first_handler_started.exchange(true)) {
           handler_started.set_value();
         }
         release_handler_future.wait();
@@ -385,7 +385,7 @@ TEST(RpcServerLifecycleTest, GlobalPendingLimitReturnsResourceExhausted) {
 
   const xrpc::Status registration_status = server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>(
       "EchoService", "Echo", [&](const xrpc::test::EchoRequest &request) {
-        if (!first_handler_started.exchange(true, std::memory_order_acq_rel)) {
+        if (!first_handler_started.exchange(true)) {
           handler_started.set_value();
         }
         release_handler_future.wait();

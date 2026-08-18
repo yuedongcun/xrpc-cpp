@@ -1,5 +1,10 @@
 #pragma once
 
+/**
+ * @file rpc_client.h
+ * @brief Public synchronous RPC client API and client options.
+ */
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>

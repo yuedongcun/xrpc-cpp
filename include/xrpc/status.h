@@ -1,5 +1,10 @@
 #pragma once
 
+/**
+ * @file status.h
+ * @brief Public status and status-or-value error types.
+ */
+
 #include <cstdint>
 #include <exception>
 #include <optional>
@@ -10,19 +15,15 @@ namespace xrpc {
 
 enum class StatusCode : std::uint8_t {
   Ok = 0,
-  Cancelled = 1,
   InvalidArgument = 2,
   DeadlineExceeded = 3,
   NotFound = 4,
-  AlreadyExists = 5,
-  PermissionDenied = 6,
   ResourceExhausted = 7,
   FailedPrecondition = 8,
   Unimplemented = 9,
   Internal = 10,
   Unavailable = 11,
   DataLoss = 12,
-  Unauthenticated = 13,
 };
 
 class [[nodiscard]] Status final {

@@ -22,7 +22,6 @@ class XrpcException : public std::runtime_error {
  public:
   XrpcException(StatusCode code, const std::string &message);
 
-  [[nodiscard]] auto code() const noexcept -> StatusCode;
   [[nodiscard]] auto status() const -> Status;
 
  private:

@@ -4,7 +4,6 @@
 #include <chrono>
 #include <future>
 #include <stdexcept>
-#include <string>
 #include <thread>
 
 #include <gtest/gtest.h>
@@ -57,16 +56,16 @@ TEST(RuntimeTaskTest, WaitBlocksUntilStartedTaskCompletes) {
   std::jthread waiter([&task, &wait_returned, &waiter_ready]() {
     waiter_ready.set_value();
     task.Wait();
-    wait_returned.store(true, std::memory_order_release);
+    wait_returned.store(true);
   });
 
   ASSERT_EQ(waiter_ready_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
-  EXPECT_FALSE(wait_returned.load(std::memory_order_acquire));
+  EXPECT_FALSE(wait_returned.load());
 
   task.Start();
   waiter.join();
 
-  EXPECT_TRUE(wait_returned.load(std::memory_order_acquire));
+  EXPECT_TRUE(wait_returned.load());
   EXPECT_TRUE(called);
 }
 
