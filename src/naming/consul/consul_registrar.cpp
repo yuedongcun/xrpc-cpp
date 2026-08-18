@@ -4,20 +4,8 @@
 
 namespace xrpc {
 
-/**
- * @brief Creates a registrar for one Consul agent.
- *
- * @param consul_address Consul agent address in `host:port` form.
- */
 ConsulRegistrar::ConsulRegistrar(const std::string &consul_address) : http_client_(consul_address) {}
 
-/**
- * @brief Registers this process as a Consul service instance.
- *
- * On success, the registrar records enough state to deregister the same service id later. On
- * @param options User-facing service identity and advertised address.
- * @return `Status::Ok()` on successful Consul write, otherwise validation or agent failure status.
- */
 auto ConsulRegistrar::Register(const Options &options) -> Status {
   Status validation_status = ValidateOptions(options);
   if (!validation_status.ok()) {
@@ -35,11 +23,6 @@ auto ConsulRegistrar::Register(const Options &options) -> Status {
   return Status::Ok();
 }
 
-/**
- * @brief Deregisters the previously registered service instance if one exists.
- *
- * @return `Status::Ok()` when nothing is registered or Consul accepts the deregistration request.
- */
 auto ConsulRegistrar::Deregister() -> Status {
   if (!registered_) {
     return Status::Ok();
@@ -55,15 +38,8 @@ auto ConsulRegistrar::Deregister() -> Status {
   return Status::Ok();
 }
 
-/** @return true after successful registration and before successful deregistration. */
 auto ConsulRegistrar::registered() const -> bool { return registered_; }
 
-/**
- * @brief Validates service registration options.
- *
- * @param options User-facing service registration options.
- * @return OK, or an invalid-argument status describing the first invalid field.
- */
 auto ConsulRegistrar::ValidateOptions(const Options &options) -> Status {
   if (options.service_name_.empty()) {
     return {StatusCode::InvalidArgument, "ConsulRegistrar service_name must not be empty"};
@@ -83,12 +59,6 @@ auto ConsulRegistrar::ValidateOptions(const Options &options) -> Status {
   return Status::Ok();
 }
 
-/**
- * @brief Builds the JSON body accepted by Consul's `/v1/agent/service/register` API.
- *
- * @param options Validated service registration config.
- * @return Compact JSON registration payload.
- */
 auto ConsulRegistrar::BuildRegisterPayload(const Options &options) const -> std::string {
   nlohmann::json payload;
   payload["Name"] = options.service_name_;

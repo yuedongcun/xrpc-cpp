@@ -13,15 +13,8 @@ namespace xrpc {
 
 namespace {
 
-/**
- * @brief Returns true when a listen address binds all local interfaces.
- *
- * @param host Listen address configured by the caller.
- * @return true when `host` is an IPv4 or IPv6 wildcard bind address.
- */
 auto IsWildcardAddress(std::string_view host) -> bool { return host == "0.0.0.0" || host == "::"; }
 
-/** @brief Resolves the public zero value to a concrete worker count. */
 auto ResolveWorkerThreads(std::size_t worker_threads) -> std::size_t {
   if (worker_threads > 0) {
     return worker_threads;
@@ -33,16 +26,6 @@ auto ResolveWorkerThreads(std::size_t worker_threads) -> std::size_t {
 
 }  // namespace
 
-/**
- * @brief Validates public server options and resolves internal runtime configuration.
- *
- * Later server code can rely on all numeric resource limits being non-zero and all optional Consul fields being
- * internally coherent.
- *
- * @param options User-facing server options.
- * @return Normalized server configuration.
- * @throws ConfigException when any option combination is invalid.
- */
 auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerConfig {
   if (options.listen_backlog_ == 0) {
     throw ConfigException("RpcServer listen_backlog must be greater than 0");
@@ -101,27 +84,8 @@ auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerConfig {
   };
 }
 
-/**
- * @brief Returns whether this server should register itself in Consul.
- *
- * @param config Normalized server configuration.
- * @return true when a non-empty service name enables registration.
- */
 auto ServiceRegistrationEnabled(const ServerConfig &config) -> bool { return !config.consul_.service_name_.empty(); }
 
-/**
- * @brief Builds the final Consul registrar options after the listen socket is bound.
- *
- * Wildcard listen addresses are local bind choices, not useful advertised addresses, so the default advertised address
- * falls back to loopback unless the user configured one explicitly.
- *
- * @param config Normalized server configuration.
- * @param host Listen host passed to `RpcServer::Listen()`.
- * @param listen_port Actual bound listen port.
- * @return Fully resolved Consul registrar options.
- * @throws LifecycleException when service registration is disabled.
- * @throws ConfigException when the advertised address or port cannot be derived safely.
- */
 auto ResolveRegistrarOptions(const ServerConfig &config, std::string_view host, std::uint16_t listen_port)
     -> ConsulRegistrar::Options {
   if (!ServiceRegistrationEnabled(config)) {

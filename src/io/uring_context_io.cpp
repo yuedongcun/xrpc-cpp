@@ -16,12 +16,6 @@
 namespace xrpc::io {
 namespace {
 
-/**
- * @brief Converts a C++ timeout duration to the kernel timeout structure used by io_uring.
- *
- * @param timeout Requested timeout. Negative durations are clamped to zero.
- * @return Kernel timespec value owned by an `Operation`.
- */
 auto MakeKernelTimespec(std::chrono::nanoseconds timeout) -> __kernel_timespec {
   if (timeout < std::chrono::nanoseconds::zero()) {
     timeout = std::chrono::nanoseconds::zero();
@@ -38,24 +32,12 @@ auto MakeKernelTimespec(std::chrono::nanoseconds timeout) -> __kernel_timespec {
 
 }  // namespace
 
-/**
- * @brief Submits one user-visible operation to io_uring.
- *
- * Ownership of `operation` transfers to SQE user data after successful submit and is recovered in
- * `ProcessCqe()`. If shutdown has started, the awaitable completes synchronously as canceled.
- *
- * @tparam Prep Callable that prepares the SQE.
- * @param operation Operation state bound to the caller's awaitable.
- * @param prep SQE preparation callback.
- */
 template <typename Prep>
 void UringContext::Runtime::SubmitOperation(std::unique_ptr<Operation> operation, Prep &&prep) {
   bool tracked_timeout = false;
   try {
     AssertRunThread("io_uring submission");
     if (stop_requested_.load()) {
-      // After Stop(), new awaitables complete synchronously as canceled
-      // instead of leaking an operation that will never be submitted.
       CompleteAwaitableState(*operation, MakeCancelledResult(*operation));
       RecycleOperation(std::move(operation));
       return;
@@ -78,8 +60,7 @@ void UringContext::Runtime::SubmitOperation(std::unique_ptr<Operation> operation
     }
 
     ++pending_io_operations_;
-    // Ownership transfers to the kernel-visible CQE user data. ProcessCqe()
-    // rebuilds the unique_ptr and returns the Operation to the pool.
+
     [[maybe_unused]] Operation *released = operation.release();
   } catch (...) {
     if (operation) {
@@ -92,11 +73,6 @@ void UringContext::Runtime::SubmitOperation(std::unique_ptr<Operation> operation
   }
 }
 
-/**
- * @brief Gets an operation object from the pool or allocates a new one.
- *
- * @return Empty operation ready to be populated by a submission API.
- */
 auto UringContext::Runtime::AcquireOperation() -> std::unique_ptr<Operation> {
   if (operation_pool_.empty()) {
     return std::make_unique<Operation>();
@@ -107,22 +83,11 @@ auto UringContext::Runtime::AcquireOperation() -> std::unique_ptr<Operation> {
   return operation;
 }
 
-/**
- * @brief Resets and returns an operation object to the pool.
- *
- * @param operation Operation whose awaitable link has already been completed or detached.
- */
 void UringContext::Runtime::RecycleOperation(std::unique_ptr<Operation> operation) {
   *operation = Operation{};
   operation_pool_.push_back(std::move(operation));
 }
 
-/**
- * @brief Processes one completion queue entry.
- *
- * @param cqe Completion queue entry returned by the kernel.
- * @throws InternalException when completion accounting or cancellation status is inconsistent.
- */
 void UringContext::Runtime::ProcessCqe(io_uring_cqe *cqe) {
   auto *raw_operation = static_cast<Operation *>(io_uring_cqe_get_data(cqe));
   if (raw_operation == nullptr) {
@@ -132,8 +97,6 @@ void UringContext::Runtime::ProcessCqe(io_uring_cqe *cqe) {
 
   std::unique_ptr<Operation> operation(raw_operation);
   if (operation->type_ == OperationType::Wakeup) {
-    // Wakeups are event-loop control messages, not user-visible I/O, so they
-    // are excluded from pending_io_operations_ accounting.
     ProcessWakeupCqe(*operation, cqe);
     RecycleOperation(std::move(operation));
     return;
@@ -162,8 +125,6 @@ void UringContext::Runtime::ProcessCqe(io_uring_cqe *cqe) {
   io_uring_cqe_seen(&ring_, cqe);
 
   if (operation->type_ == OperationType::Cancel) {
-    // Cancel completions are bookkeeping. Linux may report that the target
-    // already completed, was already canceled, or no longer exists.
     if (result.result_ < 0 && result.error_code_ != ENOENT && result.error_code_ != EALREADY &&
         result.error_code_ != ECANCELED) {
       throw InternalException(MakeErrorMessage("io_uring cancel", result.error_code_));
@@ -178,12 +139,6 @@ void UringContext::Runtime::ProcessCqe(io_uring_cqe *cqe) {
   RecycleOperation(std::move(operation));
 }
 
-/**
- * @brief Builds the completion result returned for submissions after stop.
- *
- * @param operation Operation being canceled before kernel submission.
- * @return ECANCELED completion result.
- */
 auto UringContext::Runtime::MakeCancelledResult(const Operation &operation) -> IoResult {
   IoResult result;
   result.type_ = operation.type_;
@@ -194,12 +149,6 @@ auto UringContext::Runtime::MakeCancelledResult(const Operation &operation) -> I
   return result;
 }
 
-/**
- * @brief Stores a completion result and resumes the awaiting coroutine.
- *
- * @param operation Operation whose awaitable state should be completed.
- * @param result Completion result to expose through `await_resume()`.
- */
 void UringContext::Runtime::CompleteAwaitableState(Operation &operation, const IoResult &result) {
   detail::AwaitableState *state = operation.awaitable_state_;
   if (state == nullptr) {
@@ -215,11 +164,6 @@ void UringContext::Runtime::CompleteAwaitableState(Operation &operation, const I
   }
 }
 
-/**
- * @brief Detaches an awaitable from an operation after a submission failure.
- *
- * @param operation Operation whose awaitable link should be cleared.
- */
 void UringContext::Runtime::DetachAwaitableState(Operation &operation) noexcept {
   detail::AwaitableState *state = operation.awaitable_state_;
   if (state == nullptr) {
@@ -229,11 +173,6 @@ void UringContext::Runtime::DetachAwaitableState(Operation &operation) noexcept 
   state->operation_ = nullptr;
 }
 
-/**
- * @brief Submits cancellation requests for all operations associated with a file descriptor.
- *
- * @param fd File descriptor whose pending operations should be canceled.
- */
 void UringContext::Runtime::SubmitCancelFd(int fd) {
   AssertRunThread("UringContext::CancelFd");
 
@@ -259,11 +198,6 @@ void UringContext::Runtime::SubmitCancelFd(int fd) {
   [[maybe_unused]] Operation *released = operation.release();
 }
 
-/**
- * @brief Submits a cancellation request for a specific timeout operation.
- *
- * @param operation_to_cancel Operation pointer stored in the target timeout SQE user data.
- */
 void UringContext::Runtime::SubmitCancelOperation(Operation *operation_to_cancel) {
   AssertRunThread("UringContext timeout cancellation");
 
@@ -288,12 +222,6 @@ void UringContext::Runtime::SubmitCancelOperation(Operation *operation_to_cancel
   [[maybe_unused]] Operation *released = operation.release();
 }
 
-/**
- * @brief Adds a timeout operation to shutdown cancellation tracking.
- *
- * @param operation Operation about to be submitted.
- * @return true when the operation was tracked as a timeout.
- */
 auto UringContext::Runtime::TrackTimeoutOperation(Operation &operation) -> bool {
   if (operation.type_ != OperationType::Timeout) {
     return false;
@@ -302,22 +230,12 @@ auto UringContext::Runtime::TrackTimeoutOperation(Operation &operation) -> bool 
   return true;
 }
 
-/**
- * @brief Removes a timeout operation from shutdown cancellation tracking.
- *
- * @param operation Operation that has completed or failed before completion.
- */
 void UringContext::Runtime::UntrackTimeoutOperation(Operation &operation) {
   if (operation.type_ == OperationType::Timeout) {
     pending_timeout_operations_.erase(&operation);
   }
 }
 
-/**
- * @brief Cancels all pending timeout operations once shutdown starts.
- *
- * Timeout SQEs can otherwise keep `Run()` alive until their deadlines expire.
- */
 void UringContext::Runtime::SubmitCancelPendingTimeouts() {
   if (timeout_cancellations_submitted_) {
     return;
@@ -329,12 +247,6 @@ void UringContext::Runtime::SubmitCancelPendingTimeouts() {
   }
 }
 
-/**
- * @brief Submits an asynchronous accept operation.
- *
- * @param listen_fd Listening socket file descriptor.
- * @return Awaitable that completes with accepted fd or kernel error.
- */
 auto UringContext::Accept(int listen_fd) -> UringAwaitable {
   UringAwaitable awaitable;
   auto operation = runtime_->AcquireOperation();
@@ -349,14 +261,6 @@ auto UringContext::Accept(int listen_fd) -> UringAwaitable {
   return awaitable;
 }
 
-/**
- * @brief Submits an asynchronous receive operation.
- *
- * @param fd Connected socket file descriptor.
- * @param buffer Caller-owned destination buffer that must outlive the await.
- * @param len Destination buffer length.
- * @return Awaitable that completes with bytes read, EOF, or kernel error.
- */
 auto UringContext::Recv(int fd, void *buffer, std::size_t len) -> UringAwaitable {
   UringAwaitable awaitable;
   auto operation = runtime_->AcquireOperation();
@@ -373,14 +277,6 @@ auto UringContext::Recv(int fd, void *buffer, std::size_t len) -> UringAwaitable
   return awaitable;
 }
 
-/**
- * @brief Submits an asynchronous send operation.
- *
- * @param fd Connected socket file descriptor.
- * @param buffer Caller-owned source buffer that must outlive the await.
- * @param len Source buffer length.
- * @return Awaitable that completes with bytes written or kernel error.
- */
 auto UringContext::Send(int fd, const void *buffer, std::size_t len) -> UringAwaitable {
   UringAwaitable awaitable;
   auto operation = runtime_->AcquireOperation();
@@ -397,12 +293,6 @@ auto UringContext::Send(int fd, const void *buffer, std::size_t len) -> UringAwa
   return awaitable;
 }
 
-/**
- * @brief Submits an asynchronous timeout operation.
- *
- * @param timeout Sleep duration.
- * @return Awaitable that completes after timeout or cancellation.
- */
 auto UringContext::SleepFor(std::chrono::nanoseconds timeout) -> UringAwaitable {
   UringAwaitable awaitable;
   auto operation = runtime_->AcquireOperation();
@@ -418,11 +308,6 @@ auto UringContext::SleepFor(std::chrono::nanoseconds timeout) -> UringAwaitable 
   return awaitable;
 }
 
-/**
- * @brief Submits an asynchronous no-op operation.
- *
- * @return Awaitable used by tests and wakeup plumbing.
- */
 auto UringContext::Nop() -> UringAwaitable {
   UringAwaitable awaitable;
   auto operation = runtime_->AcquireOperation();

@@ -15,27 +15,15 @@
 namespace xrpc {
 namespace {
 
-/**
- * @brief Checks whether a byte span can be passed to protobuf's `ParseFromArray`.
- */
 auto FitsProtobufParseArray(std::string_view bytes) -> bool {
   return bytes.size() <= static_cast<std::size_t>(std::numeric_limits<int>::max());
 }
 
-/**
- * @brief Computes the total wire-frame size from protobuf header and payload sizes.
- */
 auto FrameSize(std::size_t header_size, std::size_t payload_size) -> std::uint64_t {
   return static_cast<std::uint64_t>(FixedHeader::SIZE) + static_cast<std::uint64_t>(header_size) +
          static_cast<std::uint64_t>(payload_size);
 }
 
-/**
- * @brief Borrowed view over a complete frame after fixed-header validation.
- *
- * The view never owns bytes. It is consumed within one decode attempt while the caller keeps the backing stream buffer
- * alive.
- */
 struct FrameView {
   ProtocolError error_;
   std::size_t consumed_ = 0;
@@ -44,9 +32,6 @@ struct FrameView {
   std::string_view payload_;
 };
 
-/**
- * @brief Validates that an encoded frame respects all configured limits.
- */
 void ValidateEncodedFrameSize(std::size_t header_size, std::size_t payload_size, const ProtocolLimits &limits) {
   if (header_size > std::numeric_limits<std::uint32_t>::max() || header_size > limits.max_header_size_) {
     throw ProtocolException(StatusCode::ResourceExhausted, "protocol header exceeds configured limit");
@@ -59,12 +44,6 @@ void ValidateEncodedFrameSize(std::size_t header_size, std::size_t payload_size,
   }
 }
 
-/**
- * @brief Builds the final wire frame from fixed-header fields, protobuf metadata, and payload.
- *
- * The function writes directly into the final string so request and response encoding avoid intermediate frame
- * concatenation.
- */
 auto BuildFrame(const FixedHeader &hdr, std::string_view header_bytes, std::string_view payload,
                 const ProtocolLimits &limits) -> std::string {
   ValidateEncodedFrameSize(header_bytes.size(), payload.size(), limits);
@@ -72,8 +51,6 @@ auto BuildFrame(const FixedHeader &hdr, std::string_view header_bytes, std::stri
   std::string result;
   result.resize(total_size);
 
-  // Write directly into the final frame buffer. This preserves the wire format
-  // while avoiding a temporary FixedHeader string and repeated append growth.
   char *write = result.data();
   FixedHeader::EncodeTo(hdr, write);
   write += FixedHeader::SIZE;
@@ -88,9 +65,6 @@ auto BuildFrame(const FixedHeader &hdr, std::string_view header_bytes, std::stri
   return result;
 }
 
-/**
- * @brief Encodes a request into the XRPC v1 frame layout.
- */
 auto EncodeMessage(const RawRequest &request, const ProtocolLimits &limits) -> std::string {
   RpcRequestHeader pb_hdr;
   pb_hdr.set_service_name(request.service_name_);
@@ -108,14 +82,8 @@ auto EncodeMessage(const RawRequest &request, const ProtocolLimits &limits) -> s
   return BuildFrame(hdr, header_bytes, request.payload_, limits);
 }
 
-/**
- * @brief Encodes response metadata into protobuf bytes.
- *
- * Successful responses use an empty metadata header because proto3 omits default fields.
- */
 auto EncodeResponseHeader(const RawResponse &response) -> std::string {
   if (response.status_.code() == StatusCode::Ok && response.status_.message().empty()) {
-    // proto3 omits default fields, so this is the same wire format as serializing an empty RpcResponseHeader.
     return {};
   }
 
@@ -128,9 +96,6 @@ auto EncodeResponseHeader(const RawResponse &response) -> std::string {
   return header_bytes;
 }
 
-/**
- * @brief Encodes a response into the XRPC v1 frame layout.
- */
 auto EncodeMessage(const RawResponse &response, const ProtocolLimits &limits) -> std::string {
   std::string header_bytes = EncodeResponseHeader(response);
 
@@ -143,9 +108,6 @@ auto EncodeMessage(const RawResponse &response, const ProtocolLimits &limits) ->
   return BuildFrame(hdr, header_bytes, response.payload_, limits);
 }
 
-/**
- * @brief Decodes request metadata and payload without using the frame-stream cache.
- */
 auto DecodeRequest(const FixedHeader &hdr, std::string_view header_bytes, std::string_view payload)
     -> std::optional<RawRequest> {
   RpcRequestHeader pb_hdr;
@@ -163,16 +125,8 @@ auto DecodeRequest(const FixedHeader &hdr, std::string_view header_bytes, std::s
   return req;
 }
 
-/**
- * @brief Decodes request metadata and payload using a per-frame-stream header cache.
- *
- * Repeated service and method names on one connection can reuse decoded metadata when the serialized header bytes are
- * identical to the previous request.
- */
 auto DecodeRequest(const FixedHeader &hdr, std::string_view header_bytes, std::string_view payload,
                    RequestHeaderDecodeCache &cache) -> std::optional<RawRequest> {
-  // Pipelined calls on one connection often repeat service/method headers; the
-  // cache avoids parsing the same protobuf header for every request.
   if (cache.has_value_ && header_bytes == cache.header_bytes_) {
     RawRequest req;
     req.request_id_ = hdr.request_id_;
@@ -194,7 +148,6 @@ auto DecodeRequest(const FixedHeader &hdr, std::string_view header_bytes, std::s
   return decoded;
 }
 
-/** @brief Validates a wire status code and converts it to the public status model. */
 auto DecodeStatus(std::int32_t code, std::string message) -> Status {
   switch (static_cast<StatusCode>(code)) {
     case StatusCode::Ok:
@@ -217,9 +170,6 @@ auto DecodeStatus(std::int32_t code, std::string message) -> Status {
   return {StatusCode::DataLoss, "response contains an invalid RPC status code"};
 }
 
-/**
- * @brief Decodes response metadata and payload into the RPC response model.
- */
 auto DecodeResponse(const FixedHeader &hdr, std::string_view header_bytes, std::string_view payload)
     -> std::optional<RawResponse> {
   RpcResponseHeader pb_hdr;
@@ -236,16 +186,8 @@ auto DecodeResponse(const FixedHeader &hdr, std::string_view header_bytes, std::
   return resp;
 }
 
-/**
- * @brief Reads one complete frame from a buffered byte stream.
- *
- * `NeedMoreData` is recoverable and consumes nothing. Any other non-OK result describes a complete malformed frame or
- * unsupported fixed-header field.
- */
 auto ReadFrame(std::string_view buf, const ProtocolLimits &limits) -> FrameView {
   if (buf.size() < FixedHeader::SIZE) {
-    // TCP can split frames arbitrarily; callers keep the buffer and retry after
-    // appending more bytes.
     return {.error_ = ProtocolError::NeedMoreData};
   }
 
@@ -282,9 +224,6 @@ auto ReadFrame(std::string_view buf, const ProtocolLimits &limits) -> FrameView 
 
 }  // namespace
 
-/**
- * @brief Converts the public payload limit to internal frame limits.
- */
 auto MakeProtocolLimits(std::size_t max_payload_size) -> ProtocolLimits {
   if (max_payload_size == 0) {
     throw ConfigException("protocol max_payload_size must be greater than 0");
@@ -299,43 +238,22 @@ auto MakeProtocolLimits(std::size_t max_payload_size) -> ProtocolLimits {
   return limits;
 }
 
-/**
- * @brief Creates a frame codec with explicit limits.
- */
 FrameCodec::FrameCodec(ProtocolLimits limits) : limits_(limits) {
   if (limits_.max_frame_size_ < FixedHeader::SIZE) {
     throw ConfigException("protocol max_frame_size must include the fixed header");
   }
 }
 
-/**
- * @brief Encodes one request frame with this codec's limits.
- */
 auto FrameCodec::EncodeRequest(const RawRequest &request) -> std::string { return EncodeMessage(request, limits_); }
 
-/**
- * @brief Encodes one response frame with this codec's limits.
- */
 auto FrameCodec::EncodeResponse(const RawResponse &response) -> std::string { return EncodeMessage(response, limits_); }
 
-/**
- * @brief Attempts to decode one request or response without a request cache.
- */
 auto FrameCodec::TryDecode(std::string_view buf) -> DecodeResult { return TryDecode(buf, nullptr); }
 
-/**
- * @brief Attempts to decode one request or response with a request cache.
- */
 auto FrameCodec::TryDecode(std::string_view buf, RequestHeaderDecodeCache &request_header_cache) -> DecodeResult {
   return TryDecode(buf, &request_header_cache);
 }
 
-/**
- * @brief Attempts to decode one request frame for the server path.
- *
- * Response frames and heartbeat frames are rejected because clients are expected to send only request frames on
- * connection streams.
- */
 auto FrameCodec::TryDecodeRequest(std::string_view buf, RequestHeaderDecodeCache &request_header_cache)
     -> RequestDecodeResult {
   const FrameView frame = ReadFrame(buf, limits_);
@@ -362,9 +280,6 @@ auto FrameCodec::TryDecodeRequest(std::string_view buf, RequestHeaderDecodeCache
   return {.error_ = ProtocolError::Ok, .consumed_ = frame.consumed_, .request_ = std::move(request)};
 }
 
-/**
- * @brief Shared decode path for request and response frames.
- */
 auto FrameCodec::TryDecode(std::string_view buf, RequestHeaderDecodeCache *request_header_cache) -> DecodeResult {
   const FrameView frame = ReadFrame(buf, limits_);
   if (frame.error_ != ProtocolError::Ok) {

@@ -15,28 +15,12 @@
 namespace xrpc {
 namespace {
 
-/** @return Default receive buffer size for each asynchronous socket read. */
 auto MakeReadBufferSize() -> std::size_t { return 16U * 1024U; }
 
-/** @return Maximum bytes coalesced into one asynchronous send operation. */
 auto MakeMaxWriteBatchBytes() -> std::size_t { return 64U * 1024U; }
 
 }  // namespace
 
-/**
- * @brief Creates a connection actor for one accepted TCP socket.
- *
- * All socket I/O runs on `context`, while request handlers run on `executor` and report completions
- * back through `mailbox`.
- *
- * @param context Event loop owning this connection.
- * @param registry Registered RPC methods dispatched by workers.
- * @param executor Worker pool for handler execution.
- * @param mailbox Worker-to-I/O-loop completion mailbox owned by the connection loop.
- * @param socket Accepted nonblocking client socket.
- * @param config Protocol and backpressure limits.
- * @param on_closed Owner callback invoked at the terminal state.
- */
 ServerConnection::ServerConnection(io::UringContext &context, ServiceRegistry &registry, ThreadPoolExecutor &executor,
                                    DispatchMailbox &mailbox, io::Socket socket, ServerConnectionConfig config,
                                    std::function<void()> on_closed)
@@ -51,14 +35,8 @@ ServerConnection::ServerConnection(io::UringContext &context, ServiceRegistry &r
       limits_(config.limits_),
       on_closed_(std::move(on_closed)) {}
 
-/** @brief Connection state is closed by the run loop or owner before destruction. */
 ServerConnection::~ServerConnection() = default;
 
-/**
- * @brief Runs the asynchronous read loop until peer close, socket error, or protocol failure.
- *
- * @return Coroutine task completed after the connection finishes or closes.
- */
 auto ServerConnection::Run() -> runtime::Task<void> {
   while (state_ == State::Active) {
     const io::IoResult recv_result = co_await context_->Recv(socket_.fd(), read_buffer_.data(), read_buffer_.size());
@@ -91,15 +69,6 @@ auto ServerConnection::Run() -> runtime::Task<void> {
   TryFinishDrain();
 }
 
-/**
- * @brief Handles decoded requests produced by feeding bytes into the RPC frame stream.
- *
- * Requests decoded from one read are batched into one worker submission to reduce context handoffs.
- * Per-connection backpressure is enforced before the batch reaches the executor.
- *
- * @param feed Result from `RpcFrameStream::FeedBytes()`.
- * @return true when the connection can continue reading.
- */
 auto ServerConnection::HandleFeedResult(FrameStreamFeedResult &&feed) -> bool {
   if (feed.closed_) {
     Close();
@@ -129,7 +98,6 @@ auto ServerConnection::HandleFeedResult(FrameStreamFeedResult &&feed) -> bool {
   return SubmitDispatchBatch(std::move(requests));
 }
 
-/** @brief Closes the connection and cancels all pending socket operations. */
 void ServerConnection::Close() {
   if (state_ == State::Closed) {
     return;
@@ -146,9 +114,6 @@ void ServerConnection::Close() {
   }
 }
 
-/**
- * @brief Stops the read side and keeps the connection alive until admitted responses are written.
- */
 void ServerConnection::BeginDrain() {
   if (state_ != State::Active) {
     return;
@@ -161,12 +126,6 @@ void ServerConnection::BeginDrain() {
   TryFinishDrain();
 }
 
-/**
- * @brief Enqueues encoded worker responses back on the event-loop thread.
- *
- * @param response_bytes One or more encoded response frames.
- * @param completed_jobs Number of logical requests completed by the worker batch.
- */
 void ServerConnection::OnEncodedDispatchComplete(std::string &&response_bytes, std::size_t completed_jobs) {
   ReleaseDispatchJobs(completed_jobs);
   if (state_ == State::Closed) {
@@ -180,32 +139,16 @@ void ServerConnection::OnEncodedDispatchComplete(std::string &&response_bytes, s
   TryFinishDrain();
 }
 
-/**
- * @brief Accounts for a worker-side response encoding failure.
- *
- * @param completed_jobs Number of logical requests removed from in-flight accounting.
- */
 void ServerConnection::OnDispatchEncodeFailure(std::size_t completed_jobs) {
   ReleaseDispatchJobs(completed_jobs);
   Close();
 }
 
-/**
- * @brief Releases per-connection in-flight worker accounting.
- *
- * @param completed_jobs Number of logical dispatch jobs completed or failed.
- */
 void ServerConnection::ReleaseDispatchJobs(std::size_t completed_jobs) {
   assert(completed_jobs <= inflight_requests_);
   inflight_requests_ -= completed_jobs;
 }
 
-/**
- * @brief Adds encoded response bytes to the write queue and starts a drain task if needed.
- *
- * @param bytes Encoded response frame bytes.
- * @return true when bytes were queued, false when the connection is already closed or backpressured.
- */
 auto ServerConnection::EnqueueWrite(std::string bytes) -> bool {
   if (state_ == State::Closed) {
     return false;
@@ -226,12 +169,6 @@ auto ServerConnection::EnqueueWrite(std::string bytes) -> bool {
   return true;
 }
 
-/**
- * @brief Reserves write-queue bytes against the per-connection backpressure limit.
- *
- * @param bytes Number of bytes about to be queued.
- * @return true when the reservation succeeds, false after closing for backpressure.
- */
 auto ServerConnection::TryReserveWriteBytes(std::size_t bytes) -> bool {
   assert(pending_write_bytes_ <= limits_.max_write_queue_bytes_);
   if (bytes > limits_.max_write_queue_bytes_ - pending_write_bytes_) {
@@ -243,33 +180,17 @@ auto ServerConnection::TryReserveWriteBytes(std::size_t bytes) -> bool {
   return true;
 }
 
-/**
- * @brief Releases bytes after they leave the write queue.
- *
- * @param bytes Number of queued bytes represented by the drained frame or batch.
- */
 void ServerConnection::ReleaseWriteBytes(std::size_t bytes) {
   assert(bytes <= pending_write_bytes_);
   pending_write_bytes_ -= bytes;
 }
 
-/**
- * @brief Sends queued response frames until the queue is empty or the socket fails.
- *
- * Adjacent frames may be coalesced into one send buffer because the wire protocol is already
- * self-delimiting. This improves throughput without changing response framing.
- *
- * @return Coroutine task completed after the current write drain finishes.
- */
 auto ServerConnection::DrainWriteQueue() -> runtime::Task<void> {
   while (state_ != State::Closed && !write_queue_.empty()) {
     std::string frame = std::move(write_queue_.front());
     write_queue_.pop_front();
     std::size_t frame_size = frame.size();
     if (!write_queue_.empty()) {
-      // TCP is a byte stream, so adjacent complete frames can be sent in one
-      // write without changing protocol semantics. Batching cuts per-frame
-      // send overhead on high-QPS workloads.
       const std::size_t max_batch_bytes = MakeMaxWriteBatchBytes();
       frame.reserve(std::min(pending_write_bytes_, max_batch_bytes));
       while (!write_queue_.empty() && frame.size() + write_queue_.front().size() <= max_batch_bytes) {
@@ -299,15 +220,6 @@ auto ServerConnection::DrainWriteQueue() -> runtime::Task<void> {
   TryFinishDrain();
 }
 
-/**
- * @brief Submits decoded requests to the worker pool as one logical batch.
- *
- * The executor capacity is charged by logical request count. On rejection, each request gets an
- * immediate `ResourceExhausted` response when the connection can still write.
- *
- * @param requests Requests decoded from one read.
- * @return true when the connection can continue reading.
- */
 auto ServerConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> bool {
   const std::size_t request_count = requests.size();
   assert(request_count > 0);
@@ -324,7 +236,6 @@ auto ServerConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> 
       },
       request_count);
 
-  // fail path
   if (!accepted) {
     if (!executor_->accepting_submissions()) {
       BeginDrain();
@@ -338,17 +249,10 @@ auto ServerConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> 
     return true;
   }
 
-  // success path
   inflight_requests_ += request_count;
   return true;
 }
 
-/**
- * @brief Dispatches and encodes one admitted request batch on a worker thread.
- *
- * Completions are returned through the originating I/O loop's mailbox; this function does not mutate connection-local
- * lifecycle, inflight, or write state.
- */
 void ServerConnection::ExecuteDispatchBatchOnWorker(const std::weak_ptr<ServerConnection> &target,
                                                     std::vector<RawRequest> &requests) {
   const std::size_t request_count = requests.size();
@@ -378,13 +282,6 @@ void ServerConnection::ExecuteDispatchBatchOnWorker(const std::weak_ptr<ServerCo
   }
 }
 
-/**
- * @brief Encodes and queues a backpressure rejection response for one request.
- *
- * @param request Request rejected before worker execution.
- * @param message Public failure message.
- * @return true when the rejection response was queued successfully.
- */
 auto ServerConnection::RejectRequestDueToBackpressure(RawRequest &&request, std::string message) -> bool {
   RawResponse response;
   response.request_id_ = request.request_id_;
@@ -398,23 +295,11 @@ auto ServerConnection::RejectRequestDueToBackpressure(RawRequest &&request, std:
   }
 }
 
-/**
- * @brief Encodes a raw response on the worker thread before event-loop handoff.
- *
- * @param response Raw response returned by the handler.
- * @return Encoded response frame bytes.
- */
 auto ServerConnection::EncodeResponseOnWorker(RawResponse &&response) const -> std::string {
   FrameCodec codec(protocol_limits_);
   return codec.EncodeResponse(response);
 }
 
-/**
- * @brief Closes after the read side shuts down and all pending responses have drained.
- *
- * This covers both client half-close and server-initiated drain while preserving responses for
- * requests that already reached the executor.
- */
 void ServerConnection::TryFinishDrain() {
   if (state_ != State::Draining) {
     return;

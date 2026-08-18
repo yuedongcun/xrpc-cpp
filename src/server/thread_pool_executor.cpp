@@ -6,16 +6,7 @@
 #include "common/xrpc_exception.h"
 
 namespace xrpc {
-/**
- * @brief Starts a fixed-size worker pool with a global pending logical-job limit.
- *
- * Each worker owns a private FIFO. Submission first reserves capacity against the global limit, then
- * chooses a worker queue. This keeps backpressure independent from the number of worker threads.
- *
- * @param worker_count Number of worker threads to start.
- * @param max_pending_jobs Maximum queued-or-running logical jobs accepted by the pool.
- * @throws ConfigException when either limit is zero.
- */
+
 ThreadPoolExecutor::ThreadPoolExecutor(std::size_t worker_count, std::size_t max_pending_jobs)
     : max_pending_jobs_(max_pending_jobs) {
   if (worker_count == 0) {
@@ -35,19 +26,8 @@ ThreadPoolExecutor::ThreadPoolExecutor(std::size_t worker_count, std::size_t max
   }
 }
 
-/** @brief Stops workers and joins all owned threads. */
 ThreadPoolExecutor::~ThreadPoolExecutor() { Stop(); }
 
-/**
- * @brief Attempts to submit a callable representing multiple logical RPC jobs.
- *
- * Batched submission is used when one worker callable drains several decoded requests from the same
- * connection. Capacity accounting still reflects the logical RPC count.
- *
- * @param job Callable to run on a worker thread.
- * @param logical_jobs Number of RPC jobs represented by `job`.
- * @return true when accepted, false when the global pending limit is full.
- */
 auto ThreadPoolExecutor::TrySubmitBatch(std::function<void()> job, std::size_t logical_jobs) -> bool {
   if (logical_jobs == 0) {
     throw std::invalid_argument("ThreadPoolExecutor::TrySubmitBatch requires at least one logical job");
@@ -78,35 +58,21 @@ auto ThreadPoolExecutor::TrySubmitBatch(std::function<void()> job, std::size_t l
   return true;
 }
 
-/** @brief Closes the admission gate without canceling queued or running jobs. */
 void ThreadPoolExecutor::CloseSubmissions() noexcept {
   accepting_submissions_.store(false);
   for (const auto &queue : worker_queues_) {
-    // Synchronize with submissions that passed the first admission check. When
-    // this method returns, no producer can still append a job to a worker queue.
     std::lock_guard lock(queue->mutex_);
   }
 }
 
-/** @return true while new jobs may still be admitted. */
 auto ThreadPoolExecutor::accepting_submissions() const noexcept -> bool { return accepting_submissions_.load(); }
 
-/**
- * @brief Selects the worker queue for a newly accepted job.
- *
- * The algorithm starts with round-robin fairness, then opportunistically prefers a visibly shorter
- * queue. Exact queue ordering is unnecessary because the global admission guard has already protected
- * resource bounds.
- *
- * @return Worker queue that should receive the next job.
- */
 auto ThreadPoolExecutor::SelectWorkerQueue() -> WorkerQueue & {
   const std::size_t worker_count = worker_queues_.size();
   const std::size_t start = next_worker_index_.fetch_add(1) % worker_count;
   std::size_t selected = start;
   std::size_t selected_pending = worker_queues_[selected]->pending_jobs_.load();
 
-  // Start round-robin for fairness, then prefer a shorter visible queue.
   for (std::size_t offset = 1; offset < worker_count && selected_pending > 0; ++offset) {
     const std::size_t candidate = (start + offset) % worker_count;
     const std::size_t candidate_pending = worker_queues_[candidate]->pending_jobs_.load();
@@ -118,12 +84,6 @@ auto ThreadPoolExecutor::SelectWorkerQueue() -> WorkerQueue & {
   return *worker_queues_[selected];
 }
 
-/**
- * @brief Reserves global pending capacity for logical jobs.
- *
- * @param logical_jobs Number of logical RPC jobs to account for.
- * @return Pending count after reservation, or empty when the global limit is full.
- */
 auto ThreadPoolExecutor::TryReservePendingJobs(std::size_t logical_jobs) -> std::optional<std::size_t> {
   std::size_t pending = pending_jobs_.load();
   while (true) {
@@ -136,25 +96,14 @@ auto ThreadPoolExecutor::TryReservePendingJobs(std::size_t logical_jobs) -> std:
   }
 }
 
-/**
- * @brief Releases logical-job capacity after execution or failed submission.
- *
- * @param logical_jobs Number of logical RPC jobs to remove from pending accounting.
- */
 void ThreadPoolExecutor::ReleasePendingJobs(std::size_t logical_jobs) { pending_jobs_.fetch_sub(logical_jobs); }
 
-/**
- * @brief Requests all workers to stop after draining their local queues.
- *
- * Stop is idempotent and joins every owned `std::jthread` before returning.
- */
 void ThreadPoolExecutor::Stop() {
   CloseSubmissions();
   if (stopped_.exchange(true)) {
     return;
   }
   for (const auto &queue : worker_queues_) {
-    // Synchronize with the worker's predicate check before notifying it.
     std::lock_guard<std::mutex> lock(queue->mutex_);
     queue->cv_.notify_all();
   }
@@ -168,11 +117,6 @@ void ThreadPoolExecutor::Stop() {
   workers_.clear();
 }
 
-/**
- * @brief Runs jobs from one worker queue until stop is requested and the queue is empty.
- *
- * @param queue Worker-local FIFO and condition variable.
- */
 void ThreadPoolExecutor::WorkerLoop(WorkerQueue &queue) {
   while (true) {
     WorkerJob job;
@@ -183,8 +127,6 @@ void ThreadPoolExecutor::WorkerLoop(WorkerQueue &queue) {
         return;
       }
 
-      // Pending counters are released after job execution so the global limit
-      // includes both queued and currently running work.
       job = std::move(queue.jobs_.front());
       queue.jobs_.pop();
     }

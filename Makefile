@@ -1,6 +1,7 @@
 BUILD_DIR ?= build
 RELEASE_BUILD_DIR ?= build-release
 CMAKE_ARGS ?=
+CLANG_FORMAT ?= clang-format-20
 
 .DEFAULT_GOAL := all
 .PHONY: all configure release test format check-format check-tidy clangd-db dev clean
@@ -38,18 +39,18 @@ test: all
 		-LE external
 
 format:
-	@command -v clang-format >/dev/null 2>&1 || { \
-		echo "error: clang-format not found"; \
+	@command -v $(CLANG_FORMAT) >/dev/null 2>&1 || { \
+		echo "error: $(CLANG_FORMAT) not found"; \
 		exit 1; \
 	}
-	@clang-format -i $(FORMAT_FILES)
+	@$(CLANG_FORMAT) -i $(FORMAT_FILES)
 
 check-format:
-	@command -v clang-format >/dev/null 2>&1 || { \
-		echo "error: clang-format not found"; \
+	@command -v $(CLANG_FORMAT) >/dev/null 2>&1 || { \
+		echo "error: $(CLANG_FORMAT) not found"; \
 		exit 1; \
 	}
-	@clang-format --dry-run --Werror $(FORMAT_FILES)
+	@$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_FILES)
 
 check-tidy:
 	@command -v run-clang-tidy >/dev/null 2>&1 || { \

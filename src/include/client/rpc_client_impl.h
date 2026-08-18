@@ -23,7 +23,6 @@
 
 namespace xrpc {
 
-/** @brief Private implementation of the synchronous RPC client facade. */
 class RpcClient::Impl final {
  public:
   explicit Impl(const RpcClientOptions &options);
@@ -33,7 +32,6 @@ class RpcClient::Impl final {
                           const CallOptions &options) -> StatusOr<std::string>;
 
  private:
-  /** @brief One reusable transport slot for a discovered endpoint. */
   struct EndpointSlot final {
     explicit EndpointSlot(Endpoint endpoint) : endpoint_(std::move(endpoint)) {}
 
@@ -42,13 +40,11 @@ class RpcClient::Impl final {
     std::unique_ptr<TcpTransport> transport_;
   };
 
-  /** @brief One virtual-node entry mapped directly into an immutable endpoint set. */
   struct HashRingEntry final {
     std::uint64_t hash_ = 0;
     std::size_t endpoint_index_ = 0;
   };
 
-  /** @brief Immutable endpoint view used for one routing attempt. */
   struct EndpointSet final {
     std::vector<std::shared_ptr<EndpointSlot>> endpoints_;
     std::vector<HashRingEntry> hash_ring_;
@@ -56,16 +52,12 @@ class RpcClient::Impl final {
 
   [[nodiscard]] auto NextRequestId() -> std::uint64_t;
 
-  /** @brief Publishes the latest discovered endpoints when membership changes. */
   [[nodiscard]] auto RefreshEndpoints() -> Status;
 
-  /** @brief Copies the active endpoint set for a concurrent call. */
   [[nodiscard]] auto LoadEndpointSet() const -> std::shared_ptr<const EndpointSet>;
 
-  /** @brief Routes one raw request across the current endpoint set. */
   [[nodiscard]] auto CallEndpoints(const RawRequest &request, const CallOptions &options) -> RawCallResult;
 
-  /** @brief Attempts one call through a specific endpoint slot. */
   [[nodiscard]] auto CallAtEndpoint(const std::shared_ptr<EndpointSlot> &endpoint, const RawRequest &request,
                                     const EffectiveCallOptions &options) -> RawCallResult;
 
@@ -86,7 +78,6 @@ class RpcClient::Impl final {
   std::size_t max_inflight_per_endpoint_;
   std::unique_ptr<ServiceDiscovery> discovery_;
 
-  /** @brief Serializes discovery reads and active endpoint publication. */
   mutable std::mutex endpoints_mutex_;
   std::shared_ptr<const EndpointSet> active_endpoints_;
 

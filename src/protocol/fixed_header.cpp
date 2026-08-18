@@ -6,12 +6,6 @@
 
 namespace {
 
-/**
- * @brief Converts a 64-bit integer from host byte order to network byte order.
- *
- * The fixed header stores request ids as 64-bit values, while the portable socket byte-order helpers only cover 16-bit
- * and 32-bit integers. The implementation composes the 64-bit value from two network-order halves.
- */
 auto HostToNetwork64(uint64_t x) -> uint64_t {
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
   return x;
@@ -21,30 +15,18 @@ auto HostToNetwork64(uint64_t x) -> uint64_t {
 #endif
 }
 
-/**
- * @brief Converts a 64-bit integer from network byte order to host byte order.
- */
 auto NetworkToHost64(uint64_t x) -> uint64_t { return HostToNetwork64(x); }
 
 }  // namespace
 
 namespace xrpc {
 
-/**
- * @brief Encodes the fixed header into a new byte string.
- */
 auto FixedHeader::Encode(const FixedHeader &hdr) -> std::string {
   std::string buf(SIZE, '\0');
   EncodeTo(hdr, buf.data());
   return buf;
 }
 
-/**
- * @brief Encodes the fixed header into caller-owned storage.
- *
- * The caller must provide at least `FixedHeader::SIZE` writable bytes. All multi-byte numeric fields are written in
- * network byte order so the wire format is stable across host architectures.
- */
 void FixedHeader::EncodeTo(const FixedHeader &hdr, char *buffer) {
   uint32_t net_magic = htonl(hdr.magic_);
   uint32_t net_header_len = htonl(hdr.header_len_);
@@ -61,12 +43,6 @@ void FixedHeader::EncodeTo(const FixedHeader &hdr, char *buffer) {
   std::memcpy(&buffer[16], &net_request_id, 8);
 }
 
-/**
- * @brief Decodes and validates one fixed header from a byte buffer.
- *
- * The fixed-header decoder validates the magic value and leaves higher-level message compatibility checks to
- * `FrameCodec`.
- */
 auto FixedHeader::Decode(std::string_view buf) -> std::optional<FixedHeader> {
   if (buf.size() < SIZE) {
     return std::nullopt;

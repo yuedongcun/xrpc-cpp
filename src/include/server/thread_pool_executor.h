@@ -14,28 +14,11 @@
 
 namespace xrpc {
 
-/**
- * @brief Fixed-size worker pool used for server method dispatch.
- *
- * Design note:
- * - Ownership: each worker owns one private queue; the executor owns all workers and the global pending-job counter.
- * - Backpressure: submission reserves logical jobs before queueing. Rejection is visible to `ServerConnection` so it
- * can send an RPC error instead of growing memory.
- * - Shutdown: `Stop()` flips `stopped_`, wakes all queues, and lets `jthread`s join.
- * - Batching: `TrySubmitBatch()` counts multiple RPCs as one physical worker task.
- */
 class ThreadPoolExecutor final {
  public:
-  /**
-   * @brief Starts `worker_count` worker threads.
-   *
-   * @param worker_count Number of worker threads and private queues.
-   * @param max_pending_jobs Global logical-job limit across queued and running work.
-   */
   explicit ThreadPoolExecutor(std::size_t worker_count,
                               std::size_t max_pending_jobs = std::numeric_limits<std::size_t>::max());
 
-  /** @brief Stops workers before destroying queues and counters. */
   ~ThreadPoolExecutor();
 
   ThreadPoolExecutor(const ThreadPoolExecutor &) = delete;
@@ -44,21 +27,12 @@ class ThreadPoolExecutor final {
   ThreadPoolExecutor(ThreadPoolExecutor &&) = delete;
   auto operator=(ThreadPoolExecutor &&) -> ThreadPoolExecutor & = delete;
 
-  /**
-   * @brief Batches multiple logical jobs into one physical worker task.
-   *
-   * This improves high-throughput handoff cost, but trades away per-request scheduling fairness because one worker runs
-   * the whole batch before taking another task.
-   */
   [[nodiscard]] auto TrySubmitBatch(std::function<void()> job, std::size_t logical_jobs) -> bool;
 
-  /** @brief Prevents new jobs from being admitted while allowing accepted jobs to finish. */
   void CloseSubmissions() noexcept;
 
-  /** @return true while new jobs may still be submitted. */
   [[nodiscard]] auto accepting_submissions() const noexcept -> bool;
 
-  /** @brief Stops the pool, wakes all workers, and prevents new submissions. */
   void Stop();
 
  private:
@@ -74,16 +48,12 @@ class ThreadPoolExecutor final {
     std::atomic<std::size_t> pending_jobs_{0};
   };
 
-  /** @brief Chooses the worker queue for the next accepted task. */
   [[nodiscard]] auto SelectWorkerQueue() -> WorkerQueue &;
 
-  /** @brief Reserves logical pending-job capacity before queueing work. */
   [[nodiscard]] auto TryReservePendingJobs(std::size_t logical_jobs) -> std::optional<std::size_t>;
 
-  /** @brief Releases logical pending-job capacity after work finishes or submission rolls back. */
   void ReleasePendingJobs(std::size_t logical_jobs);
 
-  /** @brief Worker thread loop for one private queue. */
   void WorkerLoop(WorkerQueue &queue);
 
   std::vector<std::unique_ptr<WorkerQueue>> worker_queues_;

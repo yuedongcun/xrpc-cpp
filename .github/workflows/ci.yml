@@ -26,14 +26,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends \
             build-essential \
-            clang-format \
+            clang-format-20 \
             clang-tidy \
             clang-tools \
             cmake \
             python3
 
       - name: Check format
-        run: make check-format
+        run: make check-format CLANG_FORMAT=clang-format-20
 
       - name: Build
         run: make

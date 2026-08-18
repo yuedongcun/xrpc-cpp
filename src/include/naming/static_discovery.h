@@ -7,7 +7,6 @@
 
 namespace xrpc {
 
-/** @brief Immutable endpoint source for `list://host:port[,host:port...]` targets. */
 class StaticDiscovery final : public ServiceDiscovery {
  public:
   explicit StaticDiscovery(std::string_view target);

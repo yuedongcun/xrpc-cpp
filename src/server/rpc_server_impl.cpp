@@ -81,8 +81,8 @@ void RpcServer::Impl::Run() {
     }
 
     try {
-      StartConnectionLoops();  // create connection loop jthreads and run
-      StartAcceptLoop();       // does not create jthread
+      StartConnectionLoops();
+      StartAcceptLoop();
     } catch (...) {
       ShutdownComponentsBestEffort();
       state_ = State::Stopped;
@@ -93,7 +93,7 @@ void RpcServer::Impl::Run() {
 
   std::exception_ptr failure;
   try {
-    accept_context_.Run();  // accept loop starts here, not return until Stop
+    accept_context_.Run();
     accept_task_->Wait();
     accept_task_->Result();
   } catch (...) {
@@ -303,8 +303,6 @@ void RpcServer::Impl::ShutdownComponents() {
   attempt([this]() -> void { BeginConnectionDrain(); });
   (void)TryDeregisterService();
 
-  // Stop drains every admitted worker job and joins all workers. Connection loops and mailboxes must remain alive
-  // until it returns because completed handlers post encoded responses back to their originating I/O loop.
   attempt([this]() -> void { executor_.Stop(); });
   attempt([this]() -> void { FinishConnectionDrain(); });
 

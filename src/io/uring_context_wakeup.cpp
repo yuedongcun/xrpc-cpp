@@ -19,11 +19,6 @@
 
 namespace xrpc::io {
 
-/**
- * @brief Enqueues a cross-thread callback for execution on the run thread.
- *
- * @param fn Callback to execute from `DrainPosted()`.
- */
 void UringContext::Runtime::EnqueuePosted(std::function<void()> fn) {
   bool should_wake = false;
   {
@@ -36,13 +31,10 @@ void UringContext::Runtime::EnqueuePosted(std::function<void()> fn) {
   }
 
   if (should_wake) {
-    // One eventfd write is enough to make the Run thread drain the whole
-    // posted queue; additional callbacks can piggyback on that wakeup.
     SignalWakeup();
   }
 }
 
-/** @brief Requests event-loop shutdown and wakes the run thread. */
 void UringContext::Runtime::RequestStop() {
   {
     std::lock_guard<std::mutex> lock(post_mutex_);
@@ -56,18 +48,11 @@ void UringContext::Runtime::RequestStop() {
   SignalWakeup();
 }
 
-/**
- * @brief Executes all callbacks currently posted to the run thread.
- *
- * Callbacks are swapped out under the mutex and run without holding it so callbacks may safely
- * post follow-up work or request shutdown.
- */
 void UringContext::Runtime::DrainPosted() {
   std::queue<std::function<void()>> callbacks;
   {
     std::lock_guard<std::mutex> lock(post_mutex_);
-    // Swap under the mutex, then execute callbacks without holding it so
-    // callbacks can safely post more work or call Stop().
+
     std::swap(callbacks, posted_callbacks_);
   }
 
@@ -78,11 +63,6 @@ void UringContext::Runtime::DrainPosted() {
   }
 }
 
-/**
- * @brief Submits the internal eventfd poll used to wake the run thread.
- *
- * There is exactly one wakeup poll in flight while the loop is running.
- */
 void UringContext::Runtime::SubmitWakeupPoll() {
   AssertRunThread("wakeup poll submission");
   if (wakeup_poll_pending_) {
@@ -111,12 +91,6 @@ void UringContext::Runtime::SubmitWakeupPoll() {
   [[maybe_unused]] Operation *released = operation.release();
 }
 
-/**
- * @brief Handles completion of the internal eventfd wakeup poll.
- *
- * @param operation Wakeup operation associated with the CQE.
- * @param cqe Completion entry from the kernel.
- */
 void UringContext::Runtime::ProcessWakeupCqe(const Operation &operation, io_uring_cqe *cqe) {
   wakeup_poll_pending_ = false;
 
@@ -140,15 +114,12 @@ void UringContext::Runtime::ProcessWakeupCqe(const Operation &operation, io_urin
   DrainWakeupCounter();
   DrainPosted();
   if (stop_requested_.load()) {
-    // Timeout SQEs can otherwise keep the loop alive until their deadlines.
-    // Cancel them once shutdown has started.
     SubmitCancelPendingTimeouts();
     return;
   }
   SubmitWakeupPoll();
 }
 
-/** @brief Writes to the eventfd so the run thread wakes and drains posted callbacks. */
 void UringContext::Runtime::SignalWakeup() const {
   constexpr std::uint64_t value = 1;
   while (true) {
@@ -166,7 +137,6 @@ void UringContext::Runtime::SignalWakeup() const {
   }
 }
 
-/** @brief Drains the eventfd counter after a wakeup poll completion. */
 void UringContext::Runtime::DrainWakeupCounter() const {
   std::uint64_t value = 0;
   while (true) {
