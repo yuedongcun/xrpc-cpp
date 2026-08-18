@@ -1,3 +1,5 @@
+/** @file thread_pool_executor.h @brief Declares the server handler worker executor. */
+
 #pragma once
 
 #include <atomic>

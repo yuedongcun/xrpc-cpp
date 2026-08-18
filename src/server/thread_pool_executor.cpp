@@ -1,3 +1,5 @@
+/** @file thread_pool_executor.cpp @brief Implements the server handler worker executor. */
+
 #include "server/thread_pool_executor.h"
 
 #include <stdexcept>

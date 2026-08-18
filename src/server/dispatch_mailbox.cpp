@@ -1,3 +1,5 @@
+/** @file dispatch_mailbox.cpp @brief Implements worker completion delivery to an I/O loop. */
+
 #include "server/dispatch_mailbox.h"
 
 #include <utility>

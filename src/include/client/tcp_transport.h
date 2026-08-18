@@ -1,3 +1,5 @@
+/** @file tcp_transport.h @brief Declares the blocking TCP transport used by RpcClient. */
+
 #pragma once
 
 #include <chrono>

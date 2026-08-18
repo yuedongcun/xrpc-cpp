@@ -1,3 +1,5 @@
+/** @file static_discovery.cpp @brief Implements endpoint discovery from static configuration. */
+
 #include "naming/static_discovery.h"
 
 #include <cctype>

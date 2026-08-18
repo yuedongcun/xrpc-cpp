@@ -1,3 +1,5 @@
+/** @file consul_registrar.h @brief Declares Consul service registration support. */
+
 #pragma once
 
 #include <chrono>

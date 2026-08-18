@@ -1,3 +1,5 @@
+/** @file rpc_frame_stream.h @brief Declares incremental RPC frame stream decoding. */
+
 #pragma once
 
 #include <algorithm>

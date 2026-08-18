@@ -1,3 +1,5 @@
+/** @file rpc_frame_stream.cpp @brief Implements incremental server-side RPC frame decoding. */
+
 #include "server/rpc_frame_stream.h"
 
 #include <string>

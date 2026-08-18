@@ -1,3 +1,5 @@
+/** @file rpc_client.cpp @brief Implements the public synchronous RPC client facade. */
+
 #include <xrpc/rpc_client.h>
 
 #include <memory>

@@ -1,3 +1,5 @@
+/** @file rpc_server_impl.h @brief Declares the private RpcServer runtime implementation. */
+
 #pragma once
 
 #include <condition_variable>

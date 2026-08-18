@@ -1,3 +1,5 @@
+/** @file consul_registrar.cpp @brief Implements Consul service registration and removal. */
+
 #include "naming/consul/consul_registrar.h"
 
 #include <nlohmann/json.hpp>

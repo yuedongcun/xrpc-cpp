@@ -1,3 +1,5 @@
+/** @file frame_codec.cpp @brief Implements xRPC request and response frame encoding. */
+
 #include "protocol/frame_codec.h"
 
 #include <protocol/xrpc/xrpc_header.pb.h>

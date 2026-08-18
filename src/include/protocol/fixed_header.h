@@ -1,3 +1,5 @@
+/** @file fixed_header.h @brief Declares the fixed header of the xRPC wire frame. */
+
 #pragma once
 
 #include <cstdint>

@@ -1,3 +1,5 @@
+/** @file consul_http_client.cpp @brief Implements HTTP requests to the Consul agent. */
+
 #include "naming/consul/consul_http_client.h"
 
 #include <algorithm>

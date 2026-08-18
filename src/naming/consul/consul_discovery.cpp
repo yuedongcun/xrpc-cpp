@@ -1,3 +1,5 @@
+/** @file consul_discovery.cpp @brief Implements Consul-backed endpoint discovery. */
+
 #include "naming/consul/consul_discovery.h"
 
 #include <algorithm>

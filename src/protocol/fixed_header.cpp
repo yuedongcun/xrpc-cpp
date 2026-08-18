@@ -1,3 +1,5 @@
+/** @file fixed_header.cpp @brief Implements fixed xRPC frame header parsing and encoding. */
+
 #include "protocol/fixed_header.h"
 
 #include <arpa/inet.h>

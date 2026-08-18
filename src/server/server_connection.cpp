@@ -1,3 +1,5 @@
+/** @file server_connection.cpp @brief Implements one server-side RPC connection. */
+
 #include "server/server_connection.h"
 
 #include <algorithm>

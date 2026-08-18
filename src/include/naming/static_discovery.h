@@ -1,3 +1,5 @@
+/** @file static_discovery.h @brief Declares service discovery for static endpoint lists. */
+
 #pragma once
 
 #include <string_view>

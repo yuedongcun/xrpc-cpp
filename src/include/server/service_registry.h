@@ -1,3 +1,5 @@
+/** @file service_registry.h @brief Declares RPC service and method dispatch registration. */
+
 #pragma once
 
 #include <functional>

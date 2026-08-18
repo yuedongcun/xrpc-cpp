@@ -1,3 +1,5 @@
+/** @file consul_http_client.h @brief Declares the minimal HTTP client for Consul APIs. */
+
 #pragma once
 
 #include <chrono>

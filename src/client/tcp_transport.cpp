@@ -1,3 +1,5 @@
+/** @file tcp_transport.cpp @brief Implements the blocking TCP client transport. */
+
 #include "client/tcp_transport.h"
 
 #include <cerrno>

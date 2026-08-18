@@ -1,3 +1,5 @@
+/** @file server_config.h @brief Defines normalized internal server configuration. */
+
 #pragma once
 
 #include <chrono>

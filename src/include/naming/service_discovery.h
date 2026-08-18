@@ -1,3 +1,5 @@
+/** @file service_discovery.h @brief Declares the internal service discovery interface. */
+
 #pragma once
 
 #include <chrono>

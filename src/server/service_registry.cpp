@@ -1,3 +1,5 @@
+/** @file service_registry.cpp @brief Implements service and method dispatch lookup. */
+
 #include "server/service_registry.h"
 
 #include <sstream>

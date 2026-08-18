@@ -1,3 +1,5 @@
+/** @file protocol_message.h @brief Defines protocol-layer request and response messages. */
+
 #pragma once
 
 #include <cstddef>

@@ -1,3 +1,5 @@
+/** @file server_connection.h @brief Declares one server-side RPC connection state machine. */
+
 #pragma once
 
 #include <cstddef>

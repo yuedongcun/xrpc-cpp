@@ -1,3 +1,5 @@
+/** @file dispatch_mailbox.h @brief Declares worker-to-I/O-loop completion delivery. */
+
 #pragma once
 
 #include <cstddef>

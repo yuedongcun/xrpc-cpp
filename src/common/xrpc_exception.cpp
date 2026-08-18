@@ -1,3 +1,5 @@
+/** @file xrpc_exception.cpp @brief Implements internal exception-to-status conversion. */
+
 #include "common/xrpc_exception.h"
 
 #include <string>

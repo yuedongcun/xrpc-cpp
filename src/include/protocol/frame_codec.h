@@ -1,3 +1,5 @@
+/** @file frame_codec.h @brief Declares xRPC request and response frame encoding. */
+
 #pragma once
 
 #include <cstddef>

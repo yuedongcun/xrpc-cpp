@@ -1,3 +1,5 @@
+/** @file rpc_client_impl.h @brief Declares the private implementation of RpcClient. */
+
 #pragma once
 
 #include <atomic>

@@ -1,3 +1,5 @@
+/** @file effective_call_options.h @brief Defines normalized options for one client call. */
+
 #pragma once
 
 #include <chrono>

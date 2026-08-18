@@ -1,3 +1,5 @@
+/** @file client_config.h @brief Declares internal client option validation helpers. */
+
 #pragma once
 
 #include <chrono>

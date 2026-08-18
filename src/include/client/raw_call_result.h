@@ -1,3 +1,5 @@
+/** @file raw_call_result.h @brief Defines the internal result of one raw RPC call. */
+
 #pragma once
 
 #include <cstdint>

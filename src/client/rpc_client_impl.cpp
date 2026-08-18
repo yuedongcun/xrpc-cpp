@@ -1,3 +1,5 @@
+/** @file rpc_client_impl.cpp @brief Implements client discovery, routing, and failover. */
+
 #include "client/rpc_client_impl.h"
 
 #include <algorithm>

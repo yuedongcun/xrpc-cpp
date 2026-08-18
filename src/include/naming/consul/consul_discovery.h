@@ -1,3 +1,5 @@
+/** @file consul_discovery.h @brief Declares Consul-backed service discovery. */
+
 #pragma once
 
 #include <chrono>

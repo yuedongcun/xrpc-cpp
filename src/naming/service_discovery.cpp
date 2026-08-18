@@ -1,3 +1,5 @@
+/** @file service_discovery.cpp @brief Implements shared service discovery utilities. */
+
 #include "naming/service_discovery.h"
 
 #include <algorithm>

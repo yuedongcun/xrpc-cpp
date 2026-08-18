@@ -1,3 +1,5 @@
+/** @file client_config.cpp @brief Validates and normalizes internal client configuration. */
+
 #include "client/client_config.h"
 
 #include "common/xrpc_exception.h"
