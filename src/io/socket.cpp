@@ -1,3 +1,27 @@
+/**
+ * @file socket.cpp
+ * @brief Implements `Socket` with Linux socket system calls.
+ *
+ * Timed connection setup temporarily switches the socket to non-blocking mode:
+ *
+ *   connect
+ *      |
+ *      v
+ *   EINPROGRESS
+ *      |
+ *      v
+ *   poll(POLLOUT)
+ *      |
+ *      v
+ *   getsockopt(SO_ERROR)
+ *      |
+ *      v
+ *   restore file flags
+ *
+ * Read and write timeouts are configured with SO_RCVTIMEO and SO_SNDTIMEO.
+ * Socket system-call failures are translated into `SocketError`.
+ */
+
 #include "io/socket.h"
 
 #include <cerrno>

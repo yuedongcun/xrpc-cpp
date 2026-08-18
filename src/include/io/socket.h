@@ -1,9 +1,18 @@
+/**
+ * @file socket.h
+ * @brief Declares the RAII TCP socket wrapper used by xRPC.
+ *
+ * `Socket` owns a single socket file descriptor and provides the basic TCP
+ * lifecycle and blocking I/O operations used by the runtime.
+ *
+ * Socket ownership is move-only, and the descriptor is closed on destruction.
+ */
+
 #pragma once
 
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <string>
 #include <string_view>
 
 #include <sys/types.h>
