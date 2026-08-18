@@ -1,3 +1,37 @@
+/**
+ * @file uring_context.cpp
+ * @brief Implements `UringContext` lifetime and its completion event loop.
+ *
+ * This file owns the io_uring ring and wakeup eventfd, and enforces that only
+ * one thread executes `Run()` at a time.
+ *
+ * The run loop is completion-driven:
+ *
+ *   Run()
+ *     |
+ *     v
+ *   submit wakeup poll
+ *     |
+ *     v
+ *   wait for CQE
+ *     |
+ *     v
+ *   process completion
+ *     |
+ *     v
+ *   drain ready CQEs
+ *     |
+ *     `---- repeat until shutdown is drained
+ *
+ * `Run()` does not exit immediately when a stop is requested. It continues processing until
+ * outstanding I/O and the wakeup poll have been drained.
+ *
+ * Implementation split:
+ * - `uring_context.cpp`: ring/eventfd lifetime and the `Run()` loop.
+ * - `uring_context_operations.cpp`: operation submission and CQE handling.
+ * - `uring_context_control.cpp`: cross-thread wakeup and posted callbacks.
+ */
+
 #include "io/uring_context.h"
 
 #include <sys/eventfd.h>
@@ -14,7 +48,7 @@
 #include <liburing.h>
 
 #include "common/xrpc_exception.h"
-#include "io/uring_context_runtime.h"
+#include "detail/context_runtime.h"
 
 namespace xrpc::io {
 

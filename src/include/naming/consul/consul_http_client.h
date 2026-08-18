@@ -7,7 +7,6 @@
 #include <string_view>
 
 #include <xrpc/status.h>
-#include <xrpc/status_or.h>
 
 namespace xrpc {
 

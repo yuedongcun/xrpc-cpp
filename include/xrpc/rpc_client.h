@@ -8,10 +8,8 @@
 #include <string>
 #include <utility>
 
-#include <xrpc/call_options.h>
-#include <xrpc/protocol_options.h>
+#include <xrpc/rpc_options.h>
 #include <xrpc/status.h>
-#include <xrpc/status_or.h>
 
 namespace xrpc {
 

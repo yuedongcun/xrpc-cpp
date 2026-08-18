@@ -4,7 +4,7 @@
 #include <optional>
 #include <string>
 
-#include <xrpc/call_options.h>
+#include <xrpc/rpc_options.h>
 
 namespace xrpc {
 

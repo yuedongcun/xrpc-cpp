@@ -1,3 +1,46 @@
+/**
+ * @file uring_context_control.cpp
+ * @brief Implements UringContext's cross-thread control path.
+ *
+ * `Post()` queues callbacks for execution on the run thread, while `Stop()`
+ * closes that queue and requests event-loop shutdown. An eventfd wakes a
+ * blocked io_uring wait so queued callbacks and shutdown requests are observed
+ * promptly.
+ *
+ * The callback queue is mutex-protected; execution remains confined to the
+ * UringContext run thread.
+ */
+
+/**
+ * @file uring_context_control.cpp
+ * @brief Implements `UringContext` cross-thread control and wakeup handling.
+ *
+ * `Post()` queues callbacks for execution on the run thread. `Stop()` stops
+ * accepting new callbacks and requests event-loop shutdown; callbacks already
+ * queued are still drained.
+ *
+ * Cross-thread wakeup path:
+ *
+ *   Post() / Stop()
+ *         |
+ *         v
+ *   signal eventfd
+ *         |
+ *         v
+ *   io_uring poll CQE
+ *         |
+ *         v
+ *   ProcessWakeupCqe()
+ *         |
+ *         +-- drain eventfd counter
+ *         +-- drain posted callbacks
+ *         `-- rearm wakeup poll or continue shutdown
+ *
+ * Multiple threads may call `Post()` concurrently, so the callback queue is
+ * protected by a mutex. The thread executing `UringContext::Run()` handles
+ * wakeup CQEs and executes all posted callbacks.
+ */
+
 #include "io/uring_context.h"
 
 #include <poll.h>
@@ -14,8 +57,7 @@
 #include <liburing.h>
 
 #include "common/xrpc_exception.h"
-#include "io/operation.h"
-#include "io/uring_context_runtime.h"
+#include "detail/context_runtime.h"
 
 namespace xrpc::io {
 
@@ -63,6 +105,12 @@ void UringContext::Runtime::DrainPosted() {
   }
 }
 
+/**
+ * @brief Arms the eventfd poll used to wake the io_uring event loop.
+ *
+ * At most one wakeup poll may be pending at a time. The submitted operation is
+ * released to the completion path and remains alive until its CQE is processed.
+ */
 void UringContext::Runtime::SubmitWakeupPoll() {
   AssertRunThread("wakeup poll submission");
   if (wakeup_poll_pending_) {
@@ -91,6 +139,13 @@ void UringContext::Runtime::SubmitWakeupPoll() {
   [[maybe_unused]] Operation *released = operation.release();
 }
 
+/**
+ * @brief Handles completion of the eventfd wakeup poll.
+ *
+ * The wakeup counter and posted callbacks are drained first. During normal
+ * operation, a new wakeup poll is submitted. During shutdown, the poll is not
+ * rearmed and pending timeout operations are cancelled instead.
+ */
 void UringContext::Runtime::ProcessWakeupCqe(const Operation &operation, io_uring_cqe *cqe) {
   wakeup_poll_pending_ = false;
 

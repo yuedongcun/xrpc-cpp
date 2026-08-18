@@ -39,8 +39,6 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#include "io/socket_error.h"
-
 #include "common/xrpc_exception.h"
 
 namespace xrpc::io {

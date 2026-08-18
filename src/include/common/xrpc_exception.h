@@ -1,3 +1,11 @@
+/**
+ * @file xrpc_exception.h
+ * @brief Defines the xRPC exception hierarchy and exception-to-status conversion.
+ *
+ * xRPC exceptions carry a `StatusCode` so failures raised inside the runtime can
+ * be converted into RPC `Status` values at API and dispatch boundaries.
+ */
+
 #pragma once
 
 #include <exception>

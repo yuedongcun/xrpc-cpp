@@ -12,7 +12,6 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#include "io/socket_error.h"
 #include "protocol/protocol_message.h"
 
 namespace xrpc {

@@ -1,14 +1,85 @@
+/**
+ * @file uring_context.h
+ * @brief Declares xRPC's single-threaded io_uring event loop.
+ *
+ * A `UringContext` owns one io_uring ring and drives asynchronous operations
+ * on the thread running `Run()`. `Accept`, `Recv`, `Send`, `SleepFor`, and
+ * `Nop` submit work on that thread and return move-only awaitables that resume
+ * the awaiting coroutine with an `IoResult`.
+ *
+ * `Post()` and `Stop()` form the cross-thread control boundary. They wake the
+ * event loop safely, but callbacks themselves always execute on the run thread.
+ */
+
 #pragma once
 
 #include <chrono>
+#include <coroutine>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
 
-#include "io/uring_awaitable.h"
-
 namespace xrpc::io {
+
+enum class OperationType : std::uint8_t {
+  Accept = 0,
+  Recv,
+  Send,
+  Timeout,
+  Nop,
+  Cancel,
+  Wakeup,
+};
+
+struct IoResult {
+  OperationType type_ = OperationType::Nop;
+  int fd_ = -1;
+  int result_ = 0;
+  int error_code_ = 0;
+  std::size_t bytes_transferred_ = 0;
+};
+
+struct Operation;
+
+namespace detail {
+
+struct AwaitableState {
+  IoResult result_{};
+  bool ready_ = false;
+  std::coroutine_handle<> continuation_;
+  Operation *operation_ = nullptr;
+};
+
+}  // namespace detail
+
+class UringAwaitable final {
+ public:
+  UringAwaitable() = default;
+  ~UringAwaitable();
+
+  UringAwaitable(const UringAwaitable &) = delete;
+  auto operator=(const UringAwaitable &) -> UringAwaitable & = delete;
+
+  UringAwaitable(UringAwaitable &&other) noexcept;
+  auto operator=(UringAwaitable &&other) noexcept -> UringAwaitable &;
+
+  auto await_ready() const noexcept -> bool { return state_.ready_; }
+
+  auto await_suspend(std::coroutine_handle<> continuation) noexcept -> bool {
+    state_.continuation_ = continuation;
+    return !state_.ready_;
+  }
+
+  auto await_resume() -> IoResult { return state_.result_; }
+
+  void Bind(Operation &operation) noexcept;
+
+ private:
+  void Detach() noexcept;
+
+  detail::AwaitableState state_;
+};
 
 class UringContext final {
  public:

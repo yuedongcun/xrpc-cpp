@@ -4,7 +4,7 @@
 #include <string>
 #include <string_view>
 
-#include <xrpc/protocol_options.h>
+#include <xrpc/rpc_options.h>
 
 #include "protocol/fixed_header.h"
 #include "protocol/protocol_message.h"

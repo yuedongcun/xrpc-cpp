@@ -22,10 +22,9 @@ endif()
 
 set(XRPC_SOURCES
     io/socket.cpp
-    io/uring_awaitable.cpp
     io/uring_context.cpp
-    io/uring_context_io.cpp
-    io/uring_context_wakeup.cpp
+    io/uring_context_operations.cpp
+    io/uring_context_control.cpp
     protocol/fixed_header.cpp
     protocol/frame_codec.cpp
     common/xrpc_exception.cpp

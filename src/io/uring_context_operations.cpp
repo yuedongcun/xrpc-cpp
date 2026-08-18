@@ -1,3 +1,43 @@
+/**
+ * @file uring_context_operations.cpp
+ * @brief Implements io_uring operation submission and completion handling.
+ *
+ * Each asynchronous operation is represented by an `Operation` that is bound
+ * to a `UringAwaitable`, submitted through an SQE, recovered from the matching
+ * CQE, and finally recycled.
+ *
+ * Operation lifecycle:
+ *
+ *   acquire Operation
+ *          |
+ *          v
+ *   bind AwaitableState
+ *          |
+ *          v
+ *   prepare + submit SQE
+ *          |
+ *          v
+ *       kernel
+ *          |
+ *          v
+ *         CQE
+ *          |
+ *          v
+ *      IoResult
+ *          |
+ *          v
+ *   complete awaitable
+ *          |
+ *          v
+ *   resume coroutine
+ *          |
+ *          v
+ *   recycle Operation
+ *
+ * Pending timeout operations are tracked separately so they can be cancelled
+ * during shutdown instead of delaying event-loop termination.
+ */
+
 #include "io/uring_context.h"
 
 #include <cerrno>
@@ -10,8 +50,7 @@
 #include <linux/time_types.h>
 
 #include "common/xrpc_exception.h"
-#include "io/operation.h"
-#include "io/uring_context_runtime.h"
+#include "detail/context_runtime.h"
 
 namespace xrpc::io {
 namespace {
@@ -49,7 +88,7 @@ void UringContext::Runtime::SubmitOperation(std::unique_ptr<Operation> operation
       throw InternalException("io_uring_get_sqe failed");
     }
 
-    prep(*sqe);
+    prep(sqe);
 
     Operation *raw_operation = operation.get();
     io_uring_sqe_set_data(sqe, raw_operation);
@@ -254,8 +293,8 @@ auto UringContext::Accept(int listen_fd) -> UringAwaitable {
   operation->fd_ = listen_fd;
   awaitable.Bind(*operation);
 
-  runtime_->SubmitOperation(std::move(operation), [listen_fd](io_uring_sqe &sqe) -> void {
-    io_uring_prep_accept(&sqe, listen_fd, nullptr, nullptr, 0);
+  runtime_->SubmitOperation(std::move(operation), [listen_fd](io_uring_sqe *sqe) -> void {
+    io_uring_prep_accept(sqe, listen_fd, nullptr, nullptr, 0);
   });
 
   return awaitable;
@@ -270,8 +309,8 @@ auto UringContext::Recv(int fd, void *buffer, std::size_t len) -> UringAwaitable
   operation->length_ = len;
   awaitable.Bind(*operation);
 
-  runtime_->SubmitOperation(std::move(operation), [fd, buffer, len](io_uring_sqe &sqe) -> void {
-    io_uring_prep_recv(&sqe, fd, buffer, len, 0);
+  runtime_->SubmitOperation(std::move(operation), [fd, buffer, len](io_uring_sqe *sqe) -> void {
+    io_uring_prep_recv(sqe, fd, buffer, len, 0);
   });
 
   return awaitable;
@@ -286,8 +325,8 @@ auto UringContext::Send(int fd, const void *buffer, std::size_t len) -> UringAwa
   operation->length_ = len;
   awaitable.Bind(*operation);
 
-  runtime_->SubmitOperation(std::move(operation), [fd, buffer, len](io_uring_sqe &sqe) -> void {
-    io_uring_prep_send(&sqe, fd, buffer, len, 0);
+  runtime_->SubmitOperation(std::move(operation), [fd, buffer, len](io_uring_sqe *sqe) -> void {
+    io_uring_prep_send(sqe, fd, buffer, len, 0);
   });
 
   return awaitable;
@@ -301,8 +340,8 @@ auto UringContext::SleepFor(std::chrono::nanoseconds timeout) -> UringAwaitable 
   Operation *raw_operation = operation.get();
   awaitable.Bind(*operation);
 
-  runtime_->SubmitOperation(std::move(operation), [raw_operation](io_uring_sqe &sqe) -> void {
-    io_uring_prep_timeout(&sqe, &raw_operation->timeout_, 0, 0);
+  runtime_->SubmitOperation(std::move(operation), [raw_operation](io_uring_sqe *sqe) -> void {
+    io_uring_prep_timeout(sqe, &raw_operation->timeout_, 0, 0);
   });
 
   return awaitable;
@@ -314,9 +353,42 @@ auto UringContext::Nop() -> UringAwaitable {
   operation->type_ = OperationType::Nop;
   awaitable.Bind(*operation);
 
-  runtime_->SubmitOperation(std::move(operation), [](io_uring_sqe &sqe) -> void { io_uring_prep_nop(&sqe); });
+  runtime_->SubmitOperation(std::move(operation), [](io_uring_sqe *sqe) -> void { io_uring_prep_nop(sqe); });
 
   return awaitable;
+}
+
+UringAwaitable::~UringAwaitable() { Detach(); }
+
+UringAwaitable::UringAwaitable(UringAwaitable &&other) noexcept
+    : state_(std::exchange(other.state_, detail::AwaitableState{})) {
+  if (state_.operation_ != nullptr) {
+    state_.operation_->awaitable_state_ = &state_;
+  }
+}
+
+auto UringAwaitable::operator=(UringAwaitable &&other) noexcept -> UringAwaitable & {
+  if (this != &other) {
+    Detach();
+    state_ = std::exchange(other.state_, detail::AwaitableState{});
+    if (state_.operation_ != nullptr) {
+      state_.operation_->awaitable_state_ = &state_;
+    }
+  }
+  return *this;
+}
+
+void UringAwaitable::Bind(Operation &operation) noexcept {
+  Detach();
+  state_.operation_ = &operation;
+  operation.awaitable_state_ = &state_;
+}
+
+void UringAwaitable::Detach() noexcept {
+  if (state_.operation_ != nullptr && state_.operation_->awaitable_state_ == &state_) {
+    state_.operation_->awaitable_state_ = nullptr;
+  }
+  state_.operation_ = nullptr;
 }
 
 }  // namespace xrpc::io

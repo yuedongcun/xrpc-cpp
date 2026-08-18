@@ -1,3 +1,13 @@
+/**
+ * @file context_runtime.h
+ * @brief Defines private state shared by UringContext implementation files.
+ *
+ * This header is intentionally private to `src/io/`. It contains the
+ * `UringContext::Runtime` state and internal `Operation` representation needed
+ * by the split run-loop, operation, and control implementations. It is not an
+ * io module interface.
+ */
+
 #pragma once
 
 #include <atomic>
@@ -14,10 +24,18 @@
 
 #include <liburing.h>
 
-#include "io/operation.h"
 #include "io/uring_context.h"
 
 namespace xrpc::io {
+
+struct Operation {
+  OperationType type_ = OperationType::Nop;
+  int fd_ = -1;
+  void *buffer_ = nullptr;
+  std::size_t length_ = 0;
+  __kernel_timespec timeout_{};
+  detail::AwaitableState *awaitable_state_ = nullptr;
+};
 
 struct UringContext::Runtime final {
   explicit Runtime(std::uint32_t entries);
