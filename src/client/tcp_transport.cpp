@@ -2,6 +2,7 @@
 
 #include <cerrno>
 #include <cstring>
+#include <exception>
 #include <utility>
 #include <vector>
 
@@ -361,7 +362,8 @@ void TcpTransport::CloseSocketLocked() {
   try {
     socket_.ShutdownReadWrite();
   } catch (...) {
-    // Shutdown only wakes blocked I/O; closing the descriptor remains required.
+    const std::exception_ptr ignored = std::current_exception();
+    (void)ignored;
   }
   socket_.Close();
 }

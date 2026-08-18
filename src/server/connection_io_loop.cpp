@@ -58,7 +58,7 @@ void ConnectionIoLoop::Stop() noexcept {
   thread_.request_stop();
   // Close live connections on the loop thread before stopping the context so
   // each connection can cancel its own in-flight io_uring operations.
-  context_.Post([this]() { CloseConnections(); });
+  context_.Post([this]() -> void { CloseConnections(); });
   context_.Stop();
   if (thread_.joinable()) {
     thread_.join();

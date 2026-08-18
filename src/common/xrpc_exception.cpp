@@ -27,7 +27,7 @@ auto ExceptionToStatus(const XrpcException &exception) -> Status { return except
 /**
  * @brief Maps allocation failure to resource exhaustion.
  */
-auto ExceptionToStatus(const std::bad_alloc &) -> Status {
+auto ExceptionToStatus([[maybe_unused]] const std::bad_alloc &exception) -> Status {
   return {StatusCode::ResourceExhausted, "memory allocation failed"};
 }
 

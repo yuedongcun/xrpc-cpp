@@ -112,7 +112,7 @@ ConsulDiscovery::~ConsulDiscovery() { Stop(); }
  */
 auto ConsulDiscovery::Start() -> Status {
   const Status status = Fetch(false);
-  refresh_thread_ = std::jthread([this](std::stop_token stop_token) { RefreshLoop(stop_token); });
+  refresh_thread_ = std::jthread([this](const std::stop_token &stop_token) -> void { RefreshLoop(stop_token); });
   return status;
 }
 

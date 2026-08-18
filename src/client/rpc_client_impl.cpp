@@ -193,10 +193,8 @@ auto RpcClient::Impl::SelectStickyStart(std::string_view sticky_key, const std::
   }
 
   const std::uint64_t key_hash = Fnv1a64(sticky_key);
-  const auto entry =
-      std::ranges::lower_bound(hash_ring, key_hash, {}, [](const HashRingEntry &item) -> std::uint64_t {
-        return item.hash_;
-      });
+  const auto entry = std::ranges::lower_bound(hash_ring, key_hash, {},
+                                              [](const HashRingEntry &item) -> std::uint64_t { return item.hash_; });
   return entry == hash_ring.end() ? hash_ring.front().endpoint_index_ : entry->endpoint_index_;
 }
 

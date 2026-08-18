@@ -101,9 +101,7 @@ void UringContext::Runtime::AssertRunThread(std::string_view action) const {
 }
 
 /** @return true while a thread is inside `UringContext::Run()`. */
-auto UringContext::Runtime::IsRunning() const -> bool {
-  return run_thread_token_.load() != nullptr;
-}
+auto UringContext::Runtime::IsRunning() const -> bool { return run_thread_token_.load() != nullptr; }
 
 /**
  * @brief Creates an io_uring context with the requested queue depth.

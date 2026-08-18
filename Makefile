@@ -3,7 +3,12 @@ RELEASE_BUILD_DIR ?= build-release
 CMAKE_ARGS ?=
 
 .DEFAULT_GOAL := all
-.PHONY: all configure release test clangd-db dev clean
+.PHONY: all configure release test format check-format check-tidy clangd-db dev clean
+
+FORMAT_FILES = $(shell find include src -type f \( \
+	-name '*.h' -o -name '*.hh' -o -name '*.hpp' -o \
+	-name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' \
+\))
 
 configure:
 	cmake -S . -B $(BUILD_DIR) \
@@ -31,6 +36,35 @@ test: all
 	ctest --test-dir $(BUILD_DIR)/tests \
 		--output-on-failure \
 		-LE external
+
+format:
+	@command -v clang-format >/dev/null 2>&1 || { \
+		echo "error: clang-format not found"; \
+		exit 1; \
+	}
+	@clang-format -i $(FORMAT_FILES)
+
+check-format:
+	@command -v clang-format >/dev/null 2>&1 || { \
+		echo "error: clang-format not found"; \
+		exit 1; \
+	}
+	@clang-format --dry-run --Werror $(FORMAT_FILES)
+
+check-tidy:
+	@command -v run-clang-tidy >/dev/null 2>&1 || { \
+		echo "error: run-clang-tidy not found"; \
+		exit 1; \
+	}
+	@test -f "$(BUILD_DIR)/compile_commands.json" || { \
+		echo "error: $(BUILD_DIR)/compile_commands.json not found; run 'make' first"; \
+		exit 1; \
+	}
+	@run-clang-tidy \
+		-p "$(BUILD_DIR)" \
+		-quiet \
+		-header-filter="$(CURDIR)/(include|src)/.*" \
+		"$(CURDIR)/src/.*\\.cpp"
 
 clangd-db:
 	@command -v compdb >/dev/null 2>&1 || { \

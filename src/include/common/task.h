@@ -40,14 +40,14 @@ class TaskCompletionState {
   /** @brief Blocks until the associated coroutine reaches final suspension. */
   void WaitCompleted() const {
     std::unique_lock<std::mutex> lock(completion_mutex_);
-    completion_cv_.wait(lock, [this] { return completed_; });
+    completion_cv_.wait(lock, [this]() -> bool { return completed_; });
   }
 
   /** @return true when completion is observed before `timeout` expires. */
   template <typename Rep, typename Period>
   [[nodiscard]] auto WaitCompletedFor(const std::chrono::duration<Rep, Period> &timeout) const -> bool {
     std::unique_lock<std::mutex> lock(completion_mutex_);
-    return completion_cv_.wait_for(lock, timeout, [this] { return completed_; });
+    return completion_cv_.wait_for(lock, timeout, [this]() -> bool { return completed_; });
   }
 
  private:

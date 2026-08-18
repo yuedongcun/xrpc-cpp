@@ -26,11 +26,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends \
             build-essential \
+            clang-format \
+            clang-tidy \
+            clang-tools \
             cmake \
             python3
 
+      - name: Check format
+        run: make check-format
+
       - name: Build
         run: make
+
+      - name: Check clang-tidy
+        run: make check-tidy
 
       - name: Test
         run: ctest --test-dir build/tests --output-on-failure -LE external

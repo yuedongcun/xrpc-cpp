@@ -44,7 +44,7 @@ class RawRequestBatch final {
       return false;
     }
     return std::ranges::all_of(additional_requests_,
-                               [&callback](RawRequest &request) { return callback(std::move(request)); });
+                               [&callback](RawRequest &request) -> bool { return callback(std::move(request)); });
   }
 
  private:

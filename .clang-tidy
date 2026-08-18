@@ -50,6 +50,6 @@ CheckOptions:
   - { key: readability-identifier-naming.MethodIgnoredRegexp, value: '^(get_return_object|initial_suspend|final_suspend|return_void|return_value|unhandled_exception)$' }
   - { key: readability-identifier-naming.PublicMethodIgnoredRegexp, value: '^(get_return_object|initial_suspend|final_suspend|return_void|return_value|unhandled_exception)$' }
 
-WarningsAsErrors: ''
+WarningsAsErrors: '*'
 HeaderFilterRegex: ''
 FormatStyle: file

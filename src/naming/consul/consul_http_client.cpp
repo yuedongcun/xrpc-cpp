@@ -42,7 +42,8 @@ auto Trim(std::string_view value) -> std::string_view {
  * @return Lowercase copy of `value`.
  */
 auto ToLower(std::string value) -> std::string {
-  std::ranges::transform(value, value.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  std::ranges::transform(value, value.begin(),
+                         [](unsigned char ch) -> char { return static_cast<char>(std::tolower(ch)); });
   return value;
 }
 

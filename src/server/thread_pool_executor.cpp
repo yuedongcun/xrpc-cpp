@@ -69,7 +69,7 @@ auto ThreadPoolExecutor::TrySubmitBatch(std::function<void()> job, std::size_t l
       return false;
     }
     queue.jobs_.push(WorkerJob{.run_ = std::move(job), .logical_jobs_ = logical_jobs});
-    const std::size_t queue_depth = queue.pending_jobs_.fetch_add(1) + 1;
+    queue.pending_jobs_.fetch_add(1);
   } catch (...) {
     ReleasePendingJobs(logical_jobs);
     throw;
@@ -89,9 +89,7 @@ void ThreadPoolExecutor::CloseSubmissions() noexcept {
 }
 
 /** @return true while new jobs may still be admitted. */
-auto ThreadPoolExecutor::accepting_submissions() const noexcept -> bool {
-  return accepting_submissions_.load();
-}
+auto ThreadPoolExecutor::accepting_submissions() const noexcept -> bool { return accepting_submissions_.load(); }
 
 /**
  * @brief Selects the worker queue for a newly accepted job.
@@ -143,9 +141,7 @@ auto ThreadPoolExecutor::TryReservePendingJobs(std::size_t logical_jobs) -> std:
  *
  * @param logical_jobs Number of logical RPC jobs to remove from pending accounting.
  */
-void ThreadPoolExecutor::ReleasePendingJobs(std::size_t logical_jobs) {
-  pending_jobs_.fetch_sub(logical_jobs);
-}
+void ThreadPoolExecutor::ReleasePendingJobs(std::size_t logical_jobs) { pending_jobs_.fetch_sub(logical_jobs); }
 
 /**
  * @brief Requests all workers to stop after draining their local queues.
@@ -182,8 +178,7 @@ void ThreadPoolExecutor::WorkerLoop(WorkerQueue &queue) {
     WorkerJob job;
     {
       std::unique_lock<std::mutex> lock(queue.mutex_);
-      queue.cv_.wait(
-          lock, [this, &queue]() -> bool { return stopped_.load() || !queue.jobs_.empty(); });
+      queue.cv_.wait(lock, [this, &queue]() -> bool { return stopped_.load() || !queue.jobs_.empty(); });
       if (stopped_.load() && queue.jobs_.empty()) {
         return;
       }

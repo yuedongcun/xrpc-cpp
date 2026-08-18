@@ -214,7 +214,7 @@ void RpcServer::Impl::BeginConnectionDrain() {
 
 void RpcServer::Impl::FinishConnectionDrain() {
   std::exception_ptr failure;
-  auto attempt = [&failure](auto &&action) {
+  auto attempt = [&failure](auto &&action) -> void {
     try {
       action();
     } catch (...) {
@@ -225,12 +225,12 @@ void RpcServer::Impl::FinishConnectionDrain() {
   };
 
   for (auto &loop : connection_io_loops_) {
-    attempt([&loop]() { loop->FinishDrain(); });
+    attempt([&loop]() -> void { loop->FinishDrain(); });
   }
   for (const auto &loop : connection_io_loops_) {
-    attempt([&loop]() { loop->RethrowIfFailed(); });
+    attempt([&loop]() -> void { loop->RethrowIfFailed(); });
   }
-  attempt([this]() { accept_context_.Stop(); });
+  attempt([this]() -> void { accept_context_.Stop(); });
 
   if (failure) {
     std::rethrow_exception(failure);
@@ -317,6 +317,8 @@ void RpcServer::Impl::ShutdownComponentsBestEffort() noexcept {
   try {
     ShutdownComponents();
   } catch (...) {
+    const std::exception_ptr ignored = std::current_exception();
+    (void)ignored;
   }
 }
 

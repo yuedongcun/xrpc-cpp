@@ -98,7 +98,7 @@ class SocketError final : public TransportException {
  public:
   /** @brief Constructs a socket error from a portable code and system error code. */
   SocketError(SocketErrorCode code, std::error_code system_error, const std::string &message)
-      : TransportException(ToStatusCode(code), message), code_(code), system_error_(std::move(system_error)) {}
+      : TransportException(ToStatusCode(code), message), code_(code), system_error_(system_error) {}
 
   /** @brief Constructs a socket error from a portable code and raw errno value. */
   SocketError(SocketErrorCode code, int system_error, const std::string &message)
