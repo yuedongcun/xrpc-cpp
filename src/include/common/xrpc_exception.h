@@ -55,10 +55,6 @@ class TransportException : public XrpcException {
   TransportException(StatusCode code, const std::string &message) : XrpcException(code, message) {}
 };
 
-[[nodiscard]] auto ExceptionToStatus(const XrpcException &exception) -> Status;
-[[nodiscard]] auto ExceptionToStatus(const std::bad_alloc &exception) -> Status;
-[[nodiscard]] auto ExceptionToStatus(const std::invalid_argument &exception) -> Status;
-[[nodiscard]] auto ExceptionToStatus(const std::exception &exception) -> Status;
 [[nodiscard]] auto CaughtExceptionToStatus(std::string_view non_standard_exception_message) -> Status;
 [[nodiscard]] auto CaughtExceptionToStatus(StatusCode non_standard_exception_code,
                                            std::string_view non_standard_exception_message) -> Status;

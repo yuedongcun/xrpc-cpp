@@ -1,3 +1,12 @@
+/**
+ * @file rpc_server.cpp
+ * @brief Implements the public `RpcServer` facade.
+ *
+ * Public server operations delegate to `RpcServer::Impl`, while exceptions
+ * raised by the internal runtime are converted into `Status` or `StatusOr`
+ * values at the API boundary.
+ */
+
 #include <xrpc/rpc_server.h>
 
 #include <memory>

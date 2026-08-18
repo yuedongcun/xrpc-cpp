@@ -1,3 +1,13 @@
+/**
+ * @file connection_io_loop.cpp
+ * @brief Implements connection admission, draining, and I/O-thread coordination.
+ *
+ * Connection creation, connection state changes, and connection cleanup run
+ * on the `UringContext` thread. Lifecycle state and the live-connection count
+ * are synchronized across threads, while cross-thread control requests are
+ * forwarded to the context with `Post()`.
+ */
+
 #include "server/connection_io_loop.h"
 
 #include <utility>
@@ -14,68 +24,89 @@ ConnectionIoLoop::ConnectionIoLoop(ServiceRegistry &registry, ThreadPoolExecutor
       limits_(limits),
       protocol_limits_(protocol_limits) {}
 
-ConnectionIoLoop::~ConnectionIoLoop() { Stop(); }
+ConnectionIoLoop::~ConnectionIoLoop() { StopImmediately(); }
 
 void ConnectionIoLoop::Start() {
-  if (started_) {
+  std::lock_guard lock(drain_mutex_);
+  if (state_ != State::Created) {
     return;
   }
-
-  started_ = true;
-  thread_ = std::jthread([this]() -> void {
-    try {
-      context_.Run();
-    } catch (...) {
-      error_ = std::current_exception();
-    }
-  });
+  state_ = State::Running;
+  try {
+    thread_ = std::jthread([this]() -> void {
+      try {
+        context_.Run();
+      } catch (...) {
+        error_ = std::current_exception();
+      }
+    });
+  } catch (...) {
+    state_ = State::Stopped;
+    drain_cv_.notify_all();
+    throw;
+  }
 }
 
-void ConnectionIoLoop::Stop() noexcept {
-  if (!started_) {
+/**
+ * @brief Performs best-effort immediate shutdown without graceful draining.
+ */
+void ConnectionIoLoop::StopImmediately() noexcept {
+  {
+    std::lock_guard lock(drain_mutex_);
+    if (state_ == State::Created || state_ == State::Stopped) {
+      state_ = State::Stopped;
+      drain_cv_.notify_all();
+      return;
+    }
+  }
+
+  if (!thread_.joinable()) {
+    std::lock_guard lock(drain_mutex_);
+    state_ = State::Stopped;
+    drain_cv_.notify_all();
     return;
   }
 
   thread_.request_stop();
 
-  context_.Post([this]() -> void { CloseConnections(); });
+  context_.Post([this]() -> void { CloseConnectionsOnContext(); });
   context_.Stop();
   if (thread_.joinable()) {
     thread_.join();
   }
   dispatch_mailbox_->Disable();
-  started_ = false;
+  {
+    std::lock_guard lock(drain_mutex_);
+    state_ = State::Stopped;
+  }
+  drain_cv_.notify_all();
 }
 
 void ConnectionIoLoop::BeginDrain() {
   {
-    std::unique_lock lock(drain_mutex_);
-    if (!started_) {
-      drain_requested_ = true;
-      drain_ready_ = true;
+    std::lock_guard lock(drain_mutex_);
+    if (state_ == State::Created) {
+      state_ = State::Stopped;
+      drain_cv_.notify_all();
       return;
     }
-    if (drain_requested_) {
-      drain_cv_.wait(lock, [this]() -> bool { return drain_ready_; });
+    if (state_ != State::Running) {
       return;
     }
-    drain_requested_ = true;
+    state_ = State::Draining;
   }
 
   context_.Post([this]() -> void { BeginDrainOnContext(); });
-  std::unique_lock lock(drain_mutex_);
-  drain_cv_.wait(lock, [this]() -> bool { return drain_ready_; });
 }
 
 void ConnectionIoLoop::FinishDrain() {
   BeginDrain();
   {
     std::unique_lock lock(drain_mutex_);
+    if (state_ == State::Stopped) {
+      return;
+    }
     drain_cv_.wait(lock, [this]() -> bool { return live_connections_ == 0; });
-  }
-
-  if (!started_) {
-    return;
   }
   context_.Stop();
 
@@ -85,27 +116,36 @@ void ConnectionIoLoop::FinishDrain() {
 
   dispatch_mailbox_->Disable();
   connections_.clear();
-  started_ = false;
-}
-
-void ConnectionIoLoop::PostStartConnection(io::Socket client_socket) {
-  auto socket_holder = std::make_shared<io::Socket>(std::move(client_socket));
-  context_.Post([this, socket_holder]() -> void {
-    CleanupClosedConnections();
-    StartConnection(std::move(*socket_holder));
-  });
-}
-
-void ConnectionIoLoop::RethrowIfFailed() const {
+  {
+    std::lock_guard lock(drain_mutex_);
+    state_ = State::Stopped;
+  }
+  drain_cv_.notify_all();
   if (error_) {
     std::rethrow_exception(error_);
   }
 }
 
-void ConnectionIoLoop::StartConnection(io::Socket client_socket) {
+void ConnectionIoLoop::PostStartConnection(io::Socket client_socket) {
   {
     std::lock_guard lock(drain_mutex_);
-    if (drain_requested_) {
+    if (state_ != State::Running) {
+      client_socket.Close();
+      return;
+    }
+  }
+
+  auto socket_holder = std::make_shared<io::Socket>(std::move(client_socket));
+  context_.Post([this, socket_holder]() -> void {
+    CollectClosedConnections();
+    StartConnectionOnContext(std::move(*socket_holder));
+  });
+}
+
+void ConnectionIoLoop::StartConnectionOnContext(io::Socket client_socket) {
+  {
+    std::lock_guard lock(drain_mutex_);
+    if (state_ != State::Running) {
       client_socket.Close();
       return;
     }
@@ -127,30 +167,25 @@ void ConnectionIoLoop::StartConnection(io::Socket client_socket) {
   connections_.push_back(std::move(entry));
 }
 
-void ConnectionIoLoop::CleanupClosedConnections() {
+void ConnectionIoLoop::CollectClosedConnections() {
   std::erase_if(connections_, [](const ConnectionEntry &entry) -> bool {
     return entry.connection_->IsClosed() && entry.task_.Done();
   });
 }
 
-void ConnectionIoLoop::CloseConnections() {
+void ConnectionIoLoop::CloseConnectionsOnContext() {
   for (auto &entry : connections_) {
     if (!entry.connection_->IsClosed()) {
       entry.connection_->Close();
     }
   }
-  CleanupClosedConnections();
+  CollectClosedConnections();
 }
 
 void ConnectionIoLoop::BeginDrainOnContext() {
   for (auto &entry : connections_) {
     entry.connection_->BeginDrain();
   }
-  {
-    std::lock_guard lock(drain_mutex_);
-    drain_ready_ = true;
-  }
-  drain_cv_.notify_all();
 }
 
 void ConnectionIoLoop::OnConnectionClosed() {

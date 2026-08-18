@@ -89,12 +89,10 @@ auto ServerConnection::HandleFeedResult(FrameStreamFeedResult &&feed) -> bool {
 
   std::vector<RawRequest> requests;
   requests.reserve(request_count);
-  [[maybe_unused]] const bool consumed_all = feed.requests_.ConsumeEach([&requests](RawRequest request) -> bool {
+  feed.requests_.ConsumeEach([&requests](RawRequest request) -> bool {
     requests.push_back(std::move(request));
     return true;
   });
-  assert(consumed_all);
-  assert(requests.size() == request_count);
   return SubmitDispatchBatch(std::move(requests));
 }
 

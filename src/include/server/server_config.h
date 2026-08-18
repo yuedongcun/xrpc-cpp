@@ -10,7 +10,7 @@
 
 #include "naming/consul/consul_registrar.h"
 #include "protocol/frame_codec.h"
-#include "server/server_backpressure.h"
+#include "server/connection_backpressure.h"
 
 namespace xrpc {
 

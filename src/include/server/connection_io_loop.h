@@ -1,7 +1,16 @@
+/**
+ * @file connection_io_loop.h
+ * @brief Declares the server connection I/O loop.
+ *
+ * `ConnectionIoLoop` owns one `UringContext`, one I/O thread, and the server
+ * connections assigned to that context.
+ */
+
 #pragma once
 
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <exception>
 #include <memory>
 #include <mutex>
@@ -12,9 +21,8 @@
 #include "io/socket.h"
 #include "io/uring_context.h"
 #include "protocol/frame_codec.h"
-#include "protocol/protocol_message.h"
+#include "server/connection_backpressure.h"
 #include "server/dispatch_mailbox.h"
-#include "server/server_backpressure.h"
 #include "server/server_connection.h"
 #include "server/thread_pool_executor.h"
 
@@ -22,6 +30,13 @@ namespace xrpc {
 
 class ServiceRegistry;
 
+/**
+ * @brief Owns one server connection I/O execution domain.
+ *
+ * Lifecycle methods are serialized by the owning server runtime. The
+ * cross-thread control methods post work to the UringContext thread, while
+ * methods suffixed with `OnContext` are confined to that thread.
+ */
 class ConnectionIoLoop final {
  public:
   ConnectionIoLoop(ServiceRegistry &registry, ThreadPoolExecutor &executor, ConnectionBackpressureLimits limits,
@@ -35,32 +50,45 @@ class ConnectionIoLoop final {
   ConnectionIoLoop(ConnectionIoLoop &&) = delete;
   auto operator=(ConnectionIoLoop &&) -> ConnectionIoLoop & = delete;
 
+  // Owner-thread lifecycle operation. Must not run concurrently with shutdown.
   void Start();
 
-  void Stop() noexcept;
-
+  // Cross-thread graceful shutdown request; posts the drain to the I/O thread.
   void BeginDrain();
 
+  // Owner-thread graceful shutdown operation.
   void FinishDrain();
 
+  // Cross-thread request; forwards connection creation to the I/O thread.
   void PostStartConnection(io::Socket client_socket);
 
-  void RethrowIfFailed() const;
-
  private:
+  enum class State : std::uint8_t {
+    Created,
+    Running,
+    Draining,
+    Stopped,
+  };
+
   struct ConnectionEntry {
     std::shared_ptr<ServerConnection> connection_;
     runtime::Task<void> task_;
   };
 
-  void StartConnection(io::Socket client_socket);
+  // Immediate fallback used only by destruction or failed shutdown cleanup.
+  void StopImmediately() noexcept;
 
-  void CleanupClosedConnections();
+  // I/O-context-thread-only operations.
+  void StartConnectionOnContext(io::Socket client_socket);
 
-  void CloseConnections();
+  void CollectClosedConnections();
 
+  void CloseConnectionsOnContext();
+
+  // I/O-context-thread-only drain operation.
   void BeginDrainOnContext();
 
+  // Invoked on the I/O context thread when a connection reaches Closed.
   void OnConnectionClosed();
 
   io::UringContext context_;
@@ -75,9 +103,7 @@ class ConnectionIoLoop final {
   std::mutex drain_mutex_;
   std::condition_variable drain_cv_;
   std::size_t live_connections_ = 0;
-  bool drain_requested_ = false;
-  bool drain_ready_ = false;
-  bool started_ = false;
+  State state_ = State::Created;
 };
 
 }  // namespace xrpc

@@ -1,3 +1,12 @@
+/**
+ * @file server_config.cpp
+ * @brief Implements server configuration validation and normalization.
+ *
+ * Public `RpcServerOptions` are validated and converted into the internal
+ * `ServerConfig` used by the server runtime. Service-registration settings are
+ * also resolved here into concrete Consul registration options.
+ */
+
 #include "server/server_config.h"
 
 #include <unistd.h>

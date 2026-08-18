@@ -1,3 +1,24 @@
+/**
+ * @file rpc_server_impl.cpp
+ * @brief Implements the server runtime lifecycle and component coordination.
+ *
+ * `RpcServer::Impl` coordinates the listening socket, accept loop, connection
+ * I/O loops, worker executor, service registry, and optional service
+ * registration.
+ *
+ * Server lifecycle:
+ *
+ *   Created -> Listening -> Running -> Stopping -> Stopped
+ *
+ * `Run()` drives the accept `UringContext` on the calling thread. Accepted
+ * sockets are distributed across the connection I/O loops, while RPC handlers
+ * execute on the worker executor.
+ *
+ * Graceful shutdown stops new work first, drains admitted worker jobs and
+ * existing connections, then stops the I/O loops before the runtime reaches
+ * `Stopped`.
+ */
+
 #include "server/rpc_server_impl.h"
 
 #include <fcntl.h>
@@ -227,9 +248,6 @@ void RpcServer::Impl::FinishConnectionDrain() {
   for (auto &loop : connection_io_loops_) {
     attempt([&loop]() -> void { loop->FinishDrain(); });
   }
-  for (const auto &loop : connection_io_loops_) {
-    attempt([&loop]() -> void { loop->RethrowIfFailed(); });
-  }
   attempt([this]() -> void { accept_context_.Stop(); });
 
   if (failure) {
@@ -262,6 +280,13 @@ auto RpcServer::Impl::TryDeregisterService() noexcept -> Status {
   }
 }
 
+/**
+ * @brief Completes server shutdown and publishes the terminal lifecycle state.
+ *
+ * Shutdown failures are preserved, but the lifecycle is always transitioned
+ * to `Stopped` and waiting lifecycle observers are notified before the failure
+ * is rethrown.
+ */
 void RpcServer::Impl::CompleteShutdown() {
   {
     std::lock_guard lock(lifecycle_mutex_);
@@ -286,6 +311,16 @@ void RpcServer::Impl::CompleteShutdown() {
   }
 }
 
+/**
+ * @brief Shuts down server components in graceful-drain order.
+ *
+ * New RPC admission and accepting stop first. Existing connections begin
+ * draining while already admitted worker jobs are allowed to finish, after
+ * which connection I/O loops complete their drain and stop.
+ *
+ * Cleanup continues after individual failures and rethrows the first failure
+ * after all shutdown steps have been attempted.
+ */
 void RpcServer::Impl::ShutdownComponents() {
   std::exception_ptr failure;
   auto attempt = [&failure](auto &&action) -> void {

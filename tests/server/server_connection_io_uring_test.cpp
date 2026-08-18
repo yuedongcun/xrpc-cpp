@@ -65,7 +65,9 @@ auto MakeRegistry(xrpc::RawHandler handler) -> xrpc::ServiceRegistry {
   return registry;
 }
 
-auto MakeConnectionConfig(xrpc::ConnectionBackpressureLimits limits = {}) -> xrpc::ServerConnectionConfig {
+auto MakeConnectionConfig(xrpc::ConnectionBackpressureLimits limits =
+                              {.max_inflight_ = 128, .max_write_queue_bytes_ = 8U * 1024U * 1024U})
+    -> xrpc::ServerConnectionConfig {
   return {.limits_ = limits, .protocol_limits_ = {}};
 }
 

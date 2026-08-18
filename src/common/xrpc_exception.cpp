@@ -8,18 +8,6 @@ XrpcException::XrpcException(StatusCode code, const std::string &message) : std:
 
 auto XrpcException::status() const -> Status { return {code_, what()}; }
 
-auto ExceptionToStatus(const XrpcException &exception) -> Status { return exception.status(); }
-
-auto ExceptionToStatus([[maybe_unused]] const std::bad_alloc &exception) -> Status {
-  return {StatusCode::ResourceExhausted, "memory allocation failed"};
-}
-
-auto ExceptionToStatus(const std::invalid_argument &exception) -> Status {
-  return {StatusCode::InvalidArgument, exception.what()};
-}
-
-auto ExceptionToStatus(const std::exception &exception) -> Status { return {StatusCode::Internal, exception.what()}; }
-
 auto CaughtExceptionToStatus(std::string_view non_standard_exception_message) -> Status {
   return CaughtExceptionToStatus(StatusCode::Internal, non_standard_exception_message);
 }
@@ -34,13 +22,13 @@ auto CaughtExceptionToStatus(StatusCode non_standard_exception_code, std::string
   try {
     std::rethrow_exception(current_exception);
   } catch (const XrpcException &exception) {
-    return ExceptionToStatus(exception);
-  } catch (const std::bad_alloc &exception) {
-    return ExceptionToStatus(exception);
+    return exception.status();
+  } catch (const std::bad_alloc &) {
+    return {StatusCode::ResourceExhausted, "memory allocation failed"};
   } catch (const std::invalid_argument &exception) {
-    return ExceptionToStatus(exception);
+    return {StatusCode::InvalidArgument, exception.what()};
   } catch (const std::exception &exception) {
-    return ExceptionToStatus(exception);
+    return {StatusCode::Internal, exception.what()};
   } catch (...) {
     return {non_standard_exception_code, std::string(non_standard_exception_message)};
   }
