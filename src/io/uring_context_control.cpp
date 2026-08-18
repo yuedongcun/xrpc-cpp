@@ -1,18 +1,5 @@
 /**
  * @file uring_context_control.cpp
- * @brief Implements UringContext's cross-thread control path.
- *
- * `Post()` queues callbacks for execution on the run thread, while `Stop()`
- * closes that queue and requests event-loop shutdown. An eventfd wakes a
- * blocked io_uring wait so queued callbacks and shutdown requests are observed
- * promptly.
- *
- * The callback queue is mutex-protected; execution remains confined to the
- * UringContext run thread.
- */
-
-/**
- * @file uring_context_control.cpp
  * @brief Implements `UringContext` cross-thread control and wakeup handling.
  *
  * `Post()` queues callbacks for execution on the run thread. `Stop()` stops
@@ -118,7 +105,7 @@ void UringContext::Runtime::SubmitWakeupPoll() {
   }
 
   auto operation = std::make_unique<Operation>();
-  operation->type_ = OperationType::Wakeup;
+  operation->completion_category_ = Operation::CompletionCategory::Wakeup;
   operation->fd_ = wakeup_fd_;
 
   io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
@@ -146,23 +133,20 @@ void UringContext::Runtime::SubmitWakeupPoll() {
  * operation, a new wakeup poll is submitted. During shutdown, the poll is not
  * rearmed and pending timeout operations are cancelled instead.
  */
-void UringContext::Runtime::ProcessWakeupCqe(const Operation &operation, io_uring_cqe *cqe) {
+void UringContext::Runtime::ProcessWakeupCqe(io_uring_cqe *cqe) {
   wakeup_poll_pending_ = false;
 
-  IoResult result;
-  result.type_ = operation.type_;
-  result.fd_ = operation.fd_;
-  result.result_ = cqe->res;
-  result.error_code_ = cqe->res < 0 ? -cqe->res : 0;
+  const int result = cqe->res;
+  const int error_code = result < 0 ? -result : 0;
   io_uring_cqe_seen(&ring_, cqe);
 
-  if (result.result_ < 0) {
-    if (stop_requested_.load() && result.error_code_ == ECANCELED) {
+  if (result < 0) {
+    if (stop_requested_.load() && error_code == ECANCELED) {
       return;
     }
-    throw InternalException(MakeErrorMessage("eventfd poll", result.error_code_));
+    throw InternalException(MakeErrorMessage("eventfd poll", error_code));
   }
-  if ((result.result_ & POLLIN) == 0) {
+  if ((result & POLLIN) == 0) {
     throw InternalException("eventfd poll completed without POLLIN");
   }
 

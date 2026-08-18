@@ -1,11 +1,10 @@
 /**
  * @file context_runtime.h
- * @brief Defines private state shared by UringContext implementation files.
+ * @brief Defines the private runtime state of `UringContext`.
  *
- * This header is intentionally private to `src/io/`. It contains the
- * `UringContext::Runtime` state and internal `Operation` representation needed
- * by the split run-loop, operation, and control implementations. It is not an
- * io module interface.
+ * This header contains the internal `Runtime` and `Operation` definitions
+ * shared by the run-loop, operation, and control implementation files.
+ * It is used only inside the io_uring implementation.
  */
 
 #pragma once
@@ -28,7 +27,14 @@
 namespace xrpc::io {
 
 struct Operation {
-  OperationType type_ = OperationType::Nop;
+  enum class CompletionCategory : std::uint8_t {
+    Awaitable,
+    Cancel,
+    Wakeup,
+  };
+
+  OperationType type_ = OperationType::Unknown;
+  CompletionCategory completion_category_ = CompletionCategory::Awaitable;
   int fd_ = -1;
   void *buffer_ = nullptr;
   std::size_t length_ = 0;
@@ -50,9 +56,13 @@ struct UringContext::Runtime final {
   [[nodiscard]] auto IsRunning() const -> bool;
 
   template <typename Prep>
-  void SubmitOperation(std::unique_ptr<Operation> operation, Prep &&prep);
+  void SubmitAwaitableOperation(std::unique_ptr<Operation> operation, Prep &&prep);
 
   void ProcessCqe(io_uring_cqe *cqe);
+
+  void ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe);
+
+  void ProcessCancelCqe(io_uring_cqe *cqe);
 
   static auto MakeCancelledResult(const Operation &operation) -> IoResult;
 
@@ -76,7 +86,7 @@ struct UringContext::Runtime final {
 
   void SubmitWakeupPoll();
 
-  void ProcessWakeupCqe(const Operation &operation, io_uring_cqe *cqe);
+  void ProcessWakeupCqe(io_uring_cqe *cqe);
 
   void SignalWakeup() const;
 

@@ -3,8 +3,8 @@
  * @brief Declares xRPC's single-threaded io_uring event loop.
  *
  * A `UringContext` owns one io_uring ring and drives asynchronous operations
- * on the thread running `Run()`. `Accept`, `Recv`, `Send`, `SleepFor`, and
- * `Nop` submit work on that thread and return move-only awaitables that resume
+ * on the thread running `Run()`. `Accept`, `Recv`, `Send`, and `SleepFor`
+ * submit work on that thread and return move-only awaitables that resume
  * the awaiting coroutine with an `IoResult`.
  *
  * `Post()` and `Stop()` form the cross-thread control boundary. They wake the
@@ -24,17 +24,15 @@
 namespace xrpc::io {
 
 enum class OperationType : std::uint8_t {
-  Accept = 0,
+  Unknown = 0,
+  Accept,
   Recv,
   Send,
   Timeout,
-  Nop,
-  Cancel,
-  Wakeup,
 };
 
 struct IoResult {
-  OperationType type_ = OperationType::Nop;
+  OperationType type_ = OperationType::Unknown;
   int fd_ = -1;
   int result_ = 0;
   int error_code_ = 0;
@@ -103,8 +101,6 @@ class UringContext final {
   [[nodiscard]] auto Send(int fd, const void *buffer, std::size_t len) -> UringAwaitable;
 
   [[nodiscard]] auto SleepFor(std::chrono::nanoseconds timeout) -> UringAwaitable;
-
-  [[nodiscard]] auto Nop() -> UringAwaitable;
 
   void CancelFd(int fd);
 

@@ -65,11 +65,6 @@ auto SendOne(xrpc::io::UringContext &context, int fd, const std::shared_ptr<std:
   co_return result;
 }
 
-auto AwaitNop(xrpc::io::UringContext &context) -> xrpc::runtime::Task<xrpc::io::IoResult> {
-  xrpc::io::IoResult result = co_await context.Nop();
-  co_return result;
-}
-
 auto SleepFor(xrpc::io::UringContext &context, std::chrono::nanoseconds timeout)
     -> xrpc::runtime::Task<xrpc::io::IoResult> {
   xrpc::io::IoResult result = co_await context.SleepFor(timeout);
@@ -83,7 +78,7 @@ auto ReadInvalidFd(xrpc::io::UringContext &context) -> xrpc::runtime::Task<xrpc:
 }
 
 auto MoveAwaitableBeforeSuspend(xrpc::io::UringContext &context) -> xrpc::runtime::Task<xrpc::io::IoResult> {
-  xrpc::io::UringAwaitable awaitable = context.Nop();
+  xrpc::io::UringAwaitable awaitable = context.SleepFor(std::chrono::milliseconds(1));
   xrpc::io::UringAwaitable moved_awaitable = std::move(awaitable);
   co_return co_await std::move(moved_awaitable);
 }
@@ -97,25 +92,16 @@ auto PendingSleep(xrpc::io::UringContext &context, std::atomic<bool> &submitted)
 
 auto SubmitAfterStop(xrpc::io::UringContext &context) -> xrpc::runtime::Task<xrpc::io::IoResult> {
   context.Stop();
-  co_return co_await context.Nop();
+  co_return co_await context.SleepFor(std::chrono::hours(1));
 }
 
 }  // namespace
-
-TEST(IoUringAwaitableTest, NopResumesCoroutine) {
-  xrpc::io::UringContext context;
-
-  const xrpc::io::IoResult result = WaitTaskWithContext(AwaitNop(context), context);
-  EXPECT_EQ(result.type_, xrpc::io::OperationType::Nop);
-  EXPECT_EQ(result.error_code_, 0);
-  EXPECT_EQ(result.result_, 0);
-}
 
 TEST(IoUringAwaitableTest, MoveAfterSubmissionPreservesCompletion) {
   xrpc::io::UringContext context;
 
   const xrpc::io::IoResult result = WaitTaskWithContext(MoveAwaitableBeforeSuspend(context), context);
-  EXPECT_EQ(result.type_, xrpc::io::OperationType::Nop);
+  EXPECT_EQ(result.type_, xrpc::io::OperationType::Timeout);
   EXPECT_EQ(result.error_code_, 0);
   EXPECT_EQ(result.result_, 0);
 }
@@ -124,7 +110,7 @@ TEST(IoUringAwaitableTest, CompletionBeforeAwaitSuspendIsObserved) {
   xrpc::io::UringContext context;
 
   const xrpc::io::IoResult result = WaitTaskWithContext(SubmitAfterStop(context), context);
-  EXPECT_EQ(result.type_, xrpc::io::OperationType::Nop);
+  EXPECT_EQ(result.type_, xrpc::io::OperationType::Timeout);
   EXPECT_EQ(result.error_code_, ECANCELED);
   EXPECT_LT(result.result_, 0);
 }
