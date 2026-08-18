@@ -117,7 +117,7 @@ void UringContext::Runtime::SubmitWakeupPoll() {
     throw InternalException("eventfd wakeup poll already pending");
   }
 
-  auto operation = AcquireOperation();
+  auto operation = std::make_unique<Operation>();
   operation->type_ = OperationType::Wakeup;
   operation->fd_ = wakeup_fd_;
 

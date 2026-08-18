@@ -2,38 +2,35 @@
  * @file uring_context_operations.cpp
  * @brief Implements io_uring operation submission and completion handling.
  *
- * Each asynchronous operation is represented by an `Operation` that keeps a
- * weak reference to its awaitable state, submitted through an SQE, recovered
- * from the matching CQE, and finally recycled. The weak reference lets an
- * abandoned coroutine frame disappear without making CQE processing touch it.
+ * Each asynchronous request uses an `Operation` for the kernel-side state and
+ * an `AwaitableState` for the coroutine-side state. `UringAwaitable` owns the
+ * awaitable state, while `Operation` keeps only a weak reference to it.
  *
  * Operation lifecycle:
  *
- *   acquire Operation
- *          |
- *          v
- *   link weak AwaitableState reference
- *          |
- *          v
- *   prepare + submit SQE
- *          |
- *          v
- *       kernel
- *          |
- *          v
- *         CQE
- *          |
- *          v
- *      IoResult
- *          |
- *          v
- *   complete awaitable
- *          |
- *          v
- *   resume coroutine
- *          |
- *          v
- *   recycle Operation
+ *   create Operation + AwaitableState
+ *              |
+ *              v
+ *       prepare + submit SQE
+ *              |
+ *              v
+ *           kernel
+ *              |
+ *              v
+ *             CQE
+ *              |
+ *              v
+ *         recover Operation
+ *              |
+ *              v
+ *           IoResult
+ *              |
+ *              +-- AwaitableState alive --> store result --> resume coroutine
+ *              |
+ *              `-- AwaitableState gone  --> skip coroutine completion
+ *              |
+ *              v
+ *        destroy Operation
  *
  * Pending timeout operations are tracked separately so they can be cancelled
  * during shutdown instead of delaying event-loop termination.
@@ -72,6 +69,13 @@ auto MakeKernelTimespec(std::chrono::nanoseconds timeout) -> __kernel_timespec {
 
 }  // namespace
 
+/**
+ * @brief Submits an operation to io_uring and transfers it to the CQE path.
+ *
+ * After successful submission, the `Operation` remains alive through the
+ * pointer stored in SQE user data. `ProcessCqe()` restores unique ownership
+ * when the matching CQE arrives.
+ */
 template <typename Prep>
 void UringContext::Runtime::SubmitOperation(std::unique_ptr<Operation> operation, Prep &&prep) {
   bool tracked_timeout = false;
@@ -79,7 +83,6 @@ void UringContext::Runtime::SubmitOperation(std::unique_ptr<Operation> operation
     AssertRunThread("io_uring submission");
     if (stop_requested_.load()) {
       CompleteAwaitableState(*operation, MakeCancelledResult(*operation));
-      RecycleOperation(std::move(operation));
       return;
     }
 
@@ -112,21 +115,6 @@ void UringContext::Runtime::SubmitOperation(std::unique_ptr<Operation> operation
   }
 }
 
-auto UringContext::Runtime::AcquireOperation() -> std::unique_ptr<Operation> {
-  if (operation_pool_.empty()) {
-    return std::make_unique<Operation>();
-  }
-
-  std::unique_ptr<Operation> operation = std::move(operation_pool_.back());
-  operation_pool_.pop_back();
-  return operation;
-}
-
-void UringContext::Runtime::RecycleOperation(std::unique_ptr<Operation> operation) {
-  *operation = Operation{};
-  operation_pool_.push_back(std::move(operation));
-}
-
 void UringContext::Runtime::ProcessCqe(io_uring_cqe *cqe) {
   auto *raw_operation = static_cast<Operation *>(io_uring_cqe_get_data(cqe));
   if (raw_operation == nullptr) {
@@ -137,7 +125,6 @@ void UringContext::Runtime::ProcessCqe(io_uring_cqe *cqe) {
   std::unique_ptr<Operation> operation(raw_operation);
   if (operation->type_ == OperationType::Wakeup) {
     ProcessWakeupCqe(*operation, cqe);
-    RecycleOperation(std::move(operation));
     return;
   }
 
@@ -168,12 +155,10 @@ void UringContext::Runtime::ProcessCqe(io_uring_cqe *cqe) {
         result.error_code_ != ECANCELED) {
       throw InternalException(MakeErrorMessage("io_uring cancel", result.error_code_));
     }
-    RecycleOperation(std::move(operation));
     return;
   }
 
   CompleteAwaitableState(*operation, result);
-  RecycleOperation(std::move(operation));
 }
 
 auto UringContext::Runtime::MakeCancelledResult(const Operation &operation) -> IoResult {
@@ -186,6 +171,12 @@ auto UringContext::Runtime::MakeCancelledResult(const Operation &operation) -> I
   return result;
 }
 
+/**
+ * @brief Delivers an I/O result to the coroutine if its awaitable state still exists.
+ *
+ * A missing state means the owning awaitable or coroutine frame was already
+ * destroyed, so the completion is discarded without resuming a coroutine.
+ */
 void UringContext::Runtime::CompleteAwaitableState(Operation &operation, const IoResult &result) {
   std::shared_ptr<detail::AwaitableState> state = operation.awaitable_state_.lock();
   if (!state) {
@@ -203,7 +194,7 @@ void UringContext::Runtime::CompleteAwaitableState(Operation &operation, const I
 void UringContext::Runtime::SubmitCancelFd(int fd) {
   AssertRunThread("UringContext::CancelFd");
 
-  auto operation = AcquireOperation();
+  auto operation = std::make_unique<Operation>();
   operation->type_ = OperationType::Cancel;
   operation->fd_ = fd;
 
@@ -228,7 +219,7 @@ void UringContext::Runtime::SubmitCancelFd(int fd) {
 void UringContext::Runtime::SubmitCancelOperation(Operation *operation_to_cancel) {
   AssertRunThread("UringContext timeout cancellation");
 
-  auto operation = AcquireOperation();
+  auto operation = std::make_unique<Operation>();
   operation->type_ = OperationType::Cancel;
 
   io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
@@ -277,7 +268,7 @@ void UringContext::Runtime::SubmitCancelPendingTimeouts() {
 auto UringContext::Accept(int listen_fd) -> UringAwaitable {
   auto state = std::make_shared<detail::AwaitableState>();
   UringAwaitable awaitable(state);
-  auto operation = runtime_->AcquireOperation();
+  auto operation = std::make_unique<Operation>();
   operation->type_ = OperationType::Accept;
   operation->fd_ = listen_fd;
   operation->awaitable_state_ = state;
@@ -292,7 +283,7 @@ auto UringContext::Accept(int listen_fd) -> UringAwaitable {
 auto UringContext::Recv(int fd, void *buffer, std::size_t len) -> UringAwaitable {
   auto state = std::make_shared<detail::AwaitableState>();
   UringAwaitable awaitable(state);
-  auto operation = runtime_->AcquireOperation();
+  auto operation = std::make_unique<Operation>();
   operation->type_ = OperationType::Recv;
   operation->fd_ = fd;
   operation->buffer_ = buffer;
@@ -309,7 +300,7 @@ auto UringContext::Recv(int fd, void *buffer, std::size_t len) -> UringAwaitable
 auto UringContext::Send(int fd, const void *buffer, std::size_t len) -> UringAwaitable {
   auto state = std::make_shared<detail::AwaitableState>();
   UringAwaitable awaitable(state);
-  auto operation = runtime_->AcquireOperation();
+  auto operation = std::make_unique<Operation>();
   operation->type_ = OperationType::Send;
   operation->fd_ = fd;
   operation->buffer_ = const_cast<void *>(buffer);
@@ -326,7 +317,7 @@ auto UringContext::Send(int fd, const void *buffer, std::size_t len) -> UringAwa
 auto UringContext::SleepFor(std::chrono::nanoseconds timeout) -> UringAwaitable {
   auto state = std::make_shared<detail::AwaitableState>();
   UringAwaitable awaitable(state);
-  auto operation = runtime_->AcquireOperation();
+  auto operation = std::make_unique<Operation>();
   operation->type_ = OperationType::Timeout;
   operation->timeout_ = MakeKernelTimespec(timeout);
   Operation *raw_operation = operation.get();
@@ -342,7 +333,7 @@ auto UringContext::SleepFor(std::chrono::nanoseconds timeout) -> UringAwaitable 
 auto UringContext::Nop() -> UringAwaitable {
   auto state = std::make_shared<detail::AwaitableState>();
   UringAwaitable awaitable(state);
-  auto operation = runtime_->AcquireOperation();
+  auto operation = std::make_unique<Operation>();
   operation->type_ = OperationType::Nop;
   operation->awaitable_state_ = state;
 

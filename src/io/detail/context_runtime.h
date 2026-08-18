@@ -20,7 +20,6 @@
 #include <string>
 #include <string_view>
 #include <unordered_set>
-#include <vector>
 
 #include <liburing.h>
 
@@ -52,10 +51,6 @@ struct UringContext::Runtime final {
 
   template <typename Prep>
   void SubmitOperation(std::unique_ptr<Operation> operation, Prep &&prep);
-
-  [[nodiscard]] auto AcquireOperation() -> std::unique_ptr<Operation>;
-
-  void RecycleOperation(std::unique_ptr<Operation> operation);
 
   void ProcessCqe(io_uring_cqe *cqe);
 
@@ -112,8 +107,6 @@ struct UringContext::Runtime final {
   std::queue<std::function<void()>> posted_callbacks_;
 
   std::unordered_set<Operation *> pending_timeout_operations_;
-
-  std::vector<std::unique_ptr<Operation>> operation_pool_;
 };
 
 }  // namespace xrpc::io
