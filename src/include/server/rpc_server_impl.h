@@ -2,7 +2,6 @@
 
 #pragma once
 
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -76,7 +75,6 @@ class RpcServer::Impl final {
   io::Socket listen_socket_;
 
   std::mutex lifecycle_mutex_;
-  std::condition_variable lifecycle_cv_;
   State state_ = State::Created;
 
   std::size_t next_connection_io_loop_ = 0;

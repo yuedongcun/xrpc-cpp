@@ -55,6 +55,11 @@
  * Awaiting a task transfers that ownership to the awaiter. Completion is
  * published before the continuation is resumed.
  *
+ * Handle operations (`Start()`, `Result()`, `Get()`, move, and destruction)
+ * are single-owner operations and must not overlap. `Wait()` and `WaitFor()`
+ * only observe the separately synchronized completion state, so they may wait
+ * from another thread while the task object remains alive and stable.
+ *
  * This file defines task lifetime and completion mechanics only; scheduling,
  * I/O completion, and thread affinity are provided by the runtime components
  * that resume the coroutine.

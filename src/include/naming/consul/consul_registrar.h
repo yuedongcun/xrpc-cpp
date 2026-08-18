@@ -11,6 +11,12 @@
 
 namespace xrpc {
 
+/**
+ * @brief Registers one server instance with a Consul agent.
+ *
+ * This is a server-lifecycle-owned component, not a concurrent service. Its
+ * registration state is accessed only by the owning `RpcServer` runtime.
+ */
 class ConsulRegistrar final {
  public:
   struct Options {

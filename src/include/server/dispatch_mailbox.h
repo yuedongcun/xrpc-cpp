@@ -24,6 +24,13 @@ struct DispatchCompletion {
   bool encode_failed_ = false;
 };
 
+/**
+ * @brief Thread-safe mailbox for worker-to-I/O-loop dispatch completions.
+ *
+ * Workers may call `Submit()` concurrently. The mailbox batches those
+ * completions and drains them on the owning `UringContext` thread; it is the
+ * only worker path that touches a `ServerConnection` after handler execution.
+ */
 class DispatchMailbox final : public std::enable_shared_from_this<DispatchMailbox> {
  public:
   explicit DispatchMailbox(io::UringContext &context);
@@ -36,9 +43,11 @@ class DispatchMailbox final : public std::enable_shared_from_this<DispatchMailbo
 
   void Submit(DispatchCompletion completion);
 
+  // Owner-thread shutdown operation, called after completion draining.
   void Disable();
 
  private:
+  // UringContext-thread-only.
   void DrainOnContext();
 
   io::UringContext *context_;

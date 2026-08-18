@@ -44,13 +44,7 @@ RpcServer::Impl::Impl(const RpcServerOptions &options)
   }
 }
 
-RpcServer::Impl::~Impl() {
-  Stop();
-  std::unique_lock lock(lifecycle_mutex_);
-  if (state_ == State::Stopping) {
-    lifecycle_cv_.wait(lock, [this]() -> bool { return state_ == State::Stopped; });
-  }
-}
+RpcServer::Impl::~Impl() { Stop(); }
 
 void RpcServer::Impl::RegisterMethod(MethodRegistration registration) {
   std::lock_guard lock(lifecycle_mutex_);
@@ -284,8 +278,7 @@ auto RpcServer::Impl::TryDeregisterService() noexcept -> Status {
  * @brief Completes server shutdown and publishes the terminal lifecycle state.
  *
  * Shutdown failures are preserved, but the lifecycle is always transitioned
- * to `Stopped` and waiting lifecycle observers are notified before the failure
- * is rethrown.
+ * to `Stopped` before the failure is rethrown.
  */
 void RpcServer::Impl::CompleteShutdown() {
   {
@@ -305,7 +298,6 @@ void RpcServer::Impl::CompleteShutdown() {
     std::lock_guard lock(lifecycle_mutex_);
     state_ = State::Stopped;
   }
-  lifecycle_cv_.notify_all();
   if (failure) {
     std::rethrow_exception(failure);
   }

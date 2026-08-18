@@ -107,11 +107,10 @@ void ThreadPoolExecutor::Stop() {
   }
   for (const auto &queue : worker_queues_) {
     std::lock_guard<std::mutex> lock(queue->mutex_);
-    queue->cv_.notify_all();
+    queue->cv_.notify_one();
   }
 
   for (auto &worker : workers_) {
-    worker.request_stop();
     if (worker.joinable()) {
       worker.join();
     }

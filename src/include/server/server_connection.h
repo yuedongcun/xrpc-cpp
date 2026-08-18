@@ -31,6 +31,14 @@ struct ServerConnectionConfig final {
   ProtocolLimits protocol_limits_;
 };
 
+/**
+ * @brief Owns the state machine for one server-side RPC connection.
+ *
+ * All mutable connection state is confined to its `UringContext` thread.
+ * Worker threads never access it directly: they return encoded completions
+ * through `DispatchMailbox`, which invokes the completion methods on this
+ * connection's I/O thread.
+ */
 class ServerConnection final : public std::enable_shared_from_this<ServerConnection> {
  public:
   ServerConnection(io::UringContext &context, ServiceRegistry &registry, ThreadPoolExecutor &executor,
@@ -45,6 +53,7 @@ class ServerConnection final : public std::enable_shared_from_this<ServerConnect
   ServerConnection(ServerConnection &&) noexcept = delete;
   auto operator=(ServerConnection &&) noexcept -> ServerConnection & = delete;
 
+  // I/O-context-thread-only lifecycle operations.
   [[nodiscard]] auto Run() -> runtime::Task<void>;
 
   void Close();

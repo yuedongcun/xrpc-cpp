@@ -12,6 +12,13 @@ namespace xrpc {
 
 using RawHandler = std::function<RawResponse(RawRequest)>;
 
+/**
+ * @brief Immutable-at-runtime mapping from service and method names to handlers.
+ *
+ * Registration happens during server setup. After `Run()` begins the registry
+ * is read-only, so worker threads may call `Dispatch()` concurrently without a
+ * lookup lock.
+ */
 class ServiceRegistry final {
  public:
   void RegisterRaw(const std::string &service, const std::string &method, RawHandler handler);

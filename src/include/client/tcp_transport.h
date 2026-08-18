@@ -20,6 +20,14 @@
 
 namespace xrpc {
 
+/**
+ * @brief One endpoint's blocking, multiplexed client transport.
+ *
+ * Multiple callers may invoke `Call()` concurrently. The transport serializes
+ * socket writes, protects pending-call matching, and uses one reader thread
+ * for responses. Destruction is a lifecycle operation and must not overlap
+ * calls from application threads.
+ */
 class TcpTransport final {
  public:
   TcpTransport(std::string host, std::uint16_t port, ProtocolLimits protocol_limits = {},
@@ -29,6 +37,7 @@ class TcpTransport final {
 
   [[nodiscard]] auto Call(const RawRequest &request, const EffectiveCallOptions &options) -> RawCallResult;
 
+  // Internal failure and lifecycle cleanup; not a separate concurrent API.
   void Close();
 
  private:

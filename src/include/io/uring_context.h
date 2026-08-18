@@ -9,6 +9,7 @@
  *
  * `Post()` and `Stop()` form the cross-thread control boundary. They wake the
  * event loop safely, but callbacks themselves always execute on the run thread.
+ * `CancelFd()` and all awaitable I/O submission must run on that same thread.
  */
 
 #pragma once
@@ -51,6 +52,12 @@ struct AwaitableState {
 
 }  // namespace detail
 
+/**
+ * @brief Move-only result of an I/O submission for one coroutine awaiter.
+ *
+ * An awaitable has one awaiter and is used on the `UringContext` run thread.
+ * Its completion state is updated by that thread before the coroutine resumes.
+ */
 class UringAwaitable final {
  public:
   ~UringAwaitable() = default;
@@ -78,6 +85,13 @@ class UringAwaitable final {
   std::shared_ptr<detail::AwaitableState> state_;
 };
 
+/**
+ * @brief Single-threaded io_uring execution context with cross-thread control.
+ *
+ * `Run()` has one owner. `Post()` and `Stop()` may be called concurrently from
+ * other threads; `Accept()`, `Recv()`, `Send()`, `SleepFor()`, and `CancelFd()`
+ * are run-thread-only operations.
+ */
 class UringContext final {
  public:
   explicit UringContext(std::uint32_t entries = 256);

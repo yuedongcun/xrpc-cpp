@@ -35,6 +35,9 @@ auto ResolveWorkerThreads(std::size_t worker_threads) -> std::size_t {
 
 }  // namespace
 
+/**
+ * @brief Validates public server options and builds the normalized runtime configuration.
+ */
 auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerConfig {
   if (options.listen_backlog_ == 0) {
     throw ConfigException("RpcServer listen_backlog must be greater than 0");
@@ -95,6 +98,13 @@ auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerConfig {
 
 auto ServiceRegistrationEnabled(const ServerConfig &config) -> bool { return !config.consul_.service_name_.empty(); }
 
+/**
+ * @brief Resolves concrete Consul registration options from the normalized server configuration.
+ *
+ * Missing service address, port, and ID values are derived from the listening
+ * endpoint when possible. A wildcard listen address requires an explicit
+ * service address.
+ */
 auto ResolveRegistrarOptions(const ServerConfig &config, std::string_view host, std::uint16_t listen_port)
     -> ConsulRegistrar::Options {
   if (!ServiceRegistrationEnabled(config)) {

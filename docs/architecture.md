@@ -49,6 +49,33 @@ socket、读缓冲区、写队列和在途状态都由一个 connection I/O loop
 这个所有权规则避免了全局 socket 锁。worker 线程获得请求处理工作，
 但不接管连接本身；它们把响应工作返回给连接所有者。
 
+## 并发契约
+
+XRPC 通过线程归属管理可变状态。连接状态只由所属 I/O 线程修改；
+跨线程协作通过 `Post()`、`Stop()` 和 `DispatchMailbox::Submit()` 等明确入口完成。
+
+| 组件 | 状态所有者 | 跨线程行为 |
+| --- | --- | --- |
+| `RpcServer` | 调用 `Run()` 的线程负责服务端生命周期 | 其他线程只能调用线程安全、幂等的 `Stop()` |
+| `ConnectionIoLoop` | 所属 I/O 线程管理连接集合 | `RpcServer::Impl` 串行投递新连接和 drain 命令 |
+| `ServerConnection` | 所属 I/O 线程管理 socket、读写队列、在途请求和生命周期 | worker 只能通过 `DispatchMailbox` 回投完成结果 |
+| `ThreadPoolExecutor` | worker 线程执行已接纳的 handler | 多个 I/O 线程可以并发提交任务；shutdown coordinator 关闭 admission 并等待完成 |
+| `ServiceRegistry` | 启动前由 server 注册方法，运行期不再修改 | worker 可以并发查找并执行 handler |
+| `UringContext` | 调用 `Run()` 的线程提交和处理 I/O | 其他线程可以调用 `Post()` 和 `Stop()` |
+| `RpcClient` | client 自身协调 endpoint 和 transport | 多个调用者可以并发发起 RPC；析构和移动不能与调用并发 |
+| `ServiceDiscovery` | 后台 refresh 线程更新 endpoint 快照 | client 调用线程可以并发读取快照和最近错误 |
+
+用户 handler 可能在多个 worker 线程上并发执行，其捕获的业务状态由应用自行同步。
+
+服务端遵守三个关键不变量：
+
+1. connection drain 开始后，不再接纳新的连接和 RPC；
+2. worker 不直接修改 connection，只把结果回投到原 I/O 线程；
+3. 已接纳的 handler 和 response flush 完成后，connection I/O loop 才停止。
+
+`Task`、`UringAwaitable` 和 `Socket` 是单所有者对象。除 `Task::Wait()` 和
+`WaitFor()` 可以跨线程等待完成外，同一个实例不应由多个线程同时操作。
+
 ## 客户端并发模型
 
 `RpcClient` 负责端点发现、端点健康状态、路由、request id 分配和可复用

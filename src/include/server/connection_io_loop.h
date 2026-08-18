@@ -33,9 +33,11 @@ class ServiceRegistry;
 /**
  * @brief Owns one server connection I/O execution domain.
  *
- * Lifecycle methods are serialized by the owning server runtime. The
- * cross-thread control methods post work to the UringContext thread, while
- * methods suffixed with `OnContext` are confined to that thread.
+ * `RpcServer::Impl` calls the owner-side methods serially; they are not an
+ * arbitrary concurrent API. `PostStartConnection()` and `BeginDrain()` post
+ * their actual work to the `UringContext` thread. `connections_` is confined
+ * to that thread, while lifecycle state and the live-connection count are
+ * synchronized between the owner and context threads.
  */
 class ConnectionIoLoop final {
  public:
@@ -50,16 +52,16 @@ class ConnectionIoLoop final {
   ConnectionIoLoop(ConnectionIoLoop &&) = delete;
   auto operator=(ConnectionIoLoop &&) -> ConnectionIoLoop & = delete;
 
-  // Owner-thread lifecycle operation. Must not run concurrently with shutdown.
+  // Owner-thread lifecycle API. The owning runtime calls these serially.
   void Start();
 
-  // Cross-thread graceful shutdown request; posts the drain to the I/O thread.
+  // Owner-issued command. Publishes Draining before posting work to the I/O thread.
   void BeginDrain();
 
-  // Owner-thread graceful shutdown operation.
+  // Owner-thread graceful shutdown operation. Not concurrent with Start().
   void FinishDrain();
 
-  // Cross-thread request; forwards connection creation to the I/O thread.
+  // Accept-thread command. Posts connection creation to the I/O thread.
   void PostStartConnection(io::Socket client_socket);
 
  private:
@@ -78,7 +80,7 @@ class ConnectionIoLoop final {
   // Immediate fallback used only by destruction or failed shutdown cleanup.
   void StopImmediately() noexcept;
 
-  // I/O-context-thread-only operations.
+  // I/O-context-thread-only operations. They do not take a state lock.
   void StartConnectionOnContext(io::Socket client_socket);
 
   void CollectClosedConnections();

@@ -15,6 +15,12 @@
 
 namespace xrpc {
 
+/**
+ * @brief Service discovery implementation with one Consul refresh thread.
+ *
+ * `Snapshot()` and `last_error()` synchronize with the refresh thread.
+ * `Start()` and `Stop()` are called serially by the owning client runtime.
+ */
 class ConsulDiscovery final : public ServiceDiscovery {
  public:
   ConsulDiscovery(std::string service_name, const std::string &consul_address,

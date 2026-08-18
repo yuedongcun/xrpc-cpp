@@ -42,7 +42,6 @@ void ConnectionIoLoop::Start() {
     });
   } catch (...) {
     state_ = State::Stopped;
-    drain_cv_.notify_all();
     throw;
   }
 }
@@ -55,7 +54,6 @@ void ConnectionIoLoop::StopImmediately() noexcept {
     std::lock_guard lock(drain_mutex_);
     if (state_ == State::Created || state_ == State::Stopped) {
       state_ = State::Stopped;
-      drain_cv_.notify_all();
       return;
     }
   }
@@ -63,11 +61,8 @@ void ConnectionIoLoop::StopImmediately() noexcept {
   if (!thread_.joinable()) {
     std::lock_guard lock(drain_mutex_);
     state_ = State::Stopped;
-    drain_cv_.notify_all();
     return;
   }
-
-  thread_.request_stop();
 
   context_.Post([this]() -> void { CloseConnectionsOnContext(); });
   context_.Stop();
@@ -79,7 +74,6 @@ void ConnectionIoLoop::StopImmediately() noexcept {
     std::lock_guard lock(drain_mutex_);
     state_ = State::Stopped;
   }
-  drain_cv_.notify_all();
 }
 
 void ConnectionIoLoop::BeginDrain() {
@@ -87,7 +81,6 @@ void ConnectionIoLoop::BeginDrain() {
     std::lock_guard lock(drain_mutex_);
     if (state_ == State::Created) {
       state_ = State::Stopped;
-      drain_cv_.notify_all();
       return;
     }
     if (state_ != State::Running) {
@@ -120,7 +113,6 @@ void ConnectionIoLoop::FinishDrain() {
     std::lock_guard lock(drain_mutex_);
     state_ = State::Stopped;
   }
-  drain_cv_.notify_all();
   if (error_) {
     std::rethrow_exception(error_);
   }
@@ -195,7 +187,7 @@ void ConnectionIoLoop::OnConnectionClosed() {
       --live_connections_;
     }
   }
-  drain_cv_.notify_all();
+  drain_cv_.notify_one();
 }
 
 }  // namespace xrpc

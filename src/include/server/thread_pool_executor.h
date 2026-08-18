@@ -16,6 +16,13 @@
 
 namespace xrpc {
 
+/**
+ * @brief Shared handler executor with bounded concurrent submission.
+ *
+ * Multiple connection I/O threads may call `TrySubmitBatch()` concurrently.
+ * `CloseSubmissions()` is thread-safe and prevents new work; the owning server
+ * runtime then calls `Stop()` once to wait for admitted work and join workers.
+ */
 class ThreadPoolExecutor final {
  public:
   explicit ThreadPoolExecutor(std::size_t worker_count,
@@ -35,6 +42,7 @@ class ThreadPoolExecutor final {
 
   [[nodiscard]] auto accepting_submissions() const noexcept -> bool;
 
+  // Owner-thread shutdown operation. It is not a general concurrent API.
   void Stop();
 
  private:

@@ -13,6 +13,14 @@
 
 namespace xrpc {
 
+/**
+ * @brief Supplies a current snapshot of service endpoints.
+ *
+ * Implementations may refresh endpoints in a background thread. `Snapshot()`
+ * and `last_error()` must therefore be safe while refresh is active.
+ * `Start()` and `Stop()` are lifecycle operations owned by the client runtime
+ * and are not a general concurrent control API.
+ */
 class ServiceDiscovery {
  public:
   virtual ~ServiceDiscovery() = default;

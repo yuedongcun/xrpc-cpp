@@ -6,6 +6,8 @@
  * lifecycle and blocking I/O operations used by the runtime.
  *
  * Socket ownership is move-only, and the descriptor is closed on destruction.
+ * A `Socket` is a single-owner object; callers must not operate on the same
+ * instance concurrently from multiple threads.
  */
 
 #pragma once
