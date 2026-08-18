@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -81,6 +82,24 @@ auto ReadInvalidFd(xrpc::io::UringContext &context) -> xrpc::runtime::Task<xrpc:
   co_return result;
 }
 
+auto MoveAwaitableBeforeSuspend(xrpc::io::UringContext &context) -> xrpc::runtime::Task<xrpc::io::IoResult> {
+  xrpc::io::UringAwaitable awaitable = context.Nop();
+  xrpc::io::UringAwaitable moved_awaitable = std::move(awaitable);
+  co_return co_await std::move(moved_awaitable);
+}
+
+auto PendingSleep(xrpc::io::UringContext &context, std::atomic<bool> &submitted)
+    -> xrpc::runtime::Task<xrpc::io::IoResult> {
+  xrpc::io::UringAwaitable awaitable = context.SleepFor(std::chrono::hours(1));
+  submitted.store(true);
+  co_return co_await std::move(awaitable);
+}
+
+auto SubmitAfterStop(xrpc::io::UringContext &context) -> xrpc::runtime::Task<xrpc::io::IoResult> {
+  context.Stop();
+  co_return co_await context.Nop();
+}
+
 }  // namespace
 
 TEST(IoUringAwaitableTest, NopResumesCoroutine) {
@@ -90,6 +109,24 @@ TEST(IoUringAwaitableTest, NopResumesCoroutine) {
   EXPECT_EQ(result.type_, xrpc::io::OperationType::Nop);
   EXPECT_EQ(result.error_code_, 0);
   EXPECT_EQ(result.result_, 0);
+}
+
+TEST(IoUringAwaitableTest, MoveAfterSubmissionPreservesCompletion) {
+  xrpc::io::UringContext context;
+
+  const xrpc::io::IoResult result = WaitTaskWithContext(MoveAwaitableBeforeSuspend(context), context);
+  EXPECT_EQ(result.type_, xrpc::io::OperationType::Nop);
+  EXPECT_EQ(result.error_code_, 0);
+  EXPECT_EQ(result.result_, 0);
+}
+
+TEST(IoUringAwaitableTest, CompletionBeforeAwaitSuspendIsObserved) {
+  xrpc::io::UringContext context;
+
+  const xrpc::io::IoResult result = WaitTaskWithContext(SubmitAfterStop(context), context);
+  EXPECT_EQ(result.type_, xrpc::io::OperationType::Nop);
+  EXPECT_EQ(result.error_code_, ECANCELED);
+  EXPECT_LT(result.result_, 0);
 }
 
 TEST(IoUringAwaitableTest, SleepForResumesCoroutine) {
@@ -127,6 +164,37 @@ TEST(IoUringAwaitableTest, StopCancelsPendingSleepFor) {
   EXPECT_EQ(result.type_, xrpc::io::OperationType::Timeout);
   EXPECT_EQ(result.error_code_, ECANCELED);
   EXPECT_LT(result.result_, 0);
+}
+
+TEST(IoUringAwaitableTest, DestroyingPendingTaskDoesNotLeaveCompletionTarget) {
+  xrpc::io::UringContext context;
+  std::exception_ptr context_error;
+  std::atomic<bool> submitted = false;
+
+  std::jthread context_thread([&]() {
+    try {
+      context.Run();
+    } catch (...) {
+      context_error = std::current_exception();
+    }
+  });
+
+  {
+    xrpc::runtime::Task<xrpc::io::IoResult> task = PendingSleep(context, submitted);
+    StartTaskOnContext(context, task);
+
+    for (int attempt = 0; attempt < 100 && !submitted.load(); ++attempt) {
+      std::this_thread::sleep_for(PollInterval);
+    }
+    EXPECT_TRUE(submitted.load());
+  }
+
+  context.Stop();
+  context_thread.join();
+
+  if (context_error) {
+    std::rethrow_exception(context_error);
+  }
 }
 
 TEST(IoUringAwaitableTest, SendAndRecvReturnExpectedResults) {

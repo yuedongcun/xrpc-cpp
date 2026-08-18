@@ -2,16 +2,17 @@
  * @file uring_context_operations.cpp
  * @brief Implements io_uring operation submission and completion handling.
  *
- * Each asynchronous operation is represented by an `Operation` that is bound
- * to a `UringAwaitable`, submitted through an SQE, recovered from the matching
- * CQE, and finally recycled.
+ * Each asynchronous operation is represented by an `Operation` that keeps a
+ * weak reference to its awaitable state, submitted through an SQE, recovered
+ * from the matching CQE, and finally recycled. The weak reference lets an
+ * abandoned coroutine frame disappear without making CQE processing touch it.
  *
  * Operation lifecycle:
  *
  *   acquire Operation
  *          |
  *          v
- *   bind AwaitableState
+ *   link weak AwaitableState reference
  *          |
  *          v
  *   prepare + submit SQE
@@ -106,7 +107,6 @@ void UringContext::Runtime::SubmitOperation(std::unique_ptr<Operation> operation
       if (tracked_timeout) {
         pending_timeout_operations_.erase(operation.get());
       }
-      DetachAwaitableState(*operation);
     }
     throw;
   }
@@ -172,9 +172,7 @@ void UringContext::Runtime::ProcessCqe(io_uring_cqe *cqe) {
     return;
   }
 
-  if (operation->awaitable_state_ != nullptr) {
-    CompleteAwaitableState(*operation, result);
-  }
+  CompleteAwaitableState(*operation, result);
   RecycleOperation(std::move(operation));
 }
 
@@ -189,27 +187,17 @@ auto UringContext::Runtime::MakeCancelledResult(const Operation &operation) -> I
 }
 
 void UringContext::Runtime::CompleteAwaitableState(Operation &operation, const IoResult &result) {
-  detail::AwaitableState *state = operation.awaitable_state_;
-  if (state == nullptr) {
+  std::shared_ptr<detail::AwaitableState> state = operation.awaitable_state_.lock();
+  if (!state) {
     return;
   }
 
-  operation.awaitable_state_ = nullptr;
-  state->operation_ = nullptr;
   state->result_ = result;
   state->ready_ = true;
-  if (state->continuation_) {
-    state->continuation_.resume();
+  std::coroutine_handle<> continuation = std::exchange(state->continuation_, {});
+  if (continuation) {
+    continuation.resume();
   }
-}
-
-void UringContext::Runtime::DetachAwaitableState(Operation &operation) noexcept {
-  detail::AwaitableState *state = operation.awaitable_state_;
-  if (state == nullptr) {
-    return;
-  }
-  operation.awaitable_state_ = nullptr;
-  state->operation_ = nullptr;
 }
 
 void UringContext::Runtime::SubmitCancelFd(int fd) {
@@ -287,11 +275,12 @@ void UringContext::Runtime::SubmitCancelPendingTimeouts() {
 }
 
 auto UringContext::Accept(int listen_fd) -> UringAwaitable {
-  UringAwaitable awaitable;
+  auto state = std::make_shared<detail::AwaitableState>();
+  UringAwaitable awaitable(state);
   auto operation = runtime_->AcquireOperation();
   operation->type_ = OperationType::Accept;
   operation->fd_ = listen_fd;
-  awaitable.Bind(*operation);
+  operation->awaitable_state_ = state;
 
   runtime_->SubmitOperation(std::move(operation), [listen_fd](io_uring_sqe *sqe) -> void {
     io_uring_prep_accept(sqe, listen_fd, nullptr, nullptr, 0);
@@ -301,13 +290,14 @@ auto UringContext::Accept(int listen_fd) -> UringAwaitable {
 }
 
 auto UringContext::Recv(int fd, void *buffer, std::size_t len) -> UringAwaitable {
-  UringAwaitable awaitable;
+  auto state = std::make_shared<detail::AwaitableState>();
+  UringAwaitable awaitable(state);
   auto operation = runtime_->AcquireOperation();
   operation->type_ = OperationType::Recv;
   operation->fd_ = fd;
   operation->buffer_ = buffer;
   operation->length_ = len;
-  awaitable.Bind(*operation);
+  operation->awaitable_state_ = state;
 
   runtime_->SubmitOperation(std::move(operation), [fd, buffer, len](io_uring_sqe *sqe) -> void {
     io_uring_prep_recv(sqe, fd, buffer, len, 0);
@@ -317,13 +307,14 @@ auto UringContext::Recv(int fd, void *buffer, std::size_t len) -> UringAwaitable
 }
 
 auto UringContext::Send(int fd, const void *buffer, std::size_t len) -> UringAwaitable {
-  UringAwaitable awaitable;
+  auto state = std::make_shared<detail::AwaitableState>();
+  UringAwaitable awaitable(state);
   auto operation = runtime_->AcquireOperation();
   operation->type_ = OperationType::Send;
   operation->fd_ = fd;
   operation->buffer_ = const_cast<void *>(buffer);
   operation->length_ = len;
-  awaitable.Bind(*operation);
+  operation->awaitable_state_ = state;
 
   runtime_->SubmitOperation(std::move(operation), [fd, buffer, len](io_uring_sqe *sqe) -> void {
     io_uring_prep_send(sqe, fd, buffer, len, 0);
@@ -333,12 +324,13 @@ auto UringContext::Send(int fd, const void *buffer, std::size_t len) -> UringAwa
 }
 
 auto UringContext::SleepFor(std::chrono::nanoseconds timeout) -> UringAwaitable {
-  UringAwaitable awaitable;
+  auto state = std::make_shared<detail::AwaitableState>();
+  UringAwaitable awaitable(state);
   auto operation = runtime_->AcquireOperation();
   operation->type_ = OperationType::Timeout;
   operation->timeout_ = MakeKernelTimespec(timeout);
   Operation *raw_operation = operation.get();
-  awaitable.Bind(*operation);
+  operation->awaitable_state_ = state;
 
   runtime_->SubmitOperation(std::move(operation), [raw_operation](io_uring_sqe *sqe) -> void {
     io_uring_prep_timeout(sqe, &raw_operation->timeout_, 0, 0);
@@ -348,47 +340,15 @@ auto UringContext::SleepFor(std::chrono::nanoseconds timeout) -> UringAwaitable 
 }
 
 auto UringContext::Nop() -> UringAwaitable {
-  UringAwaitable awaitable;
+  auto state = std::make_shared<detail::AwaitableState>();
+  UringAwaitable awaitable(state);
   auto operation = runtime_->AcquireOperation();
   operation->type_ = OperationType::Nop;
-  awaitable.Bind(*operation);
+  operation->awaitable_state_ = state;
 
   runtime_->SubmitOperation(std::move(operation), [](io_uring_sqe *sqe) -> void { io_uring_prep_nop(sqe); });
 
   return awaitable;
-}
-
-UringAwaitable::~UringAwaitable() { Detach(); }
-
-UringAwaitable::UringAwaitable(UringAwaitable &&other) noexcept
-    : state_(std::exchange(other.state_, detail::AwaitableState{})) {
-  if (state_.operation_ != nullptr) {
-    state_.operation_->awaitable_state_ = &state_;
-  }
-}
-
-auto UringAwaitable::operator=(UringAwaitable &&other) noexcept -> UringAwaitable & {
-  if (this != &other) {
-    Detach();
-    state_ = std::exchange(other.state_, detail::AwaitableState{});
-    if (state_.operation_ != nullptr) {
-      state_.operation_->awaitable_state_ = &state_;
-    }
-  }
-  return *this;
-}
-
-void UringAwaitable::Bind(Operation &operation) noexcept {
-  Detach();
-  state_.operation_ = &operation;
-  operation.awaitable_state_ = &state_;
-}
-
-void UringAwaitable::Detach() noexcept {
-  if (state_.operation_ != nullptr && state_.operation_->awaitable_state_ == &state_) {
-    state_.operation_->awaitable_state_ = nullptr;
-  }
-  state_.operation_ = nullptr;
 }
 
 }  // namespace xrpc::io

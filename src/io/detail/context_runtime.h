@@ -34,7 +34,7 @@ struct Operation {
   void *buffer_ = nullptr;
   std::size_t length_ = 0;
   __kernel_timespec timeout_{};
-  detail::AwaitableState *awaitable_state_ = nullptr;
+  std::weak_ptr<detail::AwaitableState> awaitable_state_;
 };
 
 struct UringContext::Runtime final {
@@ -62,8 +62,6 @@ struct UringContext::Runtime final {
   static auto MakeCancelledResult(const Operation &operation) -> IoResult;
 
   static void CompleteAwaitableState(Operation &operation, const IoResult &result);
-
-  static void DetachAwaitableState(Operation &operation) noexcept;
 
   void SubmitCancelFd(int fd);
 

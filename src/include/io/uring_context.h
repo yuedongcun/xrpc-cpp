@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <utility>
 
 namespace xrpc::io {
 
@@ -48,37 +49,35 @@ struct AwaitableState {
   IoResult result_{};
   bool ready_ = false;
   std::coroutine_handle<> continuation_;
-  Operation *operation_ = nullptr;
 };
 
 }  // namespace detail
 
 class UringAwaitable final {
  public:
-  UringAwaitable() = default;
-  ~UringAwaitable();
+  ~UringAwaitable() = default;
 
   UringAwaitable(const UringAwaitable &) = delete;
   auto operator=(const UringAwaitable &) -> UringAwaitable & = delete;
 
-  UringAwaitable(UringAwaitable &&other) noexcept;
-  auto operator=(UringAwaitable &&other) noexcept -> UringAwaitable &;
+  UringAwaitable(UringAwaitable &&other) noexcept = default;
+  auto operator=(UringAwaitable &&other) noexcept -> UringAwaitable & = default;
 
-  auto await_ready() const noexcept -> bool { return state_.ready_; }
+  auto await_ready() const noexcept -> bool { return state_->ready_; }
 
   auto await_suspend(std::coroutine_handle<> continuation) noexcept -> bool {
-    state_.continuation_ = continuation;
-    return !state_.ready_;
+    state_->continuation_ = continuation;
+    return !state_->ready_;
   }
 
-  auto await_resume() -> IoResult { return state_.result_; }
-
-  void Bind(Operation &operation) noexcept;
+  auto await_resume() -> IoResult { return state_->result_; }
 
  private:
-  void Detach() noexcept;
+  explicit UringAwaitable(std::shared_ptr<detail::AwaitableState> state) noexcept : state_(std::move(state)) {}
 
-  detail::AwaitableState state_;
+  friend class UringContext;
+
+  std::shared_ptr<detail::AwaitableState> state_;
 };
 
 class UringContext final {
