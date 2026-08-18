@@ -1,3 +1,65 @@
+/**
+ * @file task.h
+ * @brief Defines the coroutine `Task<T>` primitive used by the xRPC runtime.
+ *
+ * `Task<T>` owns a coroutine handle and manages the lifetime of its coroutine
+ * frame. The promise stores the coroutine result, completion state,
+ * continuation, and captured exception.
+ *
+ * Object model:
+ *
+ *   Task<T>
+ *      |
+ *      | owns
+ *      v
+ *   coroutine_handle<TaskPromise<T>>
+ *      |
+ *      v
+ *   coroutine frame
+ *      |
+ *      +-- TaskPromise<T>
+ *            +-- TaskStorage<T>
+ *            +-- TaskCompletionState
+ *            +-- continuation_
+ *            +-- exception_
+ *
+ * Execution:
+ *
+ *   create coroutine
+ *        |
+ *        v
+ *   initial_suspend
+ *        |
+ *        v
+ *   Task owns suspended coroutine
+ *        |
+ *        +---- Start() / Get() ----> resume
+ *        |
+ *        `---- co_await -----------> transfer handle to Awaiter
+ *                                      |
+ *                                      v
+ *                                   resume
+ *                                      |
+ *                                      v
+ *                                 final_suspend
+ *                                      |
+ *                         +------------+------------+
+ *                         |                         |
+ *                         v                         v
+ *                  publish completion       resume continuation
+ *
+ * `Wait()` and `WaitFor()` observe the completion state from blocking code.
+ * `Result()` observes the stored result or rethrows a captured exception.
+ *
+ * Tasks start suspended and have single ownership of their coroutine handle.
+ * Awaiting a task transfers that ownership to the awaiter. Completion is
+ * published before the continuation is resumed.
+ *
+ * This file defines task lifetime and completion mechanics only; scheduling,
+ * I/O completion, and thread affinity are provided by the runtime components
+ * that resume the coroutine.
+ */
+
 #pragma once
 
 #include <chrono>
@@ -73,7 +135,7 @@ struct FinalAwaiter {
 
   template <typename Promise>
   auto await_suspend(std::coroutine_handle<Promise> handle) const noexcept -> std::coroutine_handle<> {
-    handle.promise().NotifyCompleted();
+    handle.promise().completion_.NotifyCompleted();
     std::coroutine_handle<> continuation = handle.promise().continuation_;
     if (!continuation) {
       return std::noop_coroutine();
@@ -85,7 +147,7 @@ struct FinalAwaiter {
 };
 
 template <typename T>
-class TaskPromise : public TaskStorage<T>, public TaskCompletionState {
+class TaskPromise {
  public:
   auto get_return_object() noexcept -> Task<T>;
 
@@ -95,17 +157,19 @@ class TaskPromise : public TaskStorage<T>, public TaskCompletionState {
 
   template <typename U>
   void return_value(U &&value) {
-    this->ReturnValue(std::forward<U>(value));
+    storage_.ReturnValue(std::forward<U>(value));
   }
 
   void unhandled_exception() noexcept { exception_ = std::current_exception(); }
 
+  TaskStorage<T> storage_;
+  TaskCompletionState completion_;
   std::coroutine_handle<> continuation_;
   std::exception_ptr exception_;
 };
 
 template <>
-class TaskPromise<void> : public TaskStorage<void>, public TaskCompletionState {
+class TaskPromise<void> {
  public:
   auto get_return_object() noexcept -> Task<void>;
 
@@ -113,39 +177,81 @@ class TaskPromise<void> : public TaskStorage<void>, public TaskCompletionState {
 
   auto final_suspend() noexcept -> FinalAwaiter { return {}; }
 
-  void return_void() noexcept { this->ReturnValue(); }
+  void return_void() noexcept { storage_.ReturnValue(); }
 
   void unhandled_exception() noexcept { exception_ = std::current_exception(); }
 
+  TaskStorage<void> storage_;
+  TaskCompletionState completion_;
   std::coroutine_handle<> continuation_;
   std::exception_ptr exception_;
 };
 
+}  // namespace task_detail
+
 template <typename T>
-class TaskBase {
+class Task final {
  public:
-  using promise_type = TaskPromise<T>;
+  using promise_type = task_detail::TaskPromise<T>;
   using handle_type = std::coroutine_handle<promise_type>;
 
-  explicit TaskBase(handle_type handle) noexcept : handle_(handle) {}
+  explicit Task(handle_type handle) noexcept : handle_(handle) {}
 
-  TaskBase(const TaskBase &) = delete;
-  auto operator=(const TaskBase &) -> TaskBase & = delete;
+  Task(const Task &) = delete;
+  auto operator=(const Task &) -> Task & = delete;
 
-  TaskBase(TaskBase &&other) noexcept
+  Task(Task &&other) noexcept
       : handle_(std::exchange(other.handle_, nullptr)), started_(std::exchange(other.started_, false)) {}
 
-  auto operator=(TaskBase &&other) noexcept -> TaskBase & {
+  auto operator=(Task &&other) noexcept -> Task & {
     if (this != &other) {
       Reset();
       handle_ = std::exchange(other.handle_, nullptr);
       started_ = std::exchange(other.started_, false);
     }
-
     return *this;
   }
 
-  ~TaskBase() { Reset(); }
+  ~Task() { Reset(); }
+
+  struct Awaiter {
+    handle_type handle_;
+
+    ~Awaiter() {
+      if (handle_) {
+        handle_.destroy();
+      }
+    }
+
+    auto await_ready() const noexcept -> bool { return !handle_ || handle_.done(); }
+
+    auto await_suspend(std::coroutine_handle<> continuation) const noexcept -> std::coroutine_handle<> {
+      handle_.promise().continuation_ = continuation;
+      return handle_;
+    }
+
+    auto await_resume() const -> T {
+      if (handle_.promise().exception_) {
+        std::rethrow_exception(handle_.promise().exception_);
+      }
+      return handle_.promise().storage_.Result();
+    }
+  };
+
+  auto operator co_await() && noexcept -> Awaiter { return Awaiter{ReleaseHandle()}; }
+
+  auto operator co_await() const & = delete;
+
+  auto Result() -> T {
+    RethrowIfFailed();
+    return Promise().storage_.Result();
+  }
+
+  auto Get() -> T {
+    Start();
+    Wait();
+    return Result();
+  }
 
   auto Done() const noexcept -> bool { return !handle_ || handle_.done(); }
 
@@ -159,7 +265,7 @@ class TaskBase {
 
   void Wait() const {
     if (handle_) {
-      Promise().WaitCompleted();
+      Promise().completion_.WaitCompleted();
     }
   }
 
@@ -168,13 +274,11 @@ class TaskBase {
     if (!handle_) {
       return true;
     }
-    return Promise().WaitCompletedFor(timeout);
+    return Promise().completion_.WaitCompletedFor(timeout);
   }
 
- protected:
+ private:
   auto ReleaseHandle() noexcept -> handle_type { return std::exchange(handle_, nullptr); }
-
-  auto Handle() const noexcept -> handle_type { return handle_; }
 
   auto Promise() const -> promise_type & { return handle_.promise(); }
 
@@ -184,7 +288,6 @@ class TaskBase {
     }
   }
 
- private:
   void Reset() {
     if (handle_) {
       handle_.destroy();
@@ -197,72 +300,35 @@ class TaskBase {
   bool started_ = false;
 };
 
-}  // namespace task_detail
-
-template <typename T>
-class Task final : public task_detail::TaskBase<T> {
- public:
-  using promise_type = typename task_detail::TaskBase<T>::promise_type;
-  using handle_type = typename task_detail::TaskBase<T>::handle_type;
-
-  struct Awaiter {
-    handle_type handle_;
-
-    ~Awaiter() {
-      if (handle_) {
-        handle_.destroy();
-      }
-    }
-
-    auto await_ready() const noexcept -> bool { return !handle_ || handle_.done(); }
-
-    auto await_suspend(std::coroutine_handle<> continuation) const -> bool {
-      handle_.promise().continuation_ = continuation;
-      handle_.resume();
-      return true;
-    }
-
-    auto await_resume() const -> T {
-      if (handle_.promise().exception_) {
-        std::rethrow_exception(handle_.promise().exception_);
-      }
-      return handle_.promise().Result();
-    }
-  };
-
-  using task_detail::TaskBase<T>::TaskBase;
-
-  auto operator co_await() && noexcept -> Awaiter { return Awaiter{this->ReleaseHandle()}; }
-
-  auto operator co_await() const & = delete;
-
-  auto Result() -> T {
-    this->RethrowIfFailed();
-    return this->Promise().Result();
-  }
-
-  auto Get() -> T {
-    Start();
-    Wait();
-    return Result();
-  }
-
-  using task_detail::TaskBase<T>::Done;
-  using task_detail::TaskBase<T>::Start;
-  using task_detail::TaskBase<T>::Wait;
-  using task_detail::TaskBase<T>::WaitFor;
-};
-
 template <typename T>
 auto task_detail::TaskPromise<T>::get_return_object() noexcept -> Task<T> {
   return Task<T>{std::coroutine_handle<task_detail::TaskPromise<T>>::from_promise(*this)};
 }
 
 template <>
-class Task<void> final : public task_detail::TaskBase<void> {
+class Task<void> final {
  public:
-  using promise_type = typename task_detail::TaskBase<void>::promise_type;
-  using handle_type = typename task_detail::TaskBase<void>::handle_type;
+  using promise_type = task_detail::TaskPromise<void>;
+  using handle_type = std::coroutine_handle<promise_type>;
+
+  explicit Task(handle_type handle) noexcept : handle_(handle) {}
+
+  Task(const Task &) = delete;
+  auto operator=(const Task &) -> Task & = delete;
+
+  Task(Task &&other) noexcept
+      : handle_(std::exchange(other.handle_, nullptr)), started_(std::exchange(other.started_, false)) {}
+
+  auto operator=(Task &&other) noexcept -> Task & {
+    if (this != &other) {
+      Reset();
+      handle_ = std::exchange(other.handle_, nullptr);
+      started_ = std::exchange(other.started_, false);
+    }
+    return *this;
+  }
+
+  ~Task() { Reset(); }
 
   struct Awaiter {
     handle_type handle_;
@@ -275,29 +341,26 @@ class Task<void> final : public task_detail::TaskBase<void> {
 
     auto await_ready() const noexcept -> bool { return !handle_ || handle_.done(); }
 
-    auto await_suspend(std::coroutine_handle<> continuation) const -> bool {
+    auto await_suspend(std::coroutine_handle<> continuation) const noexcept -> std::coroutine_handle<> {
       handle_.promise().continuation_ = continuation;
-      handle_.resume();
-      return true;
+      return handle_;
     }
 
     void await_resume() const {
       if (handle_.promise().exception_) {
         std::rethrow_exception(handle_.promise().exception_);
       }
-      handle_.promise().Result();
+      handle_.promise().storage_.Result();
     }
   };
 
-  using task_detail::TaskBase<void>::TaskBase;
-
-  auto operator co_await() && noexcept -> Awaiter { return Awaiter{this->ReleaseHandle()}; }
+  auto operator co_await() && noexcept -> Awaiter { return Awaiter{ReleaseHandle()}; }
 
   auto operator co_await() const & = delete;
 
   auto Result() -> void {
-    this->RethrowIfFailed();
-    this->Promise().Result();
+    RethrowIfFailed();
+    Promise().storage_.Result();
   }
 
   auto Get() -> void {
@@ -306,10 +369,51 @@ class Task<void> final : public task_detail::TaskBase<void> {
     Result();
   }
 
-  using task_detail::TaskBase<void>::Done;
-  using task_detail::TaskBase<void>::Start;
-  using task_detail::TaskBase<void>::Wait;
-  using task_detail::TaskBase<void>::WaitFor;
+  auto Done() const noexcept -> bool { return !handle_ || handle_.done(); }
+
+  auto Start() -> void {
+    if (!handle_ || started_ || handle_.done()) {
+      return;
+    }
+    started_ = true;
+    handle_.resume();
+  }
+
+  void Wait() const {
+    if (handle_) {
+      Promise().completion_.WaitCompleted();
+    }
+  }
+
+  template <typename Rep, typename Period>
+  [[nodiscard]] auto WaitFor(const std::chrono::duration<Rep, Period> &timeout) const -> bool {
+    if (!handle_) {
+      return true;
+    }
+    return Promise().completion_.WaitCompletedFor(timeout);
+  }
+
+ private:
+  auto ReleaseHandle() noexcept -> handle_type { return std::exchange(handle_, nullptr); }
+
+  auto Promise() const -> promise_type & { return handle_.promise(); }
+
+  void RethrowIfFailed() const {
+    if (handle_ && Promise().exception_) {
+      std::rethrow_exception(Promise().exception_);
+    }
+  }
+
+  void Reset() {
+    if (handle_) {
+      handle_.destroy();
+      handle_ = nullptr;
+    }
+    started_ = false;
+  }
+
+  handle_type handle_;
+  bool started_ = false;
 };
 
 inline auto task_detail::TaskPromise<void>::get_return_object() noexcept -> Task<void> {
