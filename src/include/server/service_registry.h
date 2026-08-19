@@ -1,4 +1,7 @@
-/** @file service_registry.h @brief Declares RPC service and method dispatch registration. */
+/**
+ * @file service_registry.h
+ * @brief Defines RPC service registration and request dispatch.
+ */
 
 #pragma once
 
@@ -13,16 +16,27 @@ namespace xrpc {
 using RawHandler = std::function<RawResponse(RawRequest)>;
 
 /**
- * @brief Immutable-at-runtime mapping from service and method names to handlers.
+ * @brief Runtime read-only mapping from RPC service and method names to handlers.
  *
- * Registration happens during server setup. After `Run()` begins the registry
- * is read-only, so worker threads may call `Dispatch()` concurrently without a
- * lookup lock.
+ * Registration remains available through the listening setup phase. `Run()`
+ * freezes the registry before worker threads begin calling `Dispatch()`
+ * concurrently, so runtime lookup needs no lock.
  */
 class ServiceRegistry final {
  public:
+  /**
+   * @brief Registers one raw RPC handler.
+   *
+   * Throws `ConfigException` if the service-method pair is already registered.
+   */
   void RegisterRaw(const std::string &service, const std::string &method, RawHandler handler);
 
+  /**
+   * @brief Dispatches one raw RPC request to its registered handler.
+   *
+   * Unknown services return `NotFound`, unknown methods return `Unimplemented`,
+   * and handler exceptions are converted into an RPC error status.
+   */
   [[nodiscard]] auto Dispatch(RawRequest request) const -> RawResponse;
 
  private:

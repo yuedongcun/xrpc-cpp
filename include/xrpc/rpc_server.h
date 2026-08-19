@@ -128,8 +128,10 @@ struct RpcServerOptions {
 /**
  * @brief A Linux TCP server for unary Protobuf RPC methods.
  *
- * Register all methods before `Listen()`, then call `Run()` once. Registered
- * handlers execute on shared worker threads and may run concurrently.
+ * Register methods before `Run()`, with `Listen()` preparing only the local
+ * listening socket. `Run()` freezes registration, starts the runtime, and
+ * publishes the service. Registered handlers execute on shared worker threads
+ * and may run concurrently.
  *
  * `Run()` has one owner and must not run concurrently with another `Run()`.
  * `Stop()` is the only cross-thread lifecycle operation: it is thread-safe and
@@ -155,11 +157,12 @@ class RpcServer final {
   auto operator=(RpcServer &&) noexcept -> RpcServer &;
 
   /**
-   * @brief Registers a typed unary Protobuf method before `Listen()`.
+   * @brief Registers a typed unary Protobuf method before `Run()`.
    *
-   * The handler may be called concurrently after `Run()` begins. Registration
-   * after listening returns `FailedPrecondition`. Complete server setup before
-   * sharing the instance with the thread that calls `Run()`.
+   * Registration remains available after `Listen()` and is frozen when
+   * `Run()` begins. The handler may then be called concurrently by worker
+   * threads. Complete registration before sharing the instance with the thread
+   * that calls `Run()`.
    */
   template <typename Request, typename Response, typename Func>
   [[nodiscard]] auto RegisterMethod(std::string service_name, std::string method_name, Func func) -> Status {
@@ -172,20 +175,22 @@ class RpcServer final {
   }
 
   /**
-   * @brief Binds and starts listening on a TCP address.
+   * @brief Prepares the local TCP listening socket.
    *
-   * Must be called once after registration and before `Run()`. This is a
-   * setup-phase operation, not a concurrent runtime operation.
+   * Must be called once before `Run()`. Methods may still be registered after
+   * this call. `Listen()` does not start the runtime or publish the service.
    */
   [[nodiscard]] auto Listen(std::string_view host, std::uint16_t port) -> Status;
 
   /**
-   * @brief Runs the accept loop until graceful shutdown completes.
+   * @brief Freezes configuration, publishes the service, and runs the server.
    *
-   * `Run()` must be called once after `Listen()`. Its return means admitted
-   * handlers have completed and their queued responses have been flushed or
-   * their connections closed. It is a single-owner blocking operation; another
-   * thread may call only `Stop()` while it runs.
+   * `Run()` must be called once after `Listen()`. It starts the I/O and worker
+   * runtime, registers the service with Consul when configured, then serves
+   * until graceful shutdown completes. Its return means admitted handlers have
+   * completed and their queued responses have been flushed or their connections
+   * closed. It is a single-owner blocking operation; another thread may call
+   * only `Stop()` while it runs.
    */
   [[nodiscard]] auto Run() -> Status;
 

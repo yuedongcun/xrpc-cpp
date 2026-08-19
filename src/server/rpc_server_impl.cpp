@@ -46,8 +46,8 @@ RpcServer::Impl::~Impl() { Stop(); }
 
 void RpcServer::Impl::RegisterMethod(MethodRegistration registration) {
   std::lock_guard lock(lifecycle_mutex_);
-  if (state_ != State::Created) {
-    throw LifecycleException("RpcServer::RegisterMethod must be called before Listen");
+  if (state_ != State::Created && state_ != State::Listening) {
+    throw LifecycleException("RpcServer::RegisterMethod must be called before Run");
   }
 
   auto invoke = std::move(registration.invoke_);
@@ -75,8 +75,8 @@ void RpcServer::Impl::Listen(std::string_view host, std::uint16_t port) {
   try {
     listen_socket_.Bind(host, port);
     listen_socket_.Listen(config_.backlog_);
+    listen_host_ = host;
     port_ = listen_socket_.LocalPort();
-    RegisterServiceIfEnabled(host);
   } catch (...) {
     ShutdownComponentsBestEffort();
     state_ = State::Stopped;
@@ -94,8 +94,21 @@ void RpcServer::Impl::Run() {
     }
 
     try {
+      std::optional<ConsulRegistrar::Options> registration_options;
+      if (ServiceRegistrationEnabled(config_)) {
+        registration_options.emplace(ResolveRegistrarOptions(config_, listen_host_, port_));
+        registrar_ = std::make_unique<ConsulRegistrar>(config_.consul_.agent_address_);
+      }
+
       StartConnectionLoops();
       StartAcceptLoop();
+
+      if (registration_options.has_value()) {
+        const Status status = registrar_->Register(*registration_options);
+        if (!status.ok()) {
+          throw TransportException(status.code(), "Consul service registration failed: " + status.message());
+        }
+      }
     } catch (...) {
       ShutdownComponentsBestEffort();
       state_ = State::Stopped;
@@ -231,19 +244,6 @@ void RpcServer::Impl::FinishConnectionDrain() {
 
   if (failure) {
     std::rethrow_exception(failure);
-  }
-}
-
-void RpcServer::Impl::RegisterServiceIfEnabled(std::string_view host) {
-  if (!ServiceRegistrationEnabled(config_)) {
-    return;
-  }
-  if (!registrar_) {
-    registrar_ = std::make_unique<ConsulRegistrar>(config_.consul_.agent_address_);
-  }
-  const Status status = registrar_->Register(ResolveRegistrarOptions(config_, host, port_));
-  if (!status.ok()) {
-    throw TransportException(status.code(), "Consul service registration failed: " + status.message());
   }
 }
 

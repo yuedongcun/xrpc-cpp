@@ -8,8 +8,6 @@
 
 #pragma once
 
-#include <exception>
-#include <new>
 #include <stdexcept>
 #include <string>
 #include <string_view>

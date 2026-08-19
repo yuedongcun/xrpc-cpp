@@ -1,4 +1,7 @@
-/** @file service_registry.cpp @brief Implements service and method dispatch lookup. */
+/**
+ * @file service_registry.cpp
+ * @brief Implements RPC handler registration and dispatch.
+ */
 
 #include "server/service_registry.h"
 
@@ -37,11 +40,12 @@ auto ServiceRegistry::Dispatch(RawRequest request) const -> RawResponse {
     return resp;
   }
 
+  const std::uint64_t request_id = request.request_id_;
   try {
     return method->second(std::move(request));
   } catch (...) {
     RawResponse resp;
-    resp.request_id_ = request.request_id_;
+    resp.request_id_ = request_id;
     resp.status_ = CaughtExceptionToStatus("handler threw unknown exception");
     return resp;
   }

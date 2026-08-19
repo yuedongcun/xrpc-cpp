@@ -113,7 +113,7 @@ auto ResolveRegistrarOptions(const ServerConfig &config, std::string_view host, 
 
   const std::uint16_t service_port = config.consul_.service_port_ == 0 ? listen_port : config.consul_.service_port_;
   if (service_port != listen_port) {
-    throw ConfigException("service_port must equal listening port in phase one");
+    throw ConfigException("xRPC currently registers the same port used by the listening socket.");
   }
 
   std::string service_address = config.consul_.service_address_;
@@ -126,6 +126,7 @@ auto ResolveRegistrarOptions(const ServerConfig &config, std::string_view host, 
 
   std::string service_id = config.consul_.service_id_;
   if (service_id.empty()) {
+    // Generate a process-unique default ID from the resolved service endpoint.
     service_id = config.consul_.service_name_ + "_" + service_address + "_" + std::to_string(service_port) + "_" +
                  std::to_string(static_cast<std::int64_t>(::getpid()));
   }

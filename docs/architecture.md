@@ -80,7 +80,8 @@ flowchart LR
 
 公开 API 遵守以下调用规则：
 
-- `RegisterMethod()`、`Listen()` 和 `Run()` 按顺序调用；
+- `Listen()` 只准备本地监听 socket；`RegisterMethod()` 在 `Run()` 前均可调用；
+- `Run()` 冻结方法注册，启动运行时并发布服务；
 - `Run()` 只能由一个线程调用一次；
 - `Stop()` 可以由其他线程调用，并且是幂等的；
 - 多个线程可以并发调用同一个 `RpcClient`；

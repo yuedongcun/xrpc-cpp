@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -60,7 +61,6 @@ class RpcServer::Impl final {
   void BeginConnectionDrain();
   void FinishConnectionDrain();
 
-  void RegisterServiceIfEnabled(std::string_view host);
   [[nodiscard]] auto TryDeregisterService() noexcept -> Status;
 
   void CompleteShutdown();
@@ -82,6 +82,7 @@ class RpcServer::Impl final {
   State state_ = State::Created;
 
   std::size_t next_connection_io_loop_ = 0;
+  std::string listen_host_;
   std::uint16_t port_ = 0;
   bool accept_stopped_ = false;
 };

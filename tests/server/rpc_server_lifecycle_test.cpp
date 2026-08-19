@@ -181,7 +181,7 @@ TEST(RpcServerLifecycleTest, StopDrainsAdmittedHandlerAndWritesResponse) {
 
   ASSERT_EQ(run_finished_future.wait_for(WaitTimeout), std::future_status::ready);
   EXPECT_TRUE(run_finished_future.get().ok());
-        EXPECT_EQ(handler_calls.load(), 1U);
+  EXPECT_EQ(handler_calls.load(), 1U);
   run_thread.join();
 }
 
@@ -205,13 +205,38 @@ TEST(RpcServerLifecycleTest, ListenTwiceReturnsFailedPrecondition) {
   EXPECT_EQ(server.Listen("127.0.0.1", 0).code(), xrpc::StatusCode::FailedPrecondition);
 }
 
-TEST(RpcServerLifecycleTest, RegisterMethodAfterListenReturnsFailedPrecondition) {
+TEST(RpcServerLifecycleTest, RegisterMethodAfterListenSucceeds) {
   xrpc::RpcServer server = MakeServer();
   ASSERT_TRUE(server.Listen("127.0.0.1", 0).ok());
 
   const xrpc::Status status =
       server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>("EchoService", "Echo", Echo);
+  EXPECT_TRUE(status.ok()) << status.message();
+}
+
+TEST(RpcServerLifecycleTest, RegisterMethodAfterRunStartsReturnsFailedPrecondition) {
+  xrpc::RpcServer server = MakeServer();
+  const xrpc::Status initial_registration =
+      server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>("EchoService", "Echo", Echo);
+  ASSERT_TRUE(initial_registration.ok()) << initial_registration.message();
+  ASSERT_TRUE(server.Listen("127.0.0.1", 0).ok());
+  const xrpc::StatusOr<std::uint16_t> port_result = server.port();
+  ASSERT_TRUE(port_result.ok()) << port_result.status().message();
+
+  std::jthread run_thread([&server]() { EXPECT_TRUE(server.Run().ok()); });
+  xrpc::io::Socket socket;
+  socket.Connect("127.0.0.1", port_result.value(), WaitTimeout);
+  socket.SetReadWriteTimeout(WaitTimeout);
+  socket.WriteAll(MakeRequestFrame("ready", 1));
+  (void)RecvFrame(socket);
+
+  const xrpc::Status status =
+      server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>("EchoService", "Other", Echo);
   EXPECT_EQ(status.code(), xrpc::StatusCode::FailedPrecondition);
+
+  socket.Close();
+  server.Stop();
+  run_thread.join();
 }
 
 TEST(RpcServerLifecycleTest, RegisterMethodAfterStopReturnsFailedPrecondition) {
@@ -223,7 +248,7 @@ TEST(RpcServerLifecycleTest, RegisterMethodAfterStopReturnsFailedPrecondition) {
   EXPECT_EQ(status.code(), xrpc::StatusCode::FailedPrecondition);
 }
 
-TEST(RpcServerLifecycleTest, ConcurrentListenAndRegisterMethodAreSerialized) {
+TEST(RpcServerLifecycleTest, ConcurrentListenAndRegisterMethodBothSucceed) {
   xrpc::RpcServer server = MakeServer();
   std::atomic<bool> start = false;
   xrpc::Status listen_status;
@@ -243,13 +268,12 @@ TEST(RpcServerLifecycleTest, ConcurrentListenAndRegisterMethodAreSerialized) {
         server.RegisterMethod<xrpc::test::EchoRequest, xrpc::test::EchoResponse>("EchoService", "Echo", Echo);
   });
 
-    start.store(true);
+  start.store(true);
   listen_thread.join();
   register_thread.join();
 
   EXPECT_TRUE(listen_status.ok()) << listen_status.message();
-  EXPECT_TRUE(register_status.ok() || register_status.code() == xrpc::StatusCode::FailedPrecondition)
-      << register_status.message();
+  EXPECT_TRUE(register_status.ok()) << register_status.message();
 }
 
 TEST(RpcServerLifecycleTest, WildcardListenRequiresServiceAddressWhenRegistrationEnabled) {
@@ -258,7 +282,8 @@ TEST(RpcServerLifecycleTest, WildcardListenRequiresServiceAddressWhenRegistratio
   xrpc::StatusOr<xrpc::RpcServer> server_result = xrpc::RpcServer::Create(options);
   ASSERT_TRUE(server_result.ok()) << server_result.status().message();
   xrpc::RpcServer server = std::move(server_result).value();
-  EXPECT_EQ(server.Listen("0.0.0.0", 0).code(), xrpc::StatusCode::InvalidArgument);
+  ASSERT_TRUE(server.Listen("0.0.0.0", 0).ok());
+  EXPECT_EQ(server.Run().code(), xrpc::StatusCode::InvalidArgument);
 }
 
 TEST(RpcServerLifecycleTest, RejectsZeroListenBacklogAtConstruction) {

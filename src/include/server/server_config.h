@@ -1,4 +1,7 @@
-/** @file server_config.h @brief Defines normalized internal server configuration. */
+/**
+ * @file server_config.h
+ * @brief Defines normalized server configuration derived from public options.
+ */
 
 #pragma once
 
@@ -16,6 +19,7 @@
 
 namespace xrpc {
 
+/** @brief Normalized service-registration settings for Consul. */
 struct ConsulRegistrationConfig {
   std::string service_name_;
   std::string service_id_;
@@ -25,6 +29,12 @@ struct ConsulRegistrationConfig {
   std::chrono::milliseconds timeout_;
 };
 
+/**
+ * @brief Validated internal configuration consumed by the server runtime.
+ *
+ * Values are normalized from `RpcServerOptions`; runtime components should not
+ * reinterpret public defaults or repeat configuration validation.
+ */
 struct ServerConfig {
   std::size_t worker_threads_;
   std::size_t max_pending_jobs_;
@@ -35,10 +45,21 @@ struct ServerConfig {
   ConsulRegistrationConfig consul_;
 };
 
+/**
+ * @brief Validates public server options and produces the internal runtime
+ * configuration.
+ */
 [[nodiscard]] auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerConfig;
 
 [[nodiscard]] auto ServiceRegistrationEnabled(const ServerConfig &config) -> bool;
 
+/**
+ * @brief Resolves concrete Consul registration options for the listening
+ * endpoint.
+ *
+ * Missing service address, port, and ID values are derived where permitted by
+ * the normalized configuration.
+ */
 [[nodiscard]] auto ResolveRegistrarOptions(const ServerConfig &config, std::string_view host, std::uint16_t listen_port)
     -> ConsulRegistrar::Options;
 

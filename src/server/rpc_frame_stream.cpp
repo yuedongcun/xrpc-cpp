@@ -1,4 +1,7 @@
-/** @file rpc_frame_stream.cpp @brief Implements incremental server-side RPC frame decoding. */
+/**
+ * @file rpc_frame_stream.cpp
+ * @brief Implements buffered incremental RPC request decoding.
+ */
 
 #include "server/rpc_frame_stream.h"
 
@@ -50,6 +53,9 @@ void RpcFrameStream::ByteBuffer::Compact() {
     read_offset_ = 0;
     return;
   }
+
+  // Delay prefix removal until new bytes are appended so repeated frame
+  // consumption does not shift the remaining buffer after every decode.
   buffer_.erase(0, read_offset_);
   read_offset_ = 0;
 }
@@ -58,9 +64,6 @@ void RawRequestBatch::Push(RawRequest request) {
   if (!first_request_.has_value()) {
     first_request_.emplace(std::move(request));
     return;
-  }
-  if (additional_requests_.empty()) {
-    additional_requests_.reserve(16);
   }
   additional_requests_.push_back(std::move(request));
 }
@@ -87,7 +90,7 @@ auto RpcFrameStream::FeedBytes(std::string_view bytes) -> FrameStreamFeedResult 
   }
 
   buffer_.Append(bytes);
-  RawRequestBatch requests = DrainReadableRequests();
+  RawRequestBatch requests = DecodeAvailableRequests();
   return {.requests_ = std::move(requests), .closed_ = closed_};
 }
 
@@ -96,16 +99,19 @@ auto RpcFrameStream::EncodeResponse(RawResponse &&response) const -> std::string
   return codec.EncodeResponse(response);
 }
 
-auto RpcFrameStream::DrainReadableRequests() -> RawRequestBatch {
+auto RpcFrameStream::DecodeAvailableRequests() -> RawRequestBatch {
   RawRequestBatch requests;
   FrameCodec codec(protocol_limits_);
 
   while (!buffer_.Empty() && !closed_) {
     RequestDecodeResult decoded = codec.TryDecodeRequest(buffer_.ReadableBytes(), request_header_cache_);
+
+    // Preserve an incomplete trailing frame for the next FeedBytes() call.
     if (decoded.error_ == ProtocolError::NeedMoreData) {
       break;
     }
 
+    // Any non-recoverable protocol error permanently closes this stream.
     if (decoded.error_ != ProtocolError::Ok || !decoded.request_.has_value()) {
       closed_ = true;
       break;
