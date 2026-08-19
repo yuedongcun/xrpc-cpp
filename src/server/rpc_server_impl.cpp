@@ -3,7 +3,7 @@
  * @brief Implements the server runtime lifecycle and component coordination.
  *
  * `RpcServer::Impl` coordinates the listening socket, accept loop, connection
- * I/O loops, worker executor, service registry, and optional service
+ * I/O loops, worker pool, service registry, and optional service
  * registration.
  *
  * Server lifecycle:
@@ -12,7 +12,7 @@
  *
  * `Run()` drives the accept `UringContext` on the calling thread. Accepted
  * sockets are distributed across the connection I/O loops, while RPC handlers
- * execute on the worker executor.
+ * execute on the worker pool.
  *
  * Graceful shutdown stops new work first, drains admitted worker jobs and
  * existing connections, then stops the I/O loops before the runtime reaches
@@ -20,8 +20,6 @@
  */
 
 #include "server/rpc_server_impl.h"
-
-#include <fcntl.h>
 
 #include <cassert>
 #include <exception>
@@ -36,11 +34,11 @@
 namespace xrpc {
 
 RpcServer::Impl::Impl(const RpcServerOptions &options)
-    : config_(NormalizeServerOptions(options)), executor_(config_.worker_threads_, config_.max_pending_jobs_) {
+    : config_(NormalizeServerOptions(options)), worker_pool_(config_.worker_threads_, config_.max_pending_jobs_) {
   connection_io_loops_.reserve(config_.io_threads_);
   for (std::size_t index = 0; index < config_.io_threads_; ++index) {
-    connection_io_loops_.push_back(
-        std::make_unique<ConnectionIoLoop>(registry_, executor_, config_.connection_limits_, config_.protocol_limits_));
+    connection_io_loops_.push_back(std::make_unique<ConnectionIoLoop>(
+        registry_, worker_pool_, config_.connection_limits_, config_.protocol_limits_));
   }
 }
 
@@ -138,7 +136,7 @@ void RpcServer::Impl::Stop() {
 
     case State::Running:
       state_ = State::Stopping;
-      executor_.CloseSubmissions();
+      worker_pool_.CloseSubmissions();
       RequestStopAccepting();
       return;
 
@@ -165,27 +163,26 @@ auto RpcServer::Impl::AcceptLoop() -> runtime::Task<void> {
       const io::IoResult accept_result = co_await accept_context_.Accept(listen_socket_.fd());
       if (accept_result.result_ < 0) {
         if (!accept_stopped_) {
-          StopAccepting();
+          StopAcceptingOnContext();
         }
         break;
       }
 
       io::Socket client_socket(accept_result.result_);
-      ConfigureAcceptedSocket(client_socket.fd());
       DispatchAcceptedConnection(std::move(client_socket));
     }
   } catch (...) {
-    accept_context_.Stop();
+    accept_context_.RequestStop();
     throw;
   }
-  accept_context_.Stop();
+  accept_context_.RequestStop();
 }
 
 void RpcServer::Impl::RequestStopAccepting() {
-  accept_context_.Post([this]() -> void { StopAccepting(); });
+  accept_context_.Post([this]() -> void { StopAcceptingOnContext(); });
 }
 
-void RpcServer::Impl::StopAccepting() {
+void RpcServer::Impl::StopAcceptingOnContext() {
   if (accept_stopped_) {
     return;
   }
@@ -194,18 +191,6 @@ void RpcServer::Impl::StopAccepting() {
   if (listen_socket_.valid()) {
     accept_context_.CancelFd(listen_socket_.fd());
     listen_socket_.Close();
-  }
-}
-
-void RpcServer::Impl::ConfigureAcceptedSocket(int fd) const {
-  const int fd_flags = ::fcntl(fd, F_GETFD);
-  if (fd_flags >= 0) {
-    (void)::fcntl(fd, F_SETFD, fd_flags | FD_CLOEXEC);
-  }
-
-  const int status_flags = ::fcntl(fd, F_GETFL);
-  if (status_flags >= 0) {
-    (void)::fcntl(fd, F_SETFL, status_flags | O_NONBLOCK);
   }
 }
 
@@ -242,7 +227,7 @@ void RpcServer::Impl::FinishConnectionDrain() {
   for (auto &loop : connection_io_loops_) {
     attempt([&loop]() -> void { loop->FinishDrain(); });
   }
-  attempt([this]() -> void { accept_context_.Stop(); });
+  attempt([this]() -> void { accept_context_.RequestStop(); });
 
   if (failure) {
     std::rethrow_exception(failure);
@@ -325,12 +310,12 @@ void RpcServer::Impl::ShutdownComponents() {
     }
   };
 
-  executor_.CloseSubmissions();
-  attempt([this]() -> void { StopAccepting(); });
+  worker_pool_.CloseSubmissions();
+  attempt([this]() -> void { StopAcceptingOnContext(); });
   attempt([this]() -> void { BeginConnectionDrain(); });
   (void)TryDeregisterService();
 
-  attempt([this]() -> void { executor_.Stop(); });
+  attempt([this]() -> void { worker_pool_.DrainAndJoin(); });
   attempt([this]() -> void { FinishConnectionDrain(); });
 
   if (failure) {

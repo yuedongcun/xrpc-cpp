@@ -23,12 +23,12 @@ auto MakeMaxWriteBatchBytes() -> std::size_t { return 64U * 1024U; }
 
 }  // namespace
 
-ServerConnection::ServerConnection(io::UringContext &context, ServiceRegistry &registry, ThreadPoolExecutor &executor,
+ServerConnection::ServerConnection(io::UringContext &context, ServiceRegistry &registry, WorkerPool &worker_pool,
                                    DispatchMailbox &mailbox, io::Socket socket, ServerConnectionConfig config,
                                    std::function<void()> on_closed)
     : context_(&context),
       mailbox_(&mailbox),
-      executor_(&executor),
+      worker_pool_(&worker_pool),
       registry_(&registry),
       frame_stream_(config.protocol_limits_),
       protocol_limits_(config.protocol_limits_),
@@ -85,7 +85,7 @@ auto ServerConnection::HandleFeedResult(FrameStreamFeedResult &&feed) -> bool {
   assert(inflight_requests_ <= limits_.max_inflight_);
   if (request_count > limits_.max_inflight_ - inflight_requests_) {
     return feed.requests_.ConsumeEach([this](RawRequest request) -> bool {
-      return RejectRequestDueToBackpressure(std::move(request), "server per-connection in-flight limit exceeded");
+      return RejectForBackpressure(std::move(request), "server per-connection in-flight limit exceeded");
     });
   }
 
@@ -226,7 +226,7 @@ auto ServerConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> 
 
   std::weak_ptr<ServerConnection> weak_self = weak_from_this();
   auto request_batch = std::make_shared<std::vector<RawRequest>>(std::move(requests));
-  const bool accepted = executor_->TrySubmitBatch(
+  const bool accepted = worker_pool_->TrySubmitBatch(
       [weak_self, request_batch]() -> void {
         std::shared_ptr<ServerConnection> self = weak_self.lock();
         if (!self) {
@@ -237,12 +237,12 @@ auto ServerConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> 
       request_count);
 
   if (!accepted) {
-    if (!executor_->accepting_submissions()) {
+    if (!worker_pool_->accepting_submissions()) {
       BeginDrain();
       return false;
     }
     for (RawRequest &request : *request_batch) {
-      if (!RejectRequestDueToBackpressure(std::move(request), "server global pending job limit exceeded")) {
+      if (!RejectForBackpressure(std::move(request), "server global pending job limit exceeded")) {
         return false;
       }
     }
@@ -282,7 +282,7 @@ void ServerConnection::ExecuteDispatchBatchOnWorker(const std::weak_ptr<ServerCo
   }
 }
 
-auto ServerConnection::RejectRequestDueToBackpressure(RawRequest &&request, std::string message) -> bool {
+auto ServerConnection::RejectForBackpressure(RawRequest &&request, std::string message) -> bool {
   RawResponse response;
   response.request_id_ = request.request_id_;
   response.status_ = {StatusCode::ResourceExhausted, std::move(message)};

@@ -2,13 +2,13 @@
  * @file uring_context_control.cpp
  * @brief Implements `UringContext` cross-thread control and wakeup handling.
  *
- * `Post()` queues callbacks for execution on the run thread. `Stop()` stops
- * accepting new callbacks and requests event-loop shutdown; callbacks already
- * queued are still drained.
+ * `Post()` queues callbacks for execution on the run thread. `RequestStop()`
+ * stops accepting new callbacks and requests event-loop shutdown; callbacks
+ * already queued are still drained.
  *
  * Cross-thread wakeup path:
  *
- *   Post() / Stop()
+ *   Post() / RequestStop()
  *         |
  *         v
  *   signal eventfd

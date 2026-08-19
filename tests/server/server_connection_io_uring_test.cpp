@@ -20,7 +20,7 @@
 #include "server/dispatch_mailbox.h"
 #include "server/server_connection.h"
 #include "server/service_registry.h"
-#include "server/thread_pool_executor.h"
+#include "server/worker_pool.h"
 
 namespace {
 
@@ -138,7 +138,7 @@ class UringContextRunner final {
   }
 
   void StopAndJoin(xrpc::io::UringContext &context) {
-    context.Stop();
+    context.RequestStop();
     if (thread_.joinable()) {
       thread_.join();
     }
@@ -219,11 +219,11 @@ auto WaitForConnectionTask(xrpc::runtime::Task<void> &task, xrpc::io::UringConte
 TEST(ServerConnectionTest, EchoesSingleFrameAndClosesAfterPeerShutdown) {
   ConnectedPair pair = MakeConnectedPair();
   xrpc::io::UringContext context;
-  xrpc::ThreadPoolExecutor executor(1);
+  xrpc::WorkerPool worker_pool(1);
   xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
   auto mailbox = std::make_shared<xrpc::DispatchMailbox>(context);
   auto connection = std::make_shared<xrpc::ServerConnection>(
-      context, registry, executor, *mailbox, std::move(pair.server_socket_), MakeConnectionConfig(), []() {});
+      context, registry, worker_pool, *mailbox, std::move(pair.server_socket_), MakeConnectionConfig(), []() {});
   xrpc::runtime::Task<void> task = connection->Run();
   UringContextRunner runner;
   StartTaskOnContext(context, task);
@@ -244,11 +244,11 @@ TEST(ServerConnectionTest, EchoesSingleFrameAndClosesAfterPeerShutdown) {
 TEST(ServerConnectionTest, ServerDrainClosesConnection) {
   ConnectedPair pair = MakeConnectedPair();
   xrpc::io::UringContext context;
-  xrpc::ThreadPoolExecutor executor(1);
+  xrpc::WorkerPool worker_pool(1);
   xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
   auto mailbox = std::make_shared<xrpc::DispatchMailbox>(context);
   auto connection = std::make_shared<xrpc::ServerConnection>(
-      context, registry, executor, *mailbox, std::move(pair.server_socket_), MakeConnectionConfig(), []() {});
+      context, registry, worker_pool, *mailbox, std::move(pair.server_socket_), MakeConnectionConfig(), []() {});
   xrpc::runtime::Task<void> task = connection->Run();
   UringContextRunner runner;
   StartTaskOnContext(context, task);
@@ -265,11 +265,11 @@ TEST(ServerConnectionTest, ServerDrainClosesConnection) {
 TEST(ServerConnectionTest, HandlesHalfPacketsAndStickyPackets) {
   ConnectedPair pair = MakeConnectedPair();
   xrpc::io::UringContext context;
-  xrpc::ThreadPoolExecutor executor(1);
+  xrpc::WorkerPool worker_pool(1);
   xrpc::ServiceRegistry registry = MakeRegistry(MakeSlowEchoHandler());
   auto mailbox = std::make_shared<xrpc::DispatchMailbox>(context);
   auto connection = std::make_shared<xrpc::ServerConnection>(
-      context, registry, executor, *mailbox, std::move(pair.server_socket_), MakeConnectionConfig(), []() {});
+      context, registry, worker_pool, *mailbox, std::move(pair.server_socket_), MakeConnectionConfig(), []() {});
   xrpc::runtime::Task<void> task = connection->Run();
   UringContextRunner runner;
   StartTaskOnContext(context, task);
@@ -299,11 +299,11 @@ TEST(ServerConnectionTest, HandlesHalfPacketsAndStickyPackets) {
 TEST(ServerConnectionTest, HandlesPipelinedRequestsOnOneConnection) {
   ConnectedPair pair = MakeConnectedPair();
   xrpc::io::UringContext context;
-  xrpc::ThreadPoolExecutor executor(1);
+  xrpc::WorkerPool worker_pool(1);
   xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
   auto mailbox = std::make_shared<xrpc::DispatchMailbox>(context);
   auto connection = std::make_shared<xrpc::ServerConnection>(
-      context, registry, executor, *mailbox, std::move(pair.server_socket_), MakeConnectionConfig(), []() {});
+      context, registry, worker_pool, *mailbox, std::move(pair.server_socket_), MakeConnectionConfig(), []() {});
   xrpc::runtime::Task<void> task = connection->Run();
   UringContextRunner runner;
   StartTaskOnContext(context, task);
@@ -329,11 +329,11 @@ TEST(ServerConnectionTest, HandlesPipelinedRequestsOnOneConnection) {
 TEST(ServerConnectionTest, ClosesOnInvalidFrame) {
   ConnectedPair pair = MakeConnectedPair();
   xrpc::io::UringContext context;
-  xrpc::ThreadPoolExecutor executor(1);
+  xrpc::WorkerPool worker_pool(1);
   xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
   auto mailbox = std::make_shared<xrpc::DispatchMailbox>(context);
   auto connection = std::make_shared<xrpc::ServerConnection>(
-      context, registry, executor, *mailbox, std::move(pair.server_socket_), MakeConnectionConfig(), []() {});
+      context, registry, worker_pool, *mailbox, std::move(pair.server_socket_), MakeConnectionConfig(), []() {});
   xrpc::runtime::Task<void> task = connection->Run();
   UringContextRunner runner;
   StartTaskOnContext(context, task);
@@ -349,14 +349,14 @@ TEST(ServerConnectionTest, ClosesOnInvalidFrame) {
   EXPECT_TRUE(connection->IsClosed());
 }
 
-TEST(ServerConnectionTest, HandlesConcurrentResponsesWithThreadPoolExecutor) {
+TEST(ServerConnectionTest, HandlesConcurrentResponsesWithWorkerPool) {
   ConnectedPair pair = MakeConnectedPair();
   xrpc::io::UringContext context;
-  xrpc::ThreadPoolExecutor executor(2);
+  xrpc::WorkerPool worker_pool(2);
   xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
   auto mailbox = std::make_shared<xrpc::DispatchMailbox>(context);
   auto connection = std::make_shared<xrpc::ServerConnection>(
-      context, registry, executor, *mailbox, std::move(pair.server_socket_), MakeConnectionConfig(), []() {});
+      context, registry, worker_pool, *mailbox, std::move(pair.server_socket_), MakeConnectionConfig(), []() {});
   xrpc::runtime::Task<void> task = connection->Run();
   UringContextRunner runner;
   StartTaskOnContext(context, task);
@@ -423,12 +423,12 @@ TEST(ServerConnectionTest, KeepsReadingWhileWorkerHandlerIsPending) {
 
   ConnectedPair pair = MakeConnectedPair();
   xrpc::io::UringContext context;
-  xrpc::ThreadPoolExecutor executor(1);
+  xrpc::WorkerPool worker_pool(1);
   xrpc::ServiceRegistry registry = MakeRegistry(std::move(blocking_handler));
   auto mailbox = std::make_shared<xrpc::DispatchMailbox>(context);
   const auto config =
       MakeConnectionConfig(xrpc::ConnectionBackpressureLimits{.max_inflight_ = 1, .max_write_queue_bytes_ = 1024});
-  auto connection = std::make_shared<xrpc::ServerConnection>(context, registry, executor, *mailbox,
+  auto connection = std::make_shared<xrpc::ServerConnection>(context, registry, worker_pool, *mailbox,
                                                              std::move(pair.server_socket_), config, []() {});
   xrpc::runtime::Task<void> task = connection->Run();
   UringContextRunner runner;
@@ -462,7 +462,7 @@ TEST(ServerConnectionTest, KeepsReadingWhileWorkerHandlerIsPending) {
 TEST(ServerConnectionTest, RejectsEntireReadBatchWhenInflightLimitWouldBeExceeded) {
   ConnectedPair pair = MakeConnectedPair();
   xrpc::io::UringContext context;
-  xrpc::ThreadPoolExecutor executor(1);
+  xrpc::WorkerPool worker_pool(1);
   std::atomic<std::size_t> handler_calls = 0;
   xrpc::ServiceRegistry registry = MakeRegistry([&handler_calls](const xrpc::RawRequest &request) {
     ++handler_calls;
@@ -471,7 +471,7 @@ TEST(ServerConnectionTest, RejectsEntireReadBatchWhenInflightLimitWouldBeExceede
   auto mailbox = std::make_shared<xrpc::DispatchMailbox>(context);
   const auto config =
       MakeConnectionConfig(xrpc::ConnectionBackpressureLimits{.max_inflight_ = 1, .max_write_queue_bytes_ = 1024});
-  auto connection = std::make_shared<xrpc::ServerConnection>(context, registry, executor, *mailbox,
+  auto connection = std::make_shared<xrpc::ServerConnection>(context, registry, worker_pool, *mailbox,
                                                              std::move(pair.server_socket_), config, []() {});
   xrpc::runtime::Task<void> task = connection->Run();
   UringContextRunner runner;
@@ -508,12 +508,12 @@ TEST(ServerConnectionTest, RejectsEntireReadBatchWhenInflightLimitWouldBeExceede
 TEST(ServerConnectionTest, ClosesWhenWriteQueueByteLimitIsReached) {
   ConnectedPair pair = MakeConnectedPair();
   xrpc::io::UringContext context;
-  xrpc::ThreadPoolExecutor executor(1);
+  xrpc::WorkerPool worker_pool(1);
   xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
   auto mailbox = std::make_shared<xrpc::DispatchMailbox>(context);
   const auto config =
       MakeConnectionConfig(xrpc::ConnectionBackpressureLimits{.max_inflight_ = 8, .max_write_queue_bytes_ = 1});
-  auto connection = std::make_shared<xrpc::ServerConnection>(context, registry, executor, *mailbox,
+  auto connection = std::make_shared<xrpc::ServerConnection>(context, registry, worker_pool, *mailbox,
                                                              std::move(pair.server_socket_), config, []() {});
   xrpc::runtime::Task<void> task = connection->Run();
   UringContextRunner runner;

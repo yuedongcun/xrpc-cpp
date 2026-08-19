@@ -36,7 +36,7 @@ RpcClient::Call
 
 - Server Run 线程上的 accept `UringContext`；
 - 一个或多个 `ConnectionIoLoop`，每个对应一个 Connection I/O 线程；
-- 一个 `ThreadPoolExecutor` 管理的 Worker 线程池；
+- 一个 `WorkerPool` 管理的 Worker 线程池；
 - 类型化服务注册表；
 - 可选的 Consul 注册器；
 - 资源和生命周期状态。
@@ -49,7 +49,7 @@ RpcClient::Call
 
 - **Server Run 线程**：调用 `RpcServer::Run()` 的线程。它驱动 accept `UringContext`，接收新连接，将 socket 分配给 Connection I/O 线程，并协调 graceful shutdown；
 - **Connection I/O 线程**：每个 `ConnectionIoLoop` 拥有一个。连接建立后固定归属其中一个线程，由该线程负责收包、分帧、连接状态和响应写回；
-- **Worker 线程**：由 `ThreadPoolExecutor` 管理。它执行 `ServiceRegistry::Dispatch()`、用户 handler 和响应编码，不直接操作 socket 或连接状态。
+- **Worker 线程**：由 `WorkerPool` 管理。它执行 `ServiceRegistry::Dispatch()`、用户 handler 和响应编码，不直接操作 socket 或连接状态。
 
 三类线程通过明确的交接点传递连接、请求和完成结果：
 
@@ -122,7 +122,7 @@ fixed header、元数据 header、payload 和完整 frame 都有大小限制。�
 服务端保护三类资源：
 
 1. 每条连接允许的最大在途 handler job 数；
-2. `ThreadPoolExecutor` 允许的最大 pending job 数；
+2. `WorkerPool` 允许的最大 pending job 数；
 3. 每条连接允许排队的最大响应字节数。
 
 请求容量耗尽时，只要协议仍允许返回响应，服务端就返回 `ResourceExhausted`。响应队列超过字节上限时，服务端关闭连接以释放内存。这些限制属于运行时行为，不只是 benchmark 参数。

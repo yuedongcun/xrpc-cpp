@@ -18,7 +18,7 @@
 #include "server/connection_io_loop.h"
 #include "server/server_config.h"
 #include "server/service_registry.h"
-#include "server/thread_pool_executor.h"
+#include "server/worker_pool.h"
 
 namespace xrpc {
 
@@ -47,9 +47,13 @@ class RpcServer::Impl final {
 
   void StartAcceptLoop();
   [[nodiscard]] auto AcceptLoop() -> runtime::Task<void>;
+
+  // Thread-safe request that forwards accept shutdown to the accept context.
   void RequestStopAccepting();
-  void StopAccepting();
-  void ConfigureAcceptedSocket(int fd) const;
+
+  // Accept-context-thread-only. Closes the listener and cancels pending accept.
+  void StopAcceptingOnContext();
+
   void DispatchAcceptedConnection(io::Socket socket);
 
   void StartConnectionLoops();
@@ -66,7 +70,7 @@ class RpcServer::Impl final {
   ServerConfig config_;
   ServiceRegistry registry_;
 
-  ThreadPoolExecutor executor_;
+  WorkerPool worker_pool_;
   std::unique_ptr<ConsulRegistrar> registrar_;
 
   io::UringContext accept_context_;

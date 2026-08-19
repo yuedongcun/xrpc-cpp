@@ -49,6 +49,7 @@
 
 #include <liburing.h>
 #include <linux/time_types.h>
+#include <sys/socket.h>
 
 #include "common/xrpc_exception.h"
 #include "detail/context_runtime.h"
@@ -294,7 +295,7 @@ auto UringContext::Accept(int listen_fd) -> UringAwaitable {
   operation->awaitable_state_ = state;
 
   runtime_->SubmitAwaitableOperation(std::move(operation), [listen_fd](io_uring_sqe *sqe) -> void {
-    io_uring_prep_accept(sqe, listen_fd, nullptr, nullptr, 0);
+    io_uring_prep_accept(sqe, listen_fd, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
   });
 
   return awaitable;

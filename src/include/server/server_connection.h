@@ -18,7 +18,7 @@
 #include "protocol/protocol_message.h"
 #include "server/connection_backpressure.h"
 #include "server/rpc_frame_stream.h"
-#include "server/thread_pool_executor.h"
+#include "server/worker_pool.h"
 
 namespace xrpc {
 
@@ -41,7 +41,7 @@ struct ServerConnectionConfig final {
  */
 class ServerConnection final : public std::enable_shared_from_this<ServerConnection> {
  public:
-  ServerConnection(io::UringContext &context, ServiceRegistry &registry, ThreadPoolExecutor &executor,
+  ServerConnection(io::UringContext &context, ServiceRegistry &registry, WorkerPool &worker_pool,
                    DispatchMailbox &mailbox, io::Socket socket, ServerConnectionConfig config,
                    std::function<void()> on_closed);
 
@@ -91,7 +91,7 @@ class ServerConnection final : public std::enable_shared_from_this<ServerConnect
 
   void ExecuteDispatchBatchOnWorker(const std::weak_ptr<ServerConnection> &target, std::vector<RawRequest> &requests);
 
-  [[nodiscard]] auto RejectRequestDueToBackpressure(RawRequest &&request, std::string message) -> bool;
+  [[nodiscard]] auto RejectForBackpressure(RawRequest &&request, std::string message) -> bool;
 
   [[nodiscard]] auto EncodeResponseOnWorker(RawResponse &&response) const -> std::string;
 
@@ -101,7 +101,7 @@ class ServerConnection final : public std::enable_shared_from_this<ServerConnect
 
   DispatchMailbox *mailbox_ = nullptr;
 
-  ThreadPoolExecutor *executor_ = nullptr;
+  WorkerPool *worker_pool_ = nullptr;
 
   ServiceRegistry *registry_ = nullptr;
 

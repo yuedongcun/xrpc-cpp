@@ -44,7 +44,7 @@ set(XRPC_SOURCES
     server/rpc_server_impl.cpp
     server/connection_io_loop.cpp
     server/dispatch_mailbox.cpp
-    server/thread_pool_executor.cpp
+    server/worker_pool.cpp
     server/server_connection.cpp
 )
 

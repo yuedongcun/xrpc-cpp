@@ -40,7 +40,7 @@ auto WaitTaskWithContext(xrpc::runtime::Task<T> task, xrpc::io::UringContext &co
 
   const bool completed = task.WaitFor(WaitTimeout);
 
-  context.Stop();
+  context.RequestStop();
   context_thread.join();
   if (context_error) {
     std::rethrow_exception(context_error);
@@ -91,7 +91,7 @@ auto PendingSleep(xrpc::io::UringContext &context, std::atomic<bool> &submitted)
 }
 
 auto SubmitAfterStop(xrpc::io::UringContext &context) -> xrpc::runtime::Task<xrpc::io::IoResult> {
-  context.Stop();
+  context.RequestStop();
   co_return co_await context.SleepFor(std::chrono::hours(1));
 }
 
@@ -139,7 +139,7 @@ TEST(IoUringAwaitableTest, StopCancelsPendingSleepFor) {
   });
 
   EXPECT_FALSE(task.WaitFor(std::chrono::milliseconds(5)));
-  context.Stop();
+  context.RequestStop();
   context_thread.join();
   if (context_error) {
     std::rethrow_exception(context_error);
@@ -175,7 +175,7 @@ TEST(IoUringAwaitableTest, DestroyingPendingTaskDoesNotLeaveCompletionTarget) {
     EXPECT_TRUE(submitted.load());
   }
 
-  context.Stop();
+  context.RequestStop();
   context_thread.join();
 
   if (context_error) {

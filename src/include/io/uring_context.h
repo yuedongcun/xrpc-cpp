@@ -88,9 +88,9 @@ class UringAwaitable final {
 /**
  * @brief Single-threaded io_uring execution context with cross-thread control.
  *
- * `Run()` has one owner. `Post()` and `Stop()` may be called concurrently from
- * other threads; `Accept()`, `Recv()`, `Send()`, `SleepFor()`, and `CancelFd()`
- * are run-thread-only operations.
+ * `Run()` has one owner. `Post()` and `RequestStop()` may be called concurrently
+ * from other threads; `Accept()`, `Recv()`, `Send()`, `SleepFor()`, and
+ * `CancelFd()` are run-thread-only operations.
  */
 class UringContext final {
  public:
@@ -104,9 +104,21 @@ class UringContext final {
   UringContext(UringContext &&) = delete;
   auto operator=(UringContext &&) -> UringContext & = delete;
 
+  /**
+   * @brief Runs the event loop on the calling thread.
+   *
+   * Returns after stop has been requested and all submitted operations and the
+   * wakeup poll have produced their completion events.
+   */
   void Run();
 
-  void Stop();
+  /**
+   * @brief Thread-safely requests event-loop shutdown without waiting.
+   *
+   * New posted callbacks are rejected, callbacks already queued are drained,
+   * and the run thread is awakened. Return from `Run()` confirms shutdown.
+   */
+  void RequestStop();
 
   [[nodiscard]] auto Accept(int listen_fd) -> UringAwaitable;
 

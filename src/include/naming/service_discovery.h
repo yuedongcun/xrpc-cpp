@@ -27,6 +27,7 @@ class ServiceDiscovery {
 
   [[nodiscard]] virtual auto Start() -> Status = 0;
 
+  /** Stops background refresh and waits for its worker thread to exit. */
   virtual void Stop() = 0;
 
   [[nodiscard]] virtual auto Snapshot() const -> std::vector<Endpoint> = 0;

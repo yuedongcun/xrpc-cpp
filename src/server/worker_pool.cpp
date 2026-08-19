@@ -1,6 +1,8 @@
-/** @file thread_pool_executor.cpp @brief Implements the server handler worker executor. */
-
-#include "server/thread_pool_executor.h"
+/**
+ * @file worker_pool.cpp
+ * @brief Implements worker scheduling, bounded admission, and graceful drain.
+ */
+#include "server/worker_pool.h"
 
 #include <stdexcept>
 #include <utility>
@@ -9,13 +11,12 @@
 
 namespace xrpc {
 
-ThreadPoolExecutor::ThreadPoolExecutor(std::size_t worker_count, std::size_t max_pending_jobs)
-    : max_pending_jobs_(max_pending_jobs) {
+WorkerPool::WorkerPool(std::size_t worker_count, std::size_t max_pending_jobs) : max_pending_jobs_(max_pending_jobs) {
   if (worker_count == 0) {
-    throw ConfigException("ThreadPoolExecutor requires at least one worker");
+    throw ConfigException("WorkerPool requires at least one worker");
   }
   if (max_pending_jobs_ == 0) {
-    throw ConfigException("ThreadPoolExecutor requires a positive pending job limit");
+    throw ConfigException("WorkerPool requires a positive pending job limit");
   }
 
   worker_queues_.reserve(worker_count);
@@ -24,15 +25,15 @@ ThreadPoolExecutor::ThreadPoolExecutor(std::size_t worker_count, std::size_t max
     worker_queues_.push_back(std::make_unique<WorkerQueue>());
   }
   for (const auto &queue : worker_queues_) {
-    workers_.emplace_back([this, queue = queue.get()] { WorkerLoop(*queue); });
+    workers_.emplace_back([this, queue = queue.get()]() -> void { WorkerLoop(*queue); });
   }
 }
 
-ThreadPoolExecutor::~ThreadPoolExecutor() { Stop(); }
+WorkerPool::~WorkerPool() { DrainAndJoin(); }
 
-auto ThreadPoolExecutor::TrySubmitBatch(std::function<void()> job, std::size_t logical_jobs) -> bool {
+auto WorkerPool::TrySubmitBatch(std::function<void()> job, std::size_t logical_jobs) -> bool {
   if (logical_jobs == 0) {
-    throw std::invalid_argument("ThreadPoolExecutor::TrySubmitBatch requires at least one logical job");
+    throw std::invalid_argument("WorkerPool::TrySubmitBatch requires at least one logical job");
   }
   if (!accepting_submissions_.load()) {
     return false;
@@ -46,12 +47,15 @@ auto ThreadPoolExecutor::TrySubmitBatch(std::function<void()> job, std::size_t l
   WorkerQueue &queue = SelectWorkerQueue();
   try {
     std::lock_guard<std::mutex> lock(queue.mutex_);
+
+    // Recheck under the queue lock so CloseSubmissions() can synchronize with
+    // submissions that passed the initial fast-path check.
     if (!accepting_submissions_.load()) {
       ReleasePendingJobs(logical_jobs);
       return false;
     }
     queue.jobs_.push(WorkerJob{.run_ = std::move(job), .logical_jobs_ = logical_jobs});
-    queue.pending_jobs_.fetch_add(1);
+    queue.pending_entries_.fetch_add(1);
   } catch (...) {
     ReleasePendingJobs(logical_jobs);
     throw;
@@ -60,24 +64,26 @@ auto ThreadPoolExecutor::TrySubmitBatch(std::function<void()> job, std::size_t l
   return true;
 }
 
-void ThreadPoolExecutor::CloseSubmissions() noexcept {
+void WorkerPool::CloseSubmissions() noexcept {
   accepting_submissions_.store(false);
   for (const auto &queue : worker_queues_) {
     std::lock_guard lock(queue->mutex_);
   }
 }
 
-auto ThreadPoolExecutor::accepting_submissions() const noexcept -> bool { return accepting_submissions_.load(); }
+auto WorkerPool::accepting_submissions() const noexcept -> bool { return accepting_submissions_.load(); }
 
-auto ThreadPoolExecutor::SelectWorkerQueue() -> WorkerQueue & {
+// Start from a round-robin candidate, then prefer a queue with fewer pending
+// WorkerJob entries. An empty queue is already optimal, so probing stops early.
+auto WorkerPool::SelectWorkerQueue() -> WorkerQueue & {
   const std::size_t worker_count = worker_queues_.size();
   const std::size_t start = next_worker_index_.fetch_add(1) % worker_count;
   std::size_t selected = start;
-  std::size_t selected_pending = worker_queues_[selected]->pending_jobs_.load();
+  std::size_t selected_pending = worker_queues_[selected]->pending_entries_.load();
 
   for (std::size_t offset = 1; offset < worker_count && selected_pending > 0; ++offset) {
     const std::size_t candidate = (start + offset) % worker_count;
-    const std::size_t candidate_pending = worker_queues_[candidate]->pending_jobs_.load();
+    const std::size_t candidate_pending = worker_queues_[candidate]->pending_entries_.load();
     if (candidate_pending < selected_pending) {
       selected = candidate;
       selected_pending = candidate_pending;
@@ -86,7 +92,7 @@ auto ThreadPoolExecutor::SelectWorkerQueue() -> WorkerQueue & {
   return *worker_queues_[selected];
 }
 
-auto ThreadPoolExecutor::TryReservePendingJobs(std::size_t logical_jobs) -> std::optional<std::size_t> {
+auto WorkerPool::TryReservePendingJobs(std::size_t logical_jobs) -> std::optional<std::size_t> {
   std::size_t pending = pending_jobs_.load();
   while (true) {
     if (pending > max_pending_jobs_ || logical_jobs > max_pending_jobs_ - pending) {
@@ -98,15 +104,18 @@ auto ThreadPoolExecutor::TryReservePendingJobs(std::size_t logical_jobs) -> std:
   }
 }
 
-void ThreadPoolExecutor::ReleasePendingJobs(std::size_t logical_jobs) { pending_jobs_.fetch_sub(logical_jobs); }
+void WorkerPool::ReleasePendingJobs(std::size_t logical_jobs) { pending_jobs_.fetch_sub(logical_jobs); }
 
-void ThreadPoolExecutor::Stop() {
+void WorkerPool::DrainAndJoin() {
   CloseSubmissions();
-  if (stopped_.exchange(true)) {
+  if (drain_requested_.exchange(true)) {
     return;
   }
   for (const auto &queue : worker_queues_) {
+    // Synchronize with the worker's wait transition to avoid a lost wakeup.
     std::lock_guard<std::mutex> lock(queue->mutex_);
+
+    // Wake the worker to observe the drain request.
     queue->cv_.notify_one();
   }
 
@@ -118,13 +127,13 @@ void ThreadPoolExecutor::Stop() {
   workers_.clear();
 }
 
-void ThreadPoolExecutor::WorkerLoop(WorkerQueue &queue) {
+void WorkerPool::WorkerLoop(WorkerQueue &queue) {
   while (true) {
     WorkerJob job;
     {
       std::unique_lock<std::mutex> lock(queue.mutex_);
-      queue.cv_.wait(lock, [this, &queue]() -> bool { return stopped_.load() || !queue.jobs_.empty(); });
-      if (stopped_.load() && queue.jobs_.empty()) {
+      queue.cv_.wait(lock, [this, &queue]() -> bool { return drain_requested_.load() || !queue.jobs_.empty(); });
+      if (drain_requested_.load() && queue.jobs_.empty()) {
         return;
       }
 
@@ -133,7 +142,7 @@ void ThreadPoolExecutor::WorkerLoop(WorkerQueue &queue) {
     }
 
     job.run_();
-    queue.pending_jobs_.fetch_sub(1);
+    queue.pending_entries_.fetch_sub(1);
     ReleasePendingJobs(job.logical_jobs_);
   }
 }

@@ -24,7 +24,7 @@
 #include "server/connection_backpressure.h"
 #include "server/dispatch_mailbox.h"
 #include "server/server_connection.h"
-#include "server/thread_pool_executor.h"
+#include "server/worker_pool.h"
 
 namespace xrpc {
 
@@ -41,7 +41,7 @@ class ServiceRegistry;
  */
 class ConnectionIoLoop final {
  public:
-  ConnectionIoLoop(ServiceRegistry &registry, ThreadPoolExecutor &executor, ConnectionBackpressureLimits limits,
+  ConnectionIoLoop(ServiceRegistry &registry, WorkerPool &worker_pool, ConnectionBackpressureLimits limits,
                    ProtocolLimits protocol_limits);
 
   ~ConnectionIoLoop();
@@ -96,7 +96,7 @@ class ConnectionIoLoop final {
   io::UringContext context_;
   std::shared_ptr<DispatchMailbox> dispatch_mailbox_;
   ServiceRegistry *registry_;
-  ThreadPoolExecutor *executor_;
+  WorkerPool *worker_pool_;
   ConnectionBackpressureLimits limits_;
   ProtocolLimits protocol_limits_;
   std::vector<ConnectionEntry> connections_;

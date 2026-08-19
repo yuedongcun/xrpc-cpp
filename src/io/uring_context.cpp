@@ -137,7 +137,7 @@ void UringContext::Run() {
   runtime_->EndRun();
 }
 
-void UringContext::Stop() { runtime_->RequestStop(); }
+void UringContext::RequestStop() { runtime_->RequestStop(); }
 
 void UringContext::CancelFd(int fd) {
   if (fd < 0 || !runtime_->IsRunning()) {
