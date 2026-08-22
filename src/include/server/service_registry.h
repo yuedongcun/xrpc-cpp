@@ -9,11 +9,11 @@
 #include <string>
 #include <unordered_map>
 
-#include "protocol/protocol_message.h"
+#include "protocol/rpc_envelope.h"
 
 namespace xrpc {
 
-using RawHandler = std::function<RawResponse(RawRequest)>;
+using RequestHandler = std::function<ResponseEnvelope(RequestEnvelope)>;
 
 /**
  * @brief Runtime read-only mapping from RPC service and method names to handlers.
@@ -25,22 +25,22 @@ using RawHandler = std::function<RawResponse(RawRequest)>;
 class ServiceRegistry final {
  public:
   /**
-   * @brief Registers one raw RPC handler.
+   * @brief Registers one request handler.
    *
    * Throws `ConfigException` if the service-method pair is already registered.
    */
-  void RegisterRaw(const std::string &service, const std::string &method, RawHandler handler);
+  void Register(const std::string &service, const std::string &method, RequestHandler handler);
 
   /**
-   * @brief Dispatches one raw RPC request to its registered handler.
+   * @brief Dispatches one request envelope to its registered handler.
    *
    * Unknown services return `NotFound`, unknown methods return `Unimplemented`,
    * and handler exceptions are converted into an RPC error status.
    */
-  [[nodiscard]] auto Dispatch(RawRequest request) const -> RawResponse;
+  [[nodiscard]] auto Dispatch(RequestEnvelope request) const -> ResponseEnvelope;
 
  private:
-  using MethodMap = std::unordered_map<std::string, RawHandler>;
+  using MethodMap = std::unordered_map<std::string, RequestHandler>;
 
   std::unordered_map<std::string, MethodMap> services_;
 };

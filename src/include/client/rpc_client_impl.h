@@ -16,12 +16,12 @@
 
 #include <xrpc/rpc_client.h>
 
+#include "client/call_attempt_result.h"
 #include "client/effective_call_options.h"
-#include "client/raw_call_result.h"
 #include "client/tcp_transport.h"
 #include "naming/service_discovery.h"
 #include "protocol/frame_codec.h"
-#include "protocol/protocol_message.h"
+#include "protocol/rpc_envelope.h"
 
 namespace xrpc {
 
@@ -58,10 +58,10 @@ class RpcClient::Impl final {
 
   [[nodiscard]] auto LoadEndpointSet() const -> std::shared_ptr<const EndpointSet>;
 
-  [[nodiscard]] auto CallEndpoints(const RawRequest &request, const CallOptions &options) -> RawCallResult;
+  [[nodiscard]] auto CallEndpoints(const RequestEnvelope &request, const CallOptions &options) -> CallAttemptResult;
 
-  [[nodiscard]] auto CallAtEndpoint(const std::shared_ptr<EndpointSlot> &endpoint, const RawRequest &request,
-                                    const EffectiveCallOptions &options) -> RawCallResult;
+  [[nodiscard]] auto CallAtEndpoint(const std::shared_ptr<EndpointSlot> &endpoint, const RequestEnvelope &request,
+                                    const EffectiveCallOptions &options) -> CallAttemptResult;
 
   [[nodiscard]] static auto MakeEndpointId(const Endpoint &endpoint) -> std::string;
 

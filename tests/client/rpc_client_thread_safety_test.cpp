@@ -19,7 +19,7 @@
 #include "io/socket.h"
 #include "proto/echo.pb.h"
 #include "protocol/frame_codec.h"
-#include "protocol/protocol_message.h"
+#include "protocol/rpc_envelope.h"
 
 namespace {
 
@@ -40,14 +40,14 @@ class EchoTestServer final {
     xrpc::io::Socket socket = listener_.Accept();
     std::string buffer;
     xrpc::FrameCodec codec;
-    std::vector<xrpc::RawRequest> requests;
+    std::vector<xrpc::RequestEnvelope> requests;
     requests.reserve(request_count);
     for (std::size_t handled = 0; handled < request_count; ++handled) {
       requests.push_back(ReadRequest(socket, buffer, codec));
     }
 
     for (auto it = requests.rbegin(); it != requests.rend(); ++it) {
-      socket.WriteAll(codec.EncodeResponse(MakeEchoResponse(*it)));
+      socket.WriteAll(codec.Encode(MakeEchoResponse(*it)));
     }
     socket.Close();
   }
@@ -57,7 +57,7 @@ class EchoTestServer final {
     xrpc::io::Socket socket = listener_.Accept();
     std::string buffer;
     xrpc::FrameCodec codec;
-    const xrpc::RawRequest request = ReadRequest(socket, buffer, codec);
+    const xrpc::RequestEnvelope request = ReadRequest(socket, buffer, codec);
     request_received.set_value();
 
     release_response.wait();
@@ -68,21 +68,22 @@ class EchoTestServer final {
     const int poll_result = ::poll(&client, 1, 50);
     extra_request_received = poll_result > 0 && (client.revents & POLLIN) != 0;
 
-    socket.WriteAll(codec.EncodeResponse(MakeEchoResponse(request)));
+    socket.WriteAll(codec.Encode(MakeEchoResponse(request)));
     socket.Close();
   }
 
  private:
-  static auto ReadRequest(xrpc::io::Socket &socket, std::string &buffer, xrpc::FrameCodec &codec) -> xrpc::RawRequest {
+  static auto ReadRequest(xrpc::io::Socket &socket, std::string &buffer, xrpc::FrameCodec &codec)
+      -> xrpc::RequestEnvelope {
     char chunk[4096];
     while (true) {
-      const xrpc::DecodeResult decoded = codec.TryDecode(buffer);
-      if (decoded.error_ == xrpc::ProtocolError::Ok && decoded.HasMessage()) {
+      const xrpc::FrameDecodeResult decoded = codec.Decode(buffer);
+      if (decoded.error_ == xrpc::ProtocolError::Ok && decoded.HasEnvelope()) {
         if (!decoded.request_.has_value()) {
           throw std::runtime_error("expected request frame");
         }
 
-        xrpc::RawRequest request = *decoded.request_;
+        xrpc::RequestEnvelope request = *decoded.request_;
         buffer.erase(0, decoded.consumed_);
         return request;
       }
@@ -99,7 +100,7 @@ class EchoTestServer final {
     }
   }
 
-  static auto MakeEchoResponse(const xrpc::RawRequest &request) -> xrpc::RawResponse {
+  static auto MakeEchoResponse(const xrpc::RequestEnvelope &request) -> xrpc::ResponseEnvelope {
     xrpc::test::EchoRequest echo_request;
     if (!echo_request.ParseFromString(request.payload_)) {
       throw std::runtime_error("failed to parse test request");
@@ -108,7 +109,7 @@ class EchoTestServer final {
     xrpc::test::EchoResponse echo_response;
     echo_response.set_message("echo: " + echo_request.message());
 
-    xrpc::RawResponse response;
+    xrpc::ResponseEnvelope response;
     response.request_id_ = request.request_id_;
     response.status_ = xrpc::Status::Ok();
     response.payload_ = echo_response.SerializeAsString();

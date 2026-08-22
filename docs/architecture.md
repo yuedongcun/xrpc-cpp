@@ -98,7 +98,7 @@ flowchart LR
 
 同步核心包含不依赖事件循环也能理解的部分：
 
-- fixed header 和 frame 编解码；
+- frame header 和完整 frame 编解码；
 - Protobuf 元数据和 payload 处理；
 - 请求分发和服务查找；
 - status 与 exception 映射；
@@ -111,12 +111,12 @@ flowchart LR
 每个 frame 的布局是：
 
 ```text
-24-byte fixed header | protobuf metadata header | opaque payload
+24-byte frame header | protobuf metadata | opaque payload
 ```
 
-fixed header 包含 magic、协议版本、消息类型、flags、元数据长度、payload 长度和 request id。类型化调用使用生成的 Protobuf 代码序列化请求和响应；raw 调用不解释 payload，主要用于传输实验。
+frame header 是固定 24 字节的传输前缀，包含 magic、协议版本、消息类型、flags、metadata 大小、payload 大小和 request id。metadata 是 xRPC 自己的 Protobuf 消息：请求侧保存 service/method 路由信息，响应侧保存 RPC status。payload 是用户请求或响应消息序列化后的字节，协议层不会解释它。
 
-fixed header、元数据 header、payload 和完整 frame 都有大小限制。无效的 magic、版本、长度或消息类型会转化为协议错误，而不是触发不受控的内存分配。
+frame header、metadata 和 payload 三个名称分别表示固定传输前缀、RPC 控制信息和用户消息，避免用 `header` 同时指代多个层次。metadata 和 payload 都有大小限制；无效的 magic、版本、长度或消息类型会转化为协议错误，而不是触发不受控的内存分配。
 
 ## 背压
 

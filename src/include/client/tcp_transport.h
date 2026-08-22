@@ -12,11 +12,11 @@
 #include <thread>
 #include <unordered_map>
 
+#include "client/call_attempt_result.h"
 #include "client/effective_call_options.h"
-#include "client/raw_call_result.h"
 #include "io/socket.h"
 #include "protocol/frame_codec.h"
-#include "protocol/protocol_message.h"
+#include "protocol/rpc_envelope.h"
 
 namespace xrpc {
 
@@ -35,7 +35,7 @@ class TcpTransport final {
 
   ~TcpTransport();
 
-  [[nodiscard]] auto Call(const RawRequest &request, const EffectiveCallOptions &options) -> RawCallResult;
+  [[nodiscard]] auto Call(const RequestEnvelope &request, const EffectiveCallOptions &options) -> CallAttemptResult;
 
   // Internal failure and lifecycle cleanup; not a separate concurrent API.
   void Close();
@@ -45,7 +45,7 @@ class TcpTransport final {
     std::uint64_t request_id_ = 0;
     std::mutex mutex_;
     std::condition_variable cv_;
-    std::optional<RawCallResult> result_;
+    std::optional<CallAttemptResult> result_;
   };
 
   void EnsureConnectedWithTimeout(std::chrono::milliseconds timeout);
@@ -64,15 +64,15 @@ class TcpTransport final {
 
   [[nodiscard]] auto RemovePending(std::uint64_t request_id) -> bool;
 
-  void CompletePending(std::uint64_t request_id, RawCallResult result);
+  void CompletePending(std::uint64_t request_id, CallAttemptResult result);
 
   void FailAllPending(const Status &status, RequestCommitState commit_state);
 
   [[nodiscard]] auto WaitForResult(const std::shared_ptr<PendingCall> &pending, std::uint64_t request_id,
-                                   const EffectiveCallOptions &options) -> RawCallResult;
+                                   const EffectiveCallOptions &options) -> CallAttemptResult;
 
   [[nodiscard]] auto WriteRequestFrame(std::uint64_t request_id, std::string_view frame,
-                                       const EffectiveCallOptions &options) -> std::optional<RawCallResult>;
+                                       const EffectiveCallOptions &options) -> std::optional<CallAttemptResult>;
 
   std::string host_;
 

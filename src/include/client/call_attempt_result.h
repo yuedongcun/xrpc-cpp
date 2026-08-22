@@ -1,4 +1,4 @@
-/** @file raw_call_result.h @brief Defines the internal result of one raw RPC call. */
+/** @file call_attempt_result.h @brief Defines the result of one endpoint call attempt. */
 
 #pragma once
 
@@ -8,7 +8,7 @@
 
 #include <xrpc/status.h>
 
-#include "protocol/protocol_message.h"
+#include "protocol/rpc_envelope.h"
 
 namespace xrpc {
 
@@ -25,12 +25,12 @@ struct CallFailure {
   RequestCommitState commit_state_ = RequestCommitState::NotSent;
 };
 
-struct RawCallResult {
-  explicit RawCallResult(RawResponse response) : response_(std::move(response)) {}
+struct CallAttemptResult {
+  explicit CallAttemptResult(ResponseEnvelope response) : response_(std::move(response)) {}
 
-  explicit RawCallResult(CallFailure failure) : failure_(std::move(failure)) {}
+  explicit CallAttemptResult(CallFailure failure) : failure_(std::move(failure)) {}
 
-  std::optional<RawResponse> response_;
+  std::optional<ResponseEnvelope> response_;
 
   std::optional<CallFailure> failure_;
 
@@ -46,17 +46,17 @@ struct RawCallResult {
     return HasFailure() && failure().commit_state_ == RequestCommitState::MaybeSent;
   }
 
-  [[nodiscard]] auto response() const -> const RawResponse & { return *response_; }
+  [[nodiscard]] auto response() const -> const ResponseEnvelope & { return *response_; }
 
   [[nodiscard]] auto failure() const -> const CallFailure & { return *failure_; }
 };
 
-[[nodiscard]] inline auto MakeCallFailure(Status status, RequestCommitState commit_state) -> RawCallResult {
-  return RawCallResult(CallFailure{.status_ = std::move(status), .commit_state_ = commit_state});
+[[nodiscard]] inline auto MakeCallFailure(Status status, RequestCommitState commit_state) -> CallAttemptResult {
+  return CallAttemptResult(CallFailure{.status_ = std::move(status), .commit_state_ = commit_state});
 }
 
-[[nodiscard]] inline auto MakeCallSuccess(RawResponse response) -> RawCallResult {
-  return RawCallResult(std::move(response));
+[[nodiscard]] inline auto MakeCallSuccess(ResponseEnvelope response) -> CallAttemptResult {
+  return CallAttemptResult(std::move(response));
 }
 
 }  // namespace xrpc

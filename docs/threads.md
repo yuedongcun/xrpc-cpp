@@ -34,7 +34,7 @@
 │    ↓                                                          │
 │  协议解析                                                     │
 │    ↓                                                          │
-│  RawRequest                                                   │
+│  RequestEnvelope                                              │
 │    ↓                                                          │
 │  TrySubmitBatch ───────────────────────┐                      │
 │                                        │                      │
@@ -47,7 +47,7 @@
 │                        ↓                                      │
 │                   User Handler                                │
 │                        ↓                                      │
-│                   RawResponse                                 │
+│                   ResponseEnvelope                            │
 │                        ↓                                      │
 │                encode response bytes                          │
 │                        ↓                                      │

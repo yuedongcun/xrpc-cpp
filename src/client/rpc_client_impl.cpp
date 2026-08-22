@@ -41,7 +41,7 @@ auto RpcClient::Impl::Call(std::string service_name, std::string method_name, st
     return StatusOr<std::string>(call_options_status);
   }
 
-  RawRequest request;
+  RequestEnvelope request;
   request.request_id_ = NextRequestId();
   request.service_name_ = std::move(service_name);
   request.method_name_ = std::move(method_name);
@@ -52,12 +52,12 @@ auto RpcClient::Impl::Call(std::string service_name, std::string method_name, st
     return StatusOr<std::string>(refresh_status);
   }
 
-  RawCallResult result = CallEndpoints(request, options);
+  CallAttemptResult result = CallEndpoints(request, options);
   if (!result.HasResponse()) {
     return StatusOr<std::string>(result.failure().status_);
   }
 
-  const RawResponse &response = result.response();
+  const ResponseEnvelope &response = result.response();
   if (!response.status_.ok()) {
     return StatusOr<std::string>(response.status_);
   }
@@ -116,9 +116,9 @@ auto RpcClient::Impl::LoadEndpointSet() const -> std::shared_ptr<const EndpointS
   return active_endpoints_;
 }
 
-auto RpcClient::Impl::CallEndpoints(const RawRequest &request, const CallOptions &options) -> RawCallResult {
+auto RpcClient::Impl::CallEndpoints(const RequestEnvelope &request, const CallOptions &options) -> CallAttemptResult {
   const EffectiveCallOptions effective_options = ResolveCallOptions(default_timeout_, options);
-  RawCallResult last_result =
+  CallAttemptResult last_result =
       MakeCallFailure({StatusCode::Unavailable, "no endpoints available"}, RequestCommitState::NotSent);
 
   const std::shared_ptr<const EndpointSet> endpoints = LoadEndpointSet();
@@ -143,8 +143,8 @@ auto RpcClient::Impl::CallEndpoints(const RawRequest &request, const CallOptions
   return last_result;
 }
 
-auto RpcClient::Impl::CallAtEndpoint(const std::shared_ptr<EndpointSlot> &endpoint, const RawRequest &request,
-                                     const EffectiveCallOptions &options) -> RawCallResult {
+auto RpcClient::Impl::CallAtEndpoint(const std::shared_ptr<EndpointSlot> &endpoint, const RequestEnvelope &request,
+                                     const EffectiveCallOptions &options) -> CallAttemptResult {
   TcpTransport *transport = nullptr;
   {
     std::lock_guard lock(endpoint->mutex_);

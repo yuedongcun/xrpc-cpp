@@ -17,7 +17,7 @@
 #include "io/socket.h"
 #include "proto/echo.pb.h"
 #include "protocol/frame_codec.h"
-#include "protocol/protocol_message.h"
+#include "protocol/rpc_envelope.h"
 
 namespace {
 
@@ -37,7 +37,7 @@ class EchoTestServer final {
     xrpc::FrameCodec codec;
 
     while (true) {
-      const xrpc::DecodeResult decoded = codec.TryDecode(buffer);
+      const xrpc::FrameDecodeResult decoded = codec.Decode(buffer);
       if (decoded.error_ == xrpc::ProtocolError::Ok && decoded.request_.has_value()) {
         xrpc::test::EchoRequest request;
         ASSERT_TRUE(request.ParseFromString(decoded.request_->payload_));
@@ -45,10 +45,10 @@ class EchoTestServer final {
         xrpc::test::EchoResponse response;
         response.set_message("echo: " + request.message());
 
-        xrpc::RawResponse protocol_response;
-        protocol_response.request_id_ = decoded.request_->request_id_;
-        protocol_response.payload_ = response.SerializeAsString();
-        socket.WriteAll(codec.EncodeResponse(protocol_response));
+        xrpc::ResponseEnvelope response_envelope;
+        response_envelope.request_id_ = decoded.request_->request_id_;
+        response_envelope.payload_ = response.SerializeAsString();
+        socket.WriteAll(codec.Encode(response_envelope));
         return;
       }
 

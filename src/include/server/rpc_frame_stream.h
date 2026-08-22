@@ -18,32 +18,32 @@
 #include <vector>
 
 #include "protocol/frame_codec.h"
-#include "protocol/protocol_message.h"
+#include "protocol/rpc_envelope.h"
 
 namespace xrpc {
 
 /**
- * @brief Move-oriented batch of decoded RPC requests.
+ * @brief Move-oriented batch of decoded request envelopes.
  *
- * The first request is stored separately so the common single-request case
- * does not require allocating the additional-request vector. Further requests
- * are appended to the vector.
+ * The first envelope is stored separately so the common single-request case
+ * does not require allocating the additional-request vector. Further
+ * envelopes are appended to the vector.
  */
-class RawRequestBatch final {
+class RequestEnvelopeBatch final {
  public:
-  void Push(RawRequest request);
+  void Push(RequestEnvelope request);
 
   [[nodiscard]] auto empty() const -> bool { return size() == 0; }
 
   [[nodiscard]] auto size() const -> std::size_t;
 
-  [[nodiscard]] auto operator[](std::size_t index) const -> const RawRequest &;
+  [[nodiscard]] auto operator[](std::size_t index) const -> const RequestEnvelope &;
 
   /**
-   * @brief Moves each request into `callback` in decode order.
+   * @brief Moves each envelope into `callback` in decode order.
    *
-   * Iteration stops and returns `false` when the callback rejects a request;
-   * otherwise all requests are consumed and `true` is returned.
+   * Iteration stops and returns `false` when the callback rejects an envelope;
+   * otherwise all envelopes are consumed and `true` is returned.
    */
   template <typename Callback>
   auto ConsumeEach(Callback &&callback) -> bool {
@@ -51,21 +51,20 @@ class RawRequestBatch final {
       return false;
     }
     return std::ranges::all_of(additional_requests_,
-                               [&callback](RawRequest &request) -> bool { return callback(std::move(request)); });
+                               [&callback](RequestEnvelope &request) -> bool { return callback(std::move(request)); });
   }
 
  private:
-  std::optional<RawRequest> first_request_;
+  std::optional<RequestEnvelope> first_request_;
 
-  std::vector<RawRequest> additional_requests_;
+  std::vector<RequestEnvelope> additional_requests_;
 };
 
 /**
- * @brief Requests decoded from one feed together with the resulting stream
- * state.
+ * @brief Request envelopes decoded from one feed together with the resulting stream state.
  */
 struct FrameStreamFeedResult {
-  RawRequestBatch requests_;
+  RequestEnvelopeBatch requests_;
 
   // True when the frame stream can no longer accept or decode input.
   bool closed_ = false;
@@ -79,20 +78,20 @@ struct FrameStreamFeedResult {
  * retained across calls until enough data arrives to decode a request.
  *
  * A protocol error permanently closes the stream. Once closed, later calls to
- * `FeedBytes()` produce no requests.
+ * `FeedBytes()` produce no request envelopes.
  */
 class RpcFrameStream final {
  public:
   explicit RpcFrameStream(ProtocolLimits protocol_limits = {});
 
   /**
-   * @brief Appends received bytes and decodes all complete requests available.
+   * @brief Appends received bytes and decodes all complete request frames available.
    *
    * Incomplete trailing bytes remain buffered for the next feed.
    */
   [[nodiscard]] auto FeedBytes(std::string_view bytes) -> FrameStreamFeedResult;
 
-  [[nodiscard]] auto EncodeResponse(RawResponse &&response) const -> std::string;
+  [[nodiscard]] auto EncodeResponse(ResponseEnvelope &&response) const -> std::string;
 
  private:
   /**
@@ -121,12 +120,9 @@ class RpcFrameStream final {
     std::size_t read_offset_ = 0;
   };
 
-  [[nodiscard]] auto DecodeAvailableRequests() -> RawRequestBatch;
+  [[nodiscard]] auto DecodeAvailableRequests() -> RequestEnvelopeBatch;
 
   ByteBuffer buffer_;
-
-  // Caches a decoded request header while waiting for the remaining frame bytes.
-  RequestHeaderDecodeCache request_header_cache_;
 
   ProtocolLimits protocol_limits_;
 

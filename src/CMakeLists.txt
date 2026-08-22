@@ -3,7 +3,7 @@ set(XRPC_GEN_DIR "${CMAKE_BINARY_DIR}/gen/protocol")
 
 file(MAKE_DIRECTORY "${XRPC_GEN_DIR}")
 
-add_library(xrpc_proto OBJECT "${XRPC_PROTO_ROOT}/xrpc_header.proto")
+add_library(xrpc_proto OBJECT "${XRPC_PROTO_ROOT}/frame_metadata.proto")
 
 target_link_libraries(xrpc_proto PUBLIC protobuf::libprotobuf)
 
@@ -25,7 +25,7 @@ set(XRPC_SOURCES
     io/uring_context.cpp
     io/uring_context_operations.cpp
     io/uring_context_control.cpp
-    protocol/fixed_header.cpp
+    protocol/frame_header.cpp
     protocol/frame_codec.cpp
     common/xrpc_exception.cpp
     client/client_config.cpp

@@ -1,4 +1,4 @@
-#include <protocol/xrpc/xrpc_header.pb.h>
+#include <protocol/xrpc/frame_metadata.pb.h>
 
 #include <algorithm>
 #include <array>
@@ -31,7 +31,7 @@
 
 #include "benchmark_stats.h"
 #include "proto/echo.pb.h"
-#include "protocol/fixed_header.h"
+#include "protocol/frame_header.h"
 
 namespace xrpc::benchmark {
 
@@ -204,13 +204,13 @@ void CloseFd(int &fd) {
   fd = -1;
 }
 
-auto BuildRequestHeaderBytes() -> std::string {
-  RpcRequestHeader header;
-  header.set_service_name(std::string(SERVICE_NAME));
-  header.set_method_name(std::string(METHOD_NAME));
+auto BuildRequestMetadataBytes() -> std::string {
+  RequestMetadata metadata;
+  metadata.set_service_name(std::string(SERVICE_NAME));
+  metadata.set_method_name(std::string(METHOD_NAME));
 
   std::string bytes;
-  header.SerializeToString(&bytes);
+  metadata.SerializeToString(&bytes);
   return bytes;
 }
 
@@ -226,53 +226,53 @@ auto BuildBenchmarkPayload(const FirehoseConfig &config) -> BenchmarkPayload {
   };
 }
 
-void AppendRequestFrame(std::uint64_t request_id, std::string_view request_header, std::string_view payload,
+void AppendRequestFrame(std::uint64_t request_id, std::string_view request_metadata, std::string_view payload,
                         std::string &frame) {
-  FixedHeader header;
+  FrameHeader header;
   header.message_type_ = MessageType::Request;
   header.request_id_ = request_id;
-  header.header_len_ = static_cast<std::uint32_t>(request_header.size());
-  header.payload_len_ = static_cast<std::uint32_t>(payload.size());
+  header.metadata_size_ = static_cast<std::uint32_t>(request_metadata.size());
+  header.payload_size_ = static_cast<std::uint32_t>(payload.size());
 
-  std::array<char, FixedHeader::SIZE> fixed_header{};
-  FixedHeader::EncodeTo(header, fixed_header.data());
-  frame.append(fixed_header.data(), fixed_header.size());
-  frame.append(request_header);
+  std::array<char, FrameHeader::SIZE> frame_header{};
+  FrameHeader::EncodeTo(header, frame_header.data());
+  frame.append(frame_header.data(), frame_header.size());
+  frame.append(request_metadata);
   frame.append(payload);
 }
 
 auto TryDecodeResponse(std::string_view buffer, std::string_view expected_payload)
     -> std::optional<DecodedFirehoseResponse> {
-  if (buffer.size() < FixedHeader::SIZE) {
+  if (buffer.size() < FrameHeader::SIZE) {
     return std::nullopt;
   }
 
-  std::optional<FixedHeader> header = FixedHeader::Decode(buffer.substr(0, FixedHeader::SIZE));
+  std::optional<FrameHeader> header = FrameHeader::Decode(buffer.substr(0, FrameHeader::SIZE));
   if (!header.has_value()) {
-    throw std::runtime_error("response contains an invalid fixed header");
+    throw std::runtime_error("response contains an invalid frame header");
   }
-  if (header->version_ != FixedHeader::VERSION || header->message_type_ != MessageType::Response) {
+  if (header->version_ != FrameHeader::VERSION || header->message_type_ != MessageType::Response) {
     throw std::runtime_error("response contains an invalid message type");
   }
 
-  const std::size_t total_size = FixedHeader::SIZE + static_cast<std::size_t>(header->header_len_) +
-                                 static_cast<std::size_t>(header->payload_len_);
+  const std::size_t total_size = FrameHeader::SIZE + static_cast<std::size_t>(header->metadata_size_) +
+                                 static_cast<std::size_t>(header->payload_size_);
   if (buffer.size() < total_size) {
     return std::nullopt;
   }
 
-  const std::string_view header_bytes = buffer.substr(FixedHeader::SIZE, header->header_len_);
-  const std::string_view payload = buffer.substr(FixedHeader::SIZE + header->header_len_, header->payload_len_);
+  const std::string_view metadata_bytes = buffer.substr(FrameHeader::SIZE, header->metadata_size_);
+  const std::string_view payload = buffer.substr(FrameHeader::SIZE + header->metadata_size_, header->payload_size_);
 
   bool ok = false;
-  if (header_bytes.empty()) {
+  if (metadata_bytes.empty()) {
     ok = payload == expected_payload;
   } else {
-    RpcResponseHeader response_header;
-    if (!response_header.ParseFromArray(header_bytes.data(), static_cast<int>(header_bytes.size()))) {
-      throw std::runtime_error("response contains an invalid RPC status header");
+    ResponseMetadata response_metadata;
+    if (!response_metadata.ParseFromArray(metadata_bytes.data(), static_cast<int>(metadata_bytes.size()))) {
+      throw std::runtime_error("response contains an invalid response metadata");
     }
-    ok = response_header.error_code() == 0 && payload == expected_payload;
+    ok = response_metadata.error_code() == 0 && payload == expected_payload;
   }
 
   return DecodedFirehoseResponse{
@@ -290,7 +290,7 @@ class EpollFirehoseConnection final {
         port_(port),
         request_payload_(std::move(request_payload)),
         expected_response_payload_(std::move(expected_response_payload)),
-        request_header_(BuildRequestHeaderBytes()),
+        request_metadata_(BuildRequestMetadataBytes()),
         slots_(target_inflight) {
     if (target_inflight == 0) {
       throw std::invalid_argument("firehose per-connection inflight must be greater than 0");
@@ -300,7 +300,8 @@ class EpollFirehoseConnection final {
       free_slots_.push_back(i);
     }
     read_buffer_.reserve(SOCKET_BUFFER_SIZE);
-    write_buffer_.reserve(MAX_WRITE_BATCH_BYTES + FixedHeader::SIZE + request_header_.size() + request_payload_.size());
+    write_buffer_.reserve(MAX_WRITE_BATCH_BYTES + FrameHeader::SIZE + request_metadata_.size() +
+                          request_payload_.size());
   }
 
   EpollFirehoseConnection(const EpollFirehoseConnection &) = delete;
@@ -428,7 +429,7 @@ class EpollFirehoseConnection final {
       slot.begin_ = now;
       ++inflight_;
 
-      AppendRequestFrame(slot.request_id_, request_header_, request_payload_, write_buffer_);
+      AppendRequestFrame(slot.request_id_, request_metadata_, request_payload_, write_buffer_);
       submitted_.fetch_add(1, std::memory_order_relaxed);
     }
   }
@@ -570,7 +571,7 @@ class EpollFirehoseConnection final {
   std::uint16_t port_ = 0;
   std::string request_payload_;
   std::string expected_response_payload_;
-  std::string request_header_;
+  std::string request_metadata_;
   int fd_ = -1;
 
   std::vector<FirehoseSlot> slots_;

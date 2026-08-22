@@ -15,7 +15,7 @@
 #include "io/socket.h"
 #include "io/uring_context.h"
 #include "protocol/frame_codec.h"
-#include "protocol/protocol_message.h"
+#include "protocol/rpc_envelope.h"
 #include "server/connection_backpressure.h"
 #include "server/rpc_frame_stream.h"
 #include "server/worker_pool.h"
@@ -87,13 +87,14 @@ class ServerConnection final : public std::enable_shared_from_this<ServerConnect
 
   [[nodiscard]] auto HandleFeedResult(FrameStreamFeedResult &&feed) -> bool;
 
-  [[nodiscard]] auto SubmitDispatchBatch(std::vector<RawRequest> requests) -> bool;
+  [[nodiscard]] auto SubmitDispatchBatch(std::vector<RequestEnvelope> requests) -> bool;
 
-  void ExecuteDispatchBatchOnWorker(const std::weak_ptr<ServerConnection> &target, std::vector<RawRequest> &requests);
+  void ExecuteDispatchBatchOnWorker(const std::weak_ptr<ServerConnection> &target,
+                                    std::vector<RequestEnvelope> &requests);
 
-  [[nodiscard]] auto RejectForBackpressure(RawRequest &&request, std::string message) -> bool;
+  [[nodiscard]] auto RejectForBackpressure(RequestEnvelope &&request, std::string message) -> bool;
 
-  [[nodiscard]] auto EncodeResponseOnWorker(RawResponse &&response) const -> std::string;
+  [[nodiscard]] auto EncodeResponseOnWorker(ResponseEnvelope &&response) const -> std::string;
 
   void TryFinishDrain();
 

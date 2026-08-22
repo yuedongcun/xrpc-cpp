@@ -51,8 +51,8 @@ void RpcServer::Impl::RegisterMethod(MethodRegistration registration) {
   }
 
   auto invoke = std::move(registration.invoke_);
-  RawHandler handler = [invoke = std::move(invoke)](const RawRequest &request) -> RawResponse {
-    RawResponse response;
+  RequestHandler handler = [invoke = std::move(invoke)](const RequestEnvelope &request) -> ResponseEnvelope {
+    ResponseEnvelope response;
     response.request_id_ = request.request_id_;
     StatusOr<std::string> result = invoke(request.payload_);
     if (!result.ok()) {
@@ -63,7 +63,7 @@ void RpcServer::Impl::RegisterMethod(MethodRegistration registration) {
     return response;
   };
 
-  registry_.RegisterRaw(registration.service_name_, registration.method_name_, std::move(handler));
+  registry_.Register(registration.service_name_, registration.method_name_, std::move(handler));
 }
 
 void RpcServer::Impl::Listen(std::string_view host, std::uint16_t port) {

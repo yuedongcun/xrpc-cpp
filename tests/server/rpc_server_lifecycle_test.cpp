@@ -16,7 +16,7 @@
 #include "io/socket.h"
 #include "proto/echo.pb.h"
 #include "protocol/frame_codec.h"
-#include "protocol/protocol_message.h"
+#include "protocol/rpc_envelope.h"
 
 namespace {
 
@@ -40,14 +40,14 @@ auto MakeRequestFrame(std::string message, std::uint64_t request_id) -> std::str
   xrpc::test::EchoRequest request;
   request.set_message(std::move(message));
 
-  xrpc::RawRequest protocol_request;
-  protocol_request.request_id_ = request_id;
-  protocol_request.service_name_ = "EchoService";
-  protocol_request.method_name_ = "Echo";
-  protocol_request.payload_ = request.SerializeAsString();
+  xrpc::RequestEnvelope request_envelope;
+  request_envelope.request_id_ = request_id;
+  request_envelope.service_name_ = "EchoService";
+  request_envelope.method_name_ = "Echo";
+  request_envelope.payload_ = request.SerializeAsString();
 
   xrpc::FrameCodec codec;
-  return codec.EncodeRequest(protocol_request);
+  return codec.Encode(request_envelope);
 }
 
 auto RecvFrame(xrpc::io::Socket &socket) -> std::string {
@@ -56,7 +56,7 @@ auto RecvFrame(xrpc::io::Socket &socket) -> std::string {
   xrpc::FrameCodec codec;
 
   while (true) {
-    const xrpc::DecodeResult decoded = codec.TryDecode(buffer);
+    const xrpc::FrameDecodeResult decoded = codec.Decode(buffer);
     if (decoded.error_ == xrpc::ProtocolError::Ok && decoded.response_.has_value()) {
       std::string frame = buffer.substr(0, decoded.consumed_);
       buffer.erase(0, decoded.consumed_);
@@ -171,7 +171,7 @@ TEST(RpcServerLifecycleTest, StopDrainsAdmittedHandlerAndWritesResponse) {
   release_handler.set_value();
   const std::string response_frame = RecvFrame(client_socket);
   xrpc::FrameCodec codec;
-  const xrpc::DecodeResult decoded = codec.TryDecode(response_frame);
+  const xrpc::FrameDecodeResult decoded = codec.Decode(response_frame);
   ASSERT_EQ(decoded.error_, xrpc::ProtocolError::Ok);
   ASSERT_TRUE(decoded.response_.has_value());
   EXPECT_EQ(decoded.response_->request_id_, 1U);
@@ -380,7 +380,7 @@ TEST(RpcServerLifecycleTest, PerConnectionInflightLimitReturnsResourceExhausted)
     client_socket.WriteAll(MakeRequestFrame("second", 2));
     const std::string rejection_frame = RecvFrame(client_socket);
     xrpc::FrameCodec codec;
-    const xrpc::DecodeResult decoded = codec.TryDecode(rejection_frame);
+    const xrpc::FrameDecodeResult decoded = codec.Decode(rejection_frame);
     ASSERT_EQ(decoded.error_, xrpc::ProtocolError::Ok);
     ASSERT_TRUE(decoded.response_.has_value());
     EXPECT_EQ(decoded.response_->request_id_, 2U);

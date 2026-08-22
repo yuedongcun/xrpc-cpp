@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package xrpc;
+
+// Routing metadata preceding the serialized user request payload.
+message RequestMetadata {
+  string service_name = 1;
+  string method_name = 2;
+}
+
+// RPC status metadata preceding the serialized user response payload.
+// An empty encoded message represents an OK response without status text.
+message ResponseMetadata {
+  int32 error_code = 1;
+  string error_text = 2;
+}

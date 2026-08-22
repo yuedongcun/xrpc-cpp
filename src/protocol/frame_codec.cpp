@@ -1,8 +1,11 @@
-/** @file frame_codec.cpp @brief Implements xRPC request and response frame encoding. */
+/**
+ * @file frame_codec.cpp
+ * @brief Implements bounded xRPC frame construction, validation, and metadata decoding.
+ */
 
 #include "protocol/frame_codec.h"
 
-#include <protocol/xrpc/xrpc_header.pb.h>
+#include <protocol/xrpc/frame_metadata.pb.h>
 
 #include <cstdint>
 #include <cstring>
@@ -21,45 +24,48 @@ auto FitsProtobufParseArray(std::string_view bytes) -> bool {
   return bytes.size() <= static_cast<std::size_t>(std::numeric_limits<int>::max());
 }
 
-auto FrameSize(std::size_t header_size, std::size_t payload_size) -> std::uint64_t {
-  return static_cast<std::uint64_t>(FixedHeader::SIZE) + static_cast<std::uint64_t>(header_size) +
+auto FrameSize(std::size_t metadata_size, std::size_t payload_size) -> std::uint64_t {
+  return static_cast<std::uint64_t>(FrameHeader::SIZE) + static_cast<std::uint64_t>(metadata_size) +
          static_cast<std::uint64_t>(payload_size);
 }
 
 struct FrameView {
   ProtocolError error_;
   std::size_t consumed_ = 0;
-  FixedHeader header_;
-  std::string_view header_bytes_;
+  FrameHeader header_;
+  std::string_view metadata_bytes_;
   std::string_view payload_;
 };
 
-void ValidateEncodedFrameSize(std::size_t header_size, std::size_t payload_size, const ProtocolLimits &limits) {
-  if (header_size > std::numeric_limits<std::uint32_t>::max() || header_size > limits.max_header_size_) {
-    throw ProtocolException(StatusCode::ResourceExhausted, "protocol header exceeds configured limit");
+void ValidateEncodedFrameSize(std::size_t metadata_size, std::size_t payload_size, const ProtocolLimits &limits) {
+  if (metadata_size > std::numeric_limits<std::uint32_t>::max() || metadata_size > limits.max_metadata_size_) {
+    throw ProtocolException(StatusCode::ResourceExhausted, "protocol metadata exceeds configured limit");
   }
   if (payload_size > std::numeric_limits<std::uint32_t>::max() || payload_size > limits.max_payload_size_) {
     throw ProtocolException(StatusCode::ResourceExhausted, "protocol payload exceeds configured limit");
   }
-  if (FrameSize(header_size, payload_size) > limits.max_frame_size_) {
-    throw ProtocolException(StatusCode::ResourceExhausted, "protocol frame exceeds configured limit");
+  if (FrameSize(metadata_size, payload_size) > std::numeric_limits<std::size_t>::max()) {
+    throw ProtocolException(StatusCode::ResourceExhausted, "protocol frame exceeds the addressable size");
   }
 }
 
-auto BuildFrame(const FixedHeader &hdr, std::string_view header_bytes, std::string_view payload,
+auto BuildFrame(const FrameHeader &header, std::string_view metadata_bytes, std::string_view payload,
                 const ProtocolLimits &limits) -> std::string {
-  ValidateEncodedFrameSize(header_bytes.size(), payload.size(), limits);
-  const std::size_t total_size = FixedHeader::SIZE + header_bytes.size() + payload.size();
+  ValidateEncodedFrameSize(metadata_bytes.size(), payload.size(), limits);
+
+  // Allocate the complete frame once, then write each wire section directly
+  // into its final position.
+  const std::size_t total_size = FrameHeader::SIZE + metadata_bytes.size() + payload.size();
   std::string result;
   result.resize(total_size);
 
   char *write = result.data();
-  FixedHeader::EncodeTo(hdr, write);
-  write += FixedHeader::SIZE;
-  if (!header_bytes.empty()) {
-    std::memcpy(write, header_bytes.data(), header_bytes.size());
+  FrameHeader::EncodeTo(header, write);
+  write += FrameHeader::SIZE;
+  if (!metadata_bytes.empty()) {
+    std::memcpy(write, metadata_bytes.data(), metadata_bytes.size());
   }
-  write += header_bytes.size();
+  write += metadata_bytes.size();
   if (!payload.empty()) {
     std::memcpy(write, payload.data(), payload.size());
   }
@@ -67,90 +73,71 @@ auto BuildFrame(const FixedHeader &hdr, std::string_view header_bytes, std::stri
   return result;
 }
 
-auto EncodeMessage(const RawRequest &request, const ProtocolLimits &limits) -> std::string {
-  RpcRequestHeader pb_hdr;
-  pb_hdr.set_service_name(request.service_name_);
-  pb_hdr.set_method_name(request.method_name_);
+auto BuildRequestFrame(const RequestEnvelope &request, const ProtocolLimits &limits) -> std::string {
+  RequestMetadata metadata;
+  metadata.set_service_name(request.service_name_);
+  metadata.set_method_name(request.method_name_);
 
-  std::string header_bytes;
-  pb_hdr.SerializeToString(&header_bytes);
+  std::string metadata_bytes;
+  metadata.SerializeToString(&metadata_bytes);
 
-  FixedHeader hdr;
-  hdr.message_type_ = MessageType::Request;
-  hdr.request_id_ = request.request_id_;
-  hdr.header_len_ = static_cast<uint32_t>(header_bytes.size());
-  hdr.payload_len_ = static_cast<uint32_t>(request.payload_.size());
+  FrameHeader header;
+  header.message_type_ = MessageType::Request;
+  header.request_id_ = request.request_id_;
+  header.metadata_size_ = static_cast<uint32_t>(metadata_bytes.size());
+  header.payload_size_ = static_cast<uint32_t>(request.payload_.size());
 
-  return BuildFrame(hdr, header_bytes, request.payload_, limits);
+  return BuildFrame(header, metadata_bytes, request.payload_, limits);
 }
 
-auto EncodeResponseHeader(const RawResponse &response) -> std::string {
+auto EncodeResponseMetadata(const ResponseEnvelope &response) -> std::string {
+  // The default Protobuf message already represents an OK response without
+  // status text, so its zero-byte encoding can be omitted from the frame.
   if (response.status_.code() == StatusCode::Ok && response.status_.message().empty()) {
     return {};
   }
 
-  RpcResponseHeader pb_hdr;
-  pb_hdr.set_error_code(static_cast<std::int32_t>(response.status_.code()));
-  pb_hdr.set_error_text(response.status_.message());
+  ResponseMetadata metadata;
+  metadata.set_error_code(static_cast<std::int32_t>(response.status_.code()));
+  metadata.set_error_text(response.status_.message());
 
-  std::string header_bytes;
-  pb_hdr.SerializeToString(&header_bytes);
-  return header_bytes;
+  std::string metadata_bytes;
+  metadata.SerializeToString(&metadata_bytes);
+  return metadata_bytes;
 }
 
-auto EncodeMessage(const RawResponse &response, const ProtocolLimits &limits) -> std::string {
-  std::string header_bytes = EncodeResponseHeader(response);
+auto BuildResponseFrame(const ResponseEnvelope &response, const ProtocolLimits &limits) -> std::string {
+  std::string metadata_bytes = EncodeResponseMetadata(response);
 
-  FixedHeader hdr;
-  hdr.message_type_ = MessageType::Response;
-  hdr.request_id_ = response.request_id_;
-  hdr.header_len_ = static_cast<uint32_t>(header_bytes.size());
-  hdr.payload_len_ = static_cast<uint32_t>(response.payload_.size());
+  FrameHeader header;
+  header.message_type_ = MessageType::Response;
+  header.request_id_ = response.request_id_;
+  header.metadata_size_ = static_cast<uint32_t>(metadata_bytes.size());
+  header.payload_size_ = static_cast<uint32_t>(response.payload_.size());
 
-  return BuildFrame(hdr, header_bytes, response.payload_, limits);
+  return BuildFrame(header, metadata_bytes, response.payload_, limits);
 }
 
-auto DecodeRequest(const FixedHeader &hdr, std::string_view header_bytes, std::string_view payload)
-    -> std::optional<RawRequest> {
-  RpcRequestHeader pb_hdr;
-  if (!FitsProtobufParseArray(header_bytes) ||
-      !pb_hdr.ParseFromArray(header_bytes.data(), static_cast<int>(header_bytes.size()))) {
+auto DecodeRequestEnvelope(const FrameHeader &header, std::string_view metadata_bytes, std::string_view payload)
+    -> std::optional<RequestEnvelope> {
+  RequestMetadata metadata;
+  if (!FitsProtobufParseArray(metadata_bytes) ||
+      !metadata.ParseFromArray(metadata_bytes.data(), static_cast<int>(metadata_bytes.size()))) {
     return std::nullopt;
   }
 
-  RawRequest req;
-  req.request_id_ = hdr.request_id_;
-  req.service_name_ = pb_hdr.service_name();
-  req.method_name_ = pb_hdr.method_name();
+  RequestEnvelope req;
+  req.request_id_ = header.request_id_;
+  req.service_name_ = metadata.service_name();
+  req.method_name_ = metadata.method_name();
   req.payload_ = std::string(payload);
 
   return req;
 }
 
-auto DecodeRequest(const FixedHeader &hdr, std::string_view header_bytes, std::string_view payload,
-                   RequestHeaderDecodeCache &cache) -> std::optional<RawRequest> {
-  if (cache.has_value_ && header_bytes == cache.header_bytes_) {
-    RawRequest req;
-    req.request_id_ = hdr.request_id_;
-    req.service_name_ = cache.service_name_;
-    req.method_name_ = cache.method_name_;
-    req.payload_ = std::string(payload);
-    return req;
-  }
-
-  std::optional<RawRequest> decoded = DecodeRequest(hdr, header_bytes, payload);
-  if (!decoded) {
-    return std::nullopt;
-  }
-
-  cache.header_bytes_.assign(header_bytes);
-  cache.service_name_ = decoded->service_name_;
-  cache.method_name_ = decoded->method_name_;
-  cache.has_value_ = true;
-  return decoded;
-}
-
 auto DecodeStatus(std::int32_t code, std::string message) -> Status {
+  // Unknown wire integers must not escape as application-visible StatusCode
+  // values.
   switch (static_cast<StatusCode>(code)) {
     case StatusCode::Ok:
       return Status::Ok();
@@ -168,45 +155,50 @@ auto DecodeStatus(std::int32_t code, std::string message) -> Status {
   return {StatusCode::DataLoss, "response contains an invalid RPC status code"};
 }
 
-auto DecodeResponse(const FixedHeader &hdr, std::string_view header_bytes, std::string_view payload)
-    -> std::optional<RawResponse> {
-  RpcResponseHeader pb_hdr;
-  if (!FitsProtobufParseArray(header_bytes) ||
-      !pb_hdr.ParseFromArray(header_bytes.data(), static_cast<int>(header_bytes.size()))) {
+auto DecodeResponseEnvelope(const FrameHeader &header, std::string_view metadata_bytes, std::string_view payload)
+    -> std::optional<ResponseEnvelope> {
+  ResponseMetadata metadata;
+  if (!FitsProtobufParseArray(metadata_bytes) ||
+      !metadata.ParseFromArray(metadata_bytes.data(), static_cast<int>(metadata_bytes.size()))) {
     return std::nullopt;
   }
 
-  RawResponse resp;
-  resp.request_id_ = hdr.request_id_;
-  resp.status_ = DecodeStatus(pb_hdr.error_code(), pb_hdr.error_text());
+  ResponseEnvelope resp;
+  resp.request_id_ = header.request_id_;
+  resp.status_ = DecodeStatus(metadata.error_code(), metadata.error_text());
   resp.payload_ = std::string(payload);
 
   return resp;
 }
 
+/**
+ * Validates framing and returns non-owning views into the caller's buffer.
+ * Metadata and payload decoding begin only after a complete bounded frame is
+ * available.
+ */
 auto ReadFrame(std::string_view buf, const ProtocolLimits &limits) -> FrameView {
-  if (buf.size() < FixedHeader::SIZE) {
+  if (buf.size() < FrameHeader::SIZE) {
     return {.error_ = ProtocolError::NeedMoreData};
   }
 
-  auto opt_hdr = FixedHeader::Decode(buf.substr(0, FixedHeader::SIZE));
-  if (!opt_hdr) {
+  std::optional<FrameHeader> decoded_header = FrameHeader::Decode(buf.substr(0, FrameHeader::SIZE));
+  if (!decoded_header) {
     return {.error_ = ProtocolError::InvalidMagic};
   }
 
-  const auto &hdr = *opt_hdr;
+  const FrameHeader &header = *decoded_header;
 
-  if (hdr.version_ != FixedHeader::VERSION) {
+  if (header.version_ != FrameHeader::VERSION) {
     return {.error_ = ProtocolError::UnsupportedVersion};
   }
 
-  if (hdr.header_len_ > limits.max_header_size_ || hdr.payload_len_ > limits.max_payload_size_ ||
-      FrameSize(hdr.header_len_, hdr.payload_len_) > limits.max_frame_size_) {
+  if (header.metadata_size_ > limits.max_metadata_size_ || header.payload_size_ > limits.max_payload_size_ ||
+      FrameSize(header.metadata_size_, header.payload_size_) > std::numeric_limits<std::size_t>::max()) {
     return {.error_ = ProtocolError::FrameTooLarge};
   }
 
-  const std::size_t total =
-      FixedHeader::SIZE + static_cast<std::size_t>(hdr.header_len_) + static_cast<std::size_t>(hdr.payload_len_);
+  const std::size_t total = FrameHeader::SIZE + static_cast<std::size_t>(header.metadata_size_) +
+                            static_cast<std::size_t>(header.payload_size_);
   if (buf.size() < total) {
     return {.error_ = ProtocolError::NeedMoreData};
   }
@@ -214,9 +206,9 @@ auto ReadFrame(std::string_view buf, const ProtocolLimits &limits) -> FrameView 
   return {
       .error_ = ProtocolError::Ok,
       .consumed_ = total,
-      .header_ = hdr,
-      .header_bytes_ = buf.substr(FixedHeader::SIZE, hdr.header_len_),
-      .payload_ = buf.substr(FixedHeader::SIZE + hdr.header_len_, hdr.payload_len_),
+      .header_ = header,
+      .metadata_bytes_ = buf.substr(FrameHeader::SIZE, header.metadata_size_),
+      .payload_ = buf.substr(FrameHeader::SIZE + header.metadata_size_, header.payload_size_),
   };
 }
 
@@ -232,53 +224,20 @@ auto MakeProtocolLimits(std::size_t max_payload_size) -> ProtocolLimits {
 
   ProtocolLimits limits;
   limits.max_payload_size_ = max_payload_size;
-  limits.max_frame_size_ = FixedHeader::SIZE + limits.max_header_size_ + limits.max_payload_size_;
   return limits;
 }
 
-FrameCodec::FrameCodec(ProtocolLimits limits) : limits_(limits) {
-  if (limits_.max_frame_size_ < FixedHeader::SIZE) {
-    throw ConfigException("protocol max_frame_size must include the fixed header");
-  }
+FrameCodec::FrameCodec(ProtocolLimits limits) : limits_(limits) {}
+
+auto FrameCodec::Encode(const RequestEnvelope &request) const -> std::string {
+  return BuildRequestFrame(request, limits_);
 }
 
-auto FrameCodec::EncodeRequest(const RawRequest &request) -> std::string { return EncodeMessage(request, limits_); }
-
-auto FrameCodec::EncodeResponse(const RawResponse &response) -> std::string { return EncodeMessage(response, limits_); }
-
-auto FrameCodec::TryDecode(std::string_view buf) -> DecodeResult { return TryDecode(buf, nullptr); }
-
-auto FrameCodec::TryDecode(std::string_view buf, RequestHeaderDecodeCache &request_header_cache) -> DecodeResult {
-  return TryDecode(buf, &request_header_cache);
+auto FrameCodec::Encode(const ResponseEnvelope &response) const -> std::string {
+  return BuildResponseFrame(response, limits_);
 }
 
-auto FrameCodec::TryDecodeRequest(std::string_view buf, RequestHeaderDecodeCache &request_header_cache)
-    -> RequestDecodeResult {
-  const FrameView frame = ReadFrame(buf, limits_);
-  if (frame.error_ != ProtocolError::Ok) {
-    return {.error_ = frame.error_, .consumed_ = frame.consumed_, .request_ = std::nullopt};
-  }
-
-  switch (frame.header_.message_type_) {
-    case MessageType::Request:
-      break;
-    case MessageType::Heartbeat:
-    case MessageType::HeartbeatAck:
-      return {.error_ = ProtocolError::UnsupportedMessageType, .consumed_ = frame.consumed_, .request_ = std::nullopt};
-    default:
-      return {.error_ = ProtocolError::InvalidMessageType, .consumed_ = frame.consumed_, .request_ = std::nullopt};
-  }
-
-  std::optional<RawRequest> request =
-      DecodeRequest(frame.header_, frame.header_bytes_, frame.payload_, request_header_cache);
-  if (!request) {
-    return {.error_ = ProtocolError::DecodeError, .consumed_ = frame.consumed_, .request_ = std::nullopt};
-  }
-
-  return {.error_ = ProtocolError::Ok, .consumed_ = frame.consumed_, .request_ = std::move(request)};
-}
-
-auto FrameCodec::TryDecode(std::string_view buf, RequestHeaderDecodeCache *request_header_cache) -> DecodeResult {
+auto FrameCodec::Decode(std::string_view buf) const -> FrameDecodeResult {
   const FrameView frame = ReadFrame(buf, limits_);
   if (frame.error_ != ProtocolError::Ok) {
     return {.error_ = frame.error_, .consumed_ = frame.consumed_};
@@ -286,12 +245,8 @@ auto FrameCodec::TryDecode(std::string_view buf, RequestHeaderDecodeCache *reque
 
   switch (frame.header_.message_type_) {
     case MessageType::Request: {
-      std::optional<RawRequest> request;
-      if (request_header_cache != nullptr) {
-        request = DecodeRequest(frame.header_, frame.header_bytes_, frame.payload_, *request_header_cache);
-      } else {
-        request = DecodeRequest(frame.header_, frame.header_bytes_, frame.payload_);
-      }
+      std::optional<RequestEnvelope> request =
+          DecodeRequestEnvelope(frame.header_, frame.metadata_bytes_, frame.payload_);
       if (!request) {
         return {.error_ = ProtocolError::DecodeError, .consumed_ = frame.consumed_};
       }
@@ -299,7 +254,8 @@ auto FrameCodec::TryDecode(std::string_view buf, RequestHeaderDecodeCache *reque
     }
 
     case MessageType::Response: {
-      std::optional<RawResponse> response = DecodeResponse(frame.header_, frame.header_bytes_, frame.payload_);
+      std::optional<ResponseEnvelope> response =
+          DecodeResponseEnvelope(frame.header_, frame.metadata_bytes_, frame.payload_);
       if (!response) {
         return {.error_ = ProtocolError::DecodeError, .consumed_ = frame.consumed_};
       }

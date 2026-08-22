@@ -10,7 +10,7 @@
 
 #include "common/xrpc_exception.h"
 #include "protocol/frame_codec.h"
-#include "protocol/protocol_message.h"
+#include "protocol/rpc_envelope.h"
 
 namespace xrpc {
 
@@ -60,7 +60,7 @@ void RpcFrameStream::ByteBuffer::Compact() {
   read_offset_ = 0;
 }
 
-void RawRequestBatch::Push(RawRequest request) {
+void RequestEnvelopeBatch::Push(RequestEnvelope request) {
   if (!first_request_.has_value()) {
     first_request_.emplace(std::move(request));
     return;
@@ -68,11 +68,11 @@ void RawRequestBatch::Push(RawRequest request) {
   additional_requests_.push_back(std::move(request));
 }
 
-auto RawRequestBatch::size() const -> std::size_t {
+auto RequestEnvelopeBatch::size() const -> std::size_t {
   return (first_request_.has_value() ? 1U : 0U) + additional_requests_.size();
 }
 
-auto RawRequestBatch::operator[](std::size_t index) const -> const RawRequest & {
+auto RequestEnvelopeBatch::operator[](std::size_t index) const -> const RequestEnvelope & {
   if (!first_request_.has_value()) {
     return additional_requests_[index];
   }
@@ -90,21 +90,21 @@ auto RpcFrameStream::FeedBytes(std::string_view bytes) -> FrameStreamFeedResult 
   }
 
   buffer_.Append(bytes);
-  RawRequestBatch requests = DecodeAvailableRequests();
+  RequestEnvelopeBatch requests = DecodeAvailableRequests();
   return {.requests_ = std::move(requests), .closed_ = closed_};
 }
 
-auto RpcFrameStream::EncodeResponse(RawResponse &&response) const -> std::string {
+auto RpcFrameStream::EncodeResponse(ResponseEnvelope &&response) const -> std::string {
   FrameCodec codec(protocol_limits_);
-  return codec.EncodeResponse(response);
+  return codec.Encode(response);
 }
 
-auto RpcFrameStream::DecodeAvailableRequests() -> RawRequestBatch {
-  RawRequestBatch requests;
+auto RpcFrameStream::DecodeAvailableRequests() -> RequestEnvelopeBatch {
+  RequestEnvelopeBatch requests;
   FrameCodec codec(protocol_limits_);
 
   while (!buffer_.Empty() && !closed_) {
-    RequestDecodeResult decoded = codec.TryDecodeRequest(buffer_.ReadableBytes(), request_header_cache_);
+    FrameDecodeResult decoded = codec.Decode(buffer_.ReadableBytes());
 
     // Preserve an incomplete trailing frame for the next FeedBytes() call.
     if (decoded.error_ == ProtocolError::NeedMoreData) {

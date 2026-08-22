@@ -84,14 +84,14 @@ auto ServerConnection::HandleFeedResult(FrameStreamFeedResult &&feed) -> bool {
 
   assert(inflight_requests_ <= limits_.max_inflight_);
   if (request_count > limits_.max_inflight_ - inflight_requests_) {
-    return feed.requests_.ConsumeEach([this](RawRequest request) -> bool {
+    return feed.requests_.ConsumeEach([this](RequestEnvelope request) -> bool {
       return RejectForBackpressure(std::move(request), "server per-connection in-flight limit exceeded");
     });
   }
 
-  std::vector<RawRequest> requests;
+  std::vector<RequestEnvelope> requests;
   requests.reserve(request_count);
-  feed.requests_.ConsumeEach([&requests](RawRequest request) -> bool {
+  feed.requests_.ConsumeEach([&requests](RequestEnvelope request) -> bool {
     requests.push_back(std::move(request));
     return true;
   });
@@ -220,12 +220,12 @@ auto ServerConnection::DrainWriteQueue() -> runtime::Task<void> {
   TryFinishDrain();
 }
 
-auto ServerConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> bool {
+auto ServerConnection::SubmitDispatchBatch(std::vector<RequestEnvelope> requests) -> bool {
   const std::size_t request_count = requests.size();
   assert(request_count > 0);
 
   std::weak_ptr<ServerConnection> weak_self = weak_from_this();
-  auto request_batch = std::make_shared<std::vector<RawRequest>>(std::move(requests));
+  auto request_batch = std::make_shared<std::vector<RequestEnvelope>>(std::move(requests));
   const bool accepted = worker_pool_->TrySubmitBatch(
       [weak_self, request_batch]() -> void {
         std::shared_ptr<ServerConnection> self = weak_self.lock();
@@ -241,7 +241,7 @@ auto ServerConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> 
       BeginDrain();
       return false;
     }
-    for (RawRequest &request : *request_batch) {
+    for (RequestEnvelope &request : *request_batch) {
       if (!RejectForBackpressure(std::move(request), "server global pending job limit exceeded")) {
         return false;
       }
@@ -254,13 +254,13 @@ auto ServerConnection::SubmitDispatchBatch(std::vector<RawRequest> requests) -> 
 }
 
 void ServerConnection::ExecuteDispatchBatchOnWorker(const std::weak_ptr<ServerConnection> &target,
-                                                    std::vector<RawRequest> &requests) {
+                                                    std::vector<RequestEnvelope> &requests) {
   const std::size_t request_count = requests.size();
   std::string batch_response_bytes;
   std::size_t successful_jobs = 0;
 
-  for (RawRequest &request : requests) {
-    RawResponse response = registry_->Dispatch(std::move(request));
+  for (RequestEnvelope &request : requests) {
+    ResponseEnvelope response = registry_->Dispatch(std::move(request));
     try {
       batch_response_bytes.append(EncodeResponseOnWorker(std::move(response)));
       ++successful_jobs;
@@ -282,8 +282,8 @@ void ServerConnection::ExecuteDispatchBatchOnWorker(const std::weak_ptr<ServerCo
   }
 }
 
-auto ServerConnection::RejectForBackpressure(RawRequest &&request, std::string message) -> bool {
-  RawResponse response;
+auto ServerConnection::RejectForBackpressure(RequestEnvelope &&request, std::string message) -> bool {
+  ResponseEnvelope response;
   response.request_id_ = request.request_id_;
   response.status_ = {StatusCode::ResourceExhausted, std::move(message)};
 
@@ -295,9 +295,9 @@ auto ServerConnection::RejectForBackpressure(RawRequest &&request, std::string m
   }
 }
 
-auto ServerConnection::EncodeResponseOnWorker(RawResponse &&response) const -> std::string {
+auto ServerConnection::EncodeResponseOnWorker(ResponseEnvelope &&response) const -> std::string {
   FrameCodec codec(protocol_limits_);
-  return codec.EncodeResponse(response);
+  return codec.Encode(response);
 }
 
 void ServerConnection::TryFinishDrain() {

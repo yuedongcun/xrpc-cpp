@@ -16,7 +16,7 @@
 #include "io/uring_context.h"
 #include "proto/echo.pb.h"
 #include "protocol/frame_codec.h"
-#include "protocol/protocol_message.h"
+#include "protocol/rpc_envelope.h"
 #include "server/dispatch_mailbox.h"
 #include "server/server_connection.h"
 #include "server/service_registry.h"
@@ -33,8 +33,8 @@ auto Echo(const xrpc::test::EchoRequest &request) -> xrpc::test::EchoResponse {
   return response;
 }
 
-auto MakeEchoRawResponse(const xrpc::RawRequest &request) -> xrpc::RawResponse {
-  xrpc::RawResponse response;
+auto MakeEchoResponseEnvelope(const xrpc::RequestEnvelope &request) -> xrpc::ResponseEnvelope {
+  xrpc::ResponseEnvelope response;
   response.request_id_ = request.request_id_;
 
   xrpc::test::EchoRequest parsed_request;
@@ -47,26 +47,26 @@ auto MakeEchoRawResponse(const xrpc::RawRequest &request) -> xrpc::RawResponse {
   return response;
 }
 
-auto MakeEchoHandler() -> xrpc::RawHandler {
-  return [](const xrpc::RawRequest &request) { return MakeEchoRawResponse(request); };
+auto MakeEchoHandler() -> xrpc::RequestHandler {
+  return [](const xrpc::RequestEnvelope &request) { return MakeEchoResponseEnvelope(request); };
 }
 
-auto MakeSlowEchoHandler() -> xrpc::RawHandler {
-  return [](const xrpc::RawRequest &request) {
+auto MakeSlowEchoHandler() -> xrpc::RequestHandler {
+  return [](const xrpc::RequestEnvelope &request) {
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    return MakeEchoRawResponse(request);
+    return MakeEchoResponseEnvelope(request);
   };
 }
 
-auto MakeRegistry(xrpc::RawHandler handler) -> xrpc::ServiceRegistry {
+auto MakeRegistry(xrpc::RequestHandler handler) -> xrpc::ServiceRegistry {
   xrpc::ServiceRegistry registry;
-  registry.RegisterRaw("EchoService", "Echo", handler);
-  registry.RegisterRaw("EchoService", "SlowEcho", std::move(handler));
+  registry.Register("EchoService", "Echo", handler);
+  registry.Register("EchoService", "SlowEcho", std::move(handler));
   return registry;
 }
 
-auto MakeConnectionConfig(xrpc::ConnectionBackpressureLimits limits =
-                              {.max_inflight_ = 128, .max_write_queue_bytes_ = 8U * 1024U * 1024U})
+auto MakeConnectionConfig(xrpc::ConnectionBackpressureLimits limits = {.max_inflight_ = 128,
+                                                                       .max_write_queue_bytes_ = 8U * 1024U * 1024U})
     -> xrpc::ServerConnectionConfig {
   return {.limits_ = limits, .protocol_limits_ = {}};
 }
@@ -75,14 +75,14 @@ auto MakeRequestFrame(std::string message, std::uint64_t request_id) -> std::str
   xrpc::test::EchoRequest request;
   request.set_message(std::move(message));
 
-  xrpc::RawRequest protocol_request;
-  protocol_request.request_id_ = request_id;
-  protocol_request.service_name_ = "EchoService";
-  protocol_request.method_name_ = "Echo";
-  protocol_request.payload_ = request.SerializeAsString();
+  xrpc::RequestEnvelope request_envelope;
+  request_envelope.request_id_ = request_id;
+  request_envelope.service_name_ = "EchoService";
+  request_envelope.method_name_ = "Echo";
+  request_envelope.payload_ = request.SerializeAsString();
 
   xrpc::FrameCodec codec;
-  return codec.EncodeRequest(protocol_request);
+  return codec.Encode(request_envelope);
 }
 
 auto RecvFrame(xrpc::io::Socket &socket, std::string &buffer) -> std::string {
@@ -90,8 +90,8 @@ auto RecvFrame(xrpc::io::Socket &socket, std::string &buffer) -> std::string {
   xrpc::FrameCodec codec;
 
   while (true) {
-    xrpc::DecodeResult decoded = codec.TryDecode(buffer);
-    if (decoded.error_ == xrpc::ProtocolError::Ok && decoded.HasMessage() && decoded.consumed_ <= buffer.size()) {
+    xrpc::FrameDecodeResult decoded = codec.Decode(buffer);
+    if (decoded.error_ == xrpc::ProtocolError::Ok && decoded.HasEnvelope() && decoded.consumed_ <= buffer.size()) {
       std::string frame = buffer.substr(0, decoded.consumed_);
       buffer.erase(0, decoded.consumed_);
       return frame;
@@ -168,7 +168,7 @@ auto WaitTaskDone(xrpc::runtime::Task<void> &task, std::chrono::milliseconds tim
 
 auto DecodeEchoMessage(std::string_view frame, std::uint64_t expected_request_id) -> std::string {
   xrpc::FrameCodec codec;
-  const xrpc::DecodeResult decoded = codec.TryDecode(frame);
+  const xrpc::FrameDecodeResult decoded = codec.Decode(frame);
   EXPECT_EQ(decoded.error_, xrpc::ProtocolError::Ok);
   EXPECT_TRUE(decoded.response_.has_value());
 
@@ -182,7 +182,7 @@ auto DecodeEchoMessage(std::string_view frame, std::uint64_t expected_request_id
 
 auto DecodeResponseStatus(std::string_view frame, std::uint64_t expected_request_id) -> xrpc::Status {
   xrpc::FrameCodec codec;
-  const xrpc::DecodeResult decoded = codec.TryDecode(frame);
+  const xrpc::FrameDecodeResult decoded = codec.Decode(frame);
   EXPECT_EQ(decoded.error_, xrpc::ProtocolError::Ok);
   EXPECT_TRUE(decoded.response_.has_value());
 
@@ -364,22 +364,22 @@ TEST(ServerConnectionTest, HandlesConcurrentResponsesWithWorkerPool) {
 
   xrpc::test::EchoRequest slow_request;
   slow_request.set_message("slow");
-  xrpc::RawRequest slow_protocol_request;
-  slow_protocol_request.request_id_ = 31;
-  slow_protocol_request.service_name_ = "EchoService";
-  slow_protocol_request.method_name_ = "SlowEcho";
-  slow_protocol_request.payload_ = slow_request.SerializeAsString();
+  xrpc::RequestEnvelope slow_request_envelope;
+  slow_request_envelope.request_id_ = 31;
+  slow_request_envelope.service_name_ = "EchoService";
+  slow_request_envelope.method_name_ = "SlowEcho";
+  slow_request_envelope.payload_ = slow_request.SerializeAsString();
 
   xrpc::test::EchoRequest fast_request;
   fast_request.set_message("fast");
-  xrpc::RawRequest fast_protocol_request;
-  fast_protocol_request.request_id_ = 32;
-  fast_protocol_request.service_name_ = "EchoService";
-  fast_protocol_request.method_name_ = "Echo";
-  fast_protocol_request.payload_ = fast_request.SerializeAsString();
+  xrpc::RequestEnvelope fast_request_envelope;
+  fast_request_envelope.request_id_ = 32;
+  fast_request_envelope.service_name_ = "EchoService";
+  fast_request_envelope.method_name_ = "Echo";
+  fast_request_envelope.payload_ = fast_request.SerializeAsString();
 
   xrpc::FrameCodec codec;
-  pair.client_socket_.WriteAll(codec.EncodeRequest(slow_protocol_request) + codec.EncodeRequest(fast_protocol_request));
+  pair.client_socket_.WriteAll(codec.Encode(slow_request_envelope) + codec.Encode(fast_request_envelope));
 
   std::string received_buffer;
   const std::string first_response = RecvFrame(pair.client_socket_, received_buffer);
@@ -390,8 +390,8 @@ TEST(ServerConnectionTest, HandlesConcurrentResponsesWithWorkerPool) {
   ASSERT_TRUE(WaitForConnectionTask(task, context, runner));
   EXPECT_TRUE(connection->IsClosed());
 
-  const xrpc::DecodeResult first_decoded = codec.TryDecode(first_response);
-  const xrpc::DecodeResult second_decoded = codec.TryDecode(second_response);
+  const xrpc::FrameDecodeResult first_decoded = codec.Decode(first_response);
+  const xrpc::FrameDecodeResult second_decoded = codec.Decode(second_response);
   ASSERT_EQ(first_decoded.error_, xrpc::ProtocolError::Ok);
   ASSERT_EQ(second_decoded.error_, xrpc::ProtocolError::Ok);
   ASSERT_TRUE(first_decoded.response_.has_value());
@@ -410,11 +410,11 @@ TEST(ServerConnectionTest, KeepsReadingWhileWorkerHandlerIsPending) {
   std::promise<void> release_handler;
   std::shared_future<void> release_handler_future = release_handler.get_future().share();
 
-  xrpc::RawHandler blocking_handler = [&](const xrpc::RawRequest &request) {
+  xrpc::RequestHandler blocking_handler = [&](const xrpc::RequestEnvelope &request) {
     handler_started.set_value();
     release_handler_future.wait();
 
-    xrpc::RawResponse response;
+    xrpc::ResponseEnvelope response;
     response.request_id_ = request.request_id_;
     response.status_ = xrpc::Status::Ok();
     response.payload_ = request.payload_;
@@ -464,9 +464,9 @@ TEST(ServerConnectionTest, RejectsEntireReadBatchWhenInflightLimitWouldBeExceede
   xrpc::io::UringContext context;
   xrpc::WorkerPool worker_pool(1);
   std::atomic<std::size_t> handler_calls = 0;
-  xrpc::ServiceRegistry registry = MakeRegistry([&handler_calls](const xrpc::RawRequest &request) {
+  xrpc::ServiceRegistry registry = MakeRegistry([&handler_calls](const xrpc::RequestEnvelope &request) {
     ++handler_calls;
-    return MakeEchoRawResponse(request);
+    return MakeEchoResponseEnvelope(request);
   });
   auto mailbox = std::make_shared<xrpc::DispatchMailbox>(context);
   const auto config =
@@ -480,15 +480,15 @@ TEST(ServerConnectionTest, RejectsEntireReadBatchWhenInflightLimitWouldBeExceede
 
   xrpc::test::EchoRequest request;
   request.set_message("slow");
-  xrpc::RawRequest protocol_request;
-  protocol_request.request_id_ = 51;
-  protocol_request.service_name_ = "EchoService";
-  protocol_request.method_name_ = "SlowEcho";
-  protocol_request.payload_ = request.SerializeAsString();
-  xrpc::RawRequest rejected_protocol_request = protocol_request;
-  rejected_protocol_request.request_id_ = 52;
+  xrpc::RequestEnvelope request_envelope;
+  request_envelope.request_id_ = 51;
+  request_envelope.service_name_ = "EchoService";
+  request_envelope.method_name_ = "SlowEcho";
+  request_envelope.payload_ = request.SerializeAsString();
+  xrpc::RequestEnvelope rejected_request_envelope = request_envelope;
+  rejected_request_envelope.request_id_ = 52;
   xrpc::FrameCodec codec;
-  pair.client_socket_.WriteAll(codec.EncodeRequest(protocol_request) + codec.EncodeRequest(rejected_protocol_request));
+  pair.client_socket_.WriteAll(codec.Encode(request_envelope) + codec.Encode(rejected_request_envelope));
 
   std::string received_buffer;
   const std::string first_rejection = RecvFrame(pair.client_socket_, received_buffer);

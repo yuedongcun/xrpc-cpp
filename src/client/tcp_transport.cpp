@@ -14,7 +14,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#include "protocol/protocol_message.h"
+#include "protocol/rpc_envelope.h"
 
 namespace xrpc {
 namespace {
@@ -114,15 +114,15 @@ TcpTransport::TcpTransport(std::string host, std::uint16_t port, ProtocolLimits 
 
 TcpTransport::~TcpTransport() { Close(); }
 
-auto TcpTransport::Call(const RawRequest &request, const EffectiveCallOptions &options) -> RawCallResult {
-  auto fail = [&request](Status status, RequestCommitState state) -> RawCallResult {
+auto TcpTransport::Call(const RequestEnvelope &request, const EffectiveCallOptions &options) -> CallAttemptResult {
+  auto fail = [&request](Status status, RequestCommitState state) -> CallAttemptResult {
     return MakeCallFailure(std::move(status), state);
   };
 
   FrameCodec codec(protocol_limits_);
   std::string request_frame;
   try {
-    request_frame = codec.EncodeRequest(request);
+    request_frame = codec.Encode(request);
   } catch (...) {
     return fail(CaughtExceptionToStatus("failed to encode request frame"), RequestCommitState::NotSent);
   }
@@ -141,7 +141,7 @@ auto TcpTransport::Call(const RawRequest &request, const EffectiveCallOptions &o
                 RequestCommitState::NotSent);
   }
 
-  if (std::optional<RawCallResult> write_failure = WriteRequestFrame(request.request_id_, request_frame, options)) {
+  if (std::optional<CallAttemptResult> write_failure = WriteRequestFrame(request.request_id_, request_frame, options)) {
     return std::move(*write_failure);
   }
 
@@ -206,7 +206,7 @@ void TcpTransport::ReaderLoop(int fd) {
 
   while (true) {
     while (true) {
-      DecodeResult decoded = codec.TryDecode(buffer);
+      FrameDecodeResult decoded = codec.Decode(buffer);
       if (decoded.error_ == ProtocolError::NeedMoreData) {
         break;
       }
@@ -278,7 +278,7 @@ auto TcpTransport::RemovePending(std::uint64_t request_id) -> bool {
   return pending_calls_.erase(request_id) > 0;
 }
 
-void TcpTransport::CompletePending(std::uint64_t request_id, RawCallResult result) {
+void TcpTransport::CompletePending(std::uint64_t request_id, CallAttemptResult result) {
   std::shared_ptr<PendingCall> pending;
   {
     std::lock_guard lock(pending_mutex_);
@@ -318,7 +318,7 @@ void TcpTransport::FailAllPending(const Status &status, RequestCommitState commi
 }
 
 auto TcpTransport::WaitForResult(const std::shared_ptr<PendingCall> &pending, std::uint64_t request_id,
-                                 const EffectiveCallOptions &options) -> RawCallResult {
+                                 const EffectiveCallOptions &options) -> CallAttemptResult {
   std::unique_lock lock(pending->mutex_);
   const auto has_result = [&pending]() -> bool { return pending->result_.has_value(); };
 
@@ -337,7 +337,7 @@ auto TcpTransport::WaitForResult(const std::shared_ptr<PendingCall> &pending, st
 }
 
 auto TcpTransport::WriteRequestFrame(std::uint64_t request_id, std::string_view frame,
-                                     const EffectiveCallOptions &options) -> std::optional<RawCallResult> {
+                                     const EffectiveCallOptions &options) -> std::optional<CallAttemptResult> {
   std::lock_guard write_lock(write_mutex_);
 
   const int fd = ConnectedFd();
