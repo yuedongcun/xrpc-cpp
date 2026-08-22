@@ -8,6 +8,7 @@
 #include <cctype>
 #include <charconv>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -74,13 +75,14 @@ auto ParseListTarget(std::string_view target) -> std::vector<Endpoint> {
 
 }  // namespace
 
-StaticDiscovery::StaticDiscovery(std::string_view target) : endpoints_(ParseListTarget(target)) {}
+StaticDiscovery::StaticDiscovery(std::string_view target)
+    : snapshot_(std::make_shared<const DiscoverySnapshot>(ParseListTarget(target))) {}
 
 auto StaticDiscovery::Start() -> Status { return Status::Ok(); }
 
 void StaticDiscovery::Stop() {}
 
-auto StaticDiscovery::Snapshot() const -> std::vector<Endpoint> { return endpoints_; }
+auto StaticDiscovery::Snapshot() const -> std::shared_ptr<const DiscoverySnapshot> { return snapshot_; }
 
 auto StaticDiscovery::last_error() const -> std::string { return {}; }
 

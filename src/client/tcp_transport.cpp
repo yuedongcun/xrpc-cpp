@@ -1,7 +1,14 @@
-/** @file tcp_transport.cpp @brief Implements the blocking TCP client transport. */
+/**
+ * @file tcp_transport.cpp
+ * @brief Implements the synchronous caller-to-reader-thread transport bridge.
+ *
+ * Caller threads serialize socket writes. The reader thread decodes responses,
+ * matches request ids, and wakes the corresponding callers.
+ */
 
 #include "client/tcp_transport.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <exception>
@@ -36,15 +43,18 @@ auto PeerClosedStatus(std::string_view action) -> Status {
 
 auto RemainingTimeout(const EffectiveCallOptions &options) -> std::chrono::milliseconds {
   if (!options.deadline_.has_value()) {
-    return options.timeout_;
+    return std::chrono::milliseconds::zero();
   }
 
   const auto now = std::chrono::steady_clock::now();
-  if (now >= *options.deadline_) {
-    return std::chrono::milliseconds(1);
-  }
+  const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(*options.deadline_ - now);
+  // Zero disables the socket timeout, so preserve a positive budget until the
+  // explicit expiration check reports that the deadline has passed.
+  return std::max(remaining, std::chrono::milliseconds(1));
+}
 
-  return std::chrono::duration_cast<std::chrono::milliseconds>(*options.deadline_ - now);
+auto DeadlineExpired(const EffectiveCallOptions &options) -> bool {
+  return options.deadline_.has_value() && std::chrono::steady_clock::now() >= *options.deadline_;
 }
 
 auto ToTimeval(std::chrono::milliseconds timeout) -> timeval {
@@ -127,8 +137,12 @@ auto TcpTransport::Call(const RequestEnvelope &request, const EffectiveCallOptio
     return fail(CaughtExceptionToStatus("failed to encode request frame"), RequestCommitState::NotSent);
   }
 
+  if (DeadlineExpired(options)) {
+    return fail({StatusCode::DeadlineExceeded, "RPC deadline exceeded"}, RequestCommitState::NotSent);
+  }
+
   try {
-    EnsureConnectedWithTimeout(options.timeout_);
+    EnsureConnectedWithTimeout(RemainingTimeout(options));
   } catch (const io::SocketError &error) {
     return fail(error.status(), RequestCommitState::NotSent);
   } catch (...) {
@@ -136,6 +150,8 @@ auto TcpTransport::Call(const RequestEnvelope &request, const EffectiveCallOptio
   }
 
   auto pending = std::make_shared<PendingCall>();
+  // Register before writing so a fast response cannot arrive before the request
+  // becomes visible to the reader thread.
   if (!TryRegisterPending(request.request_id_, pending)) {
     return fail({StatusCode::ResourceExhausted, "client max in-flight per endpoint exceeded"},
                 RequestCommitState::NotSent);
@@ -340,6 +356,11 @@ auto TcpTransport::WriteRequestFrame(std::uint64_t request_id, std::string_view 
                                      const EffectiveCallOptions &options) -> std::optional<CallAttemptResult> {
   std::lock_guard write_lock(write_mutex_);
 
+  if (DeadlineExpired(options)) {
+    (void)RemovePending(request_id);
+    return MakeCallFailure({StatusCode::DeadlineExceeded, "RPC deadline exceeded"}, RequestCommitState::NotSent);
+  }
+
   const int fd = ConnectedFd();
   if (fd < 0) {
     (void)RemovePending(request_id);
@@ -355,6 +376,8 @@ auto TcpTransport::WriteRequestFrame(std::uint64_t request_id, std::string_view 
     (void)RemovePending(request_id);
     Close();
 
+    // send() may have committed a frame prefix before reporting failure, so
+    // failover could execute a non-idempotent request twice.
     return MakeCallFailure(std::move(*send_status), RequestCommitState::MaybeSent);
   }
 

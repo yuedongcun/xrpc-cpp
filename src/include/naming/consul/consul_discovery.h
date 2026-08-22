@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <stop_token>
@@ -41,7 +42,7 @@ class ConsulDiscovery final : public ServiceDiscovery {
 
   void Stop() override;
 
-  [[nodiscard]] auto Snapshot() const -> std::vector<Endpoint> override;
+  [[nodiscard]] auto Snapshot() const -> std::shared_ptr<const DiscoverySnapshot> override;
 
   [[nodiscard]] auto last_error() const -> std::string override;
 
@@ -64,9 +65,11 @@ class ConsulDiscovery final : public ServiceDiscovery {
 
   ConsulHttpClient http_client_;
 
-  mutable std::mutex mutex_;
+  /** Immutable membership atomically published to concurrent callers. */
+  std::atomic<std::shared_ptr<const DiscoverySnapshot>> snapshot_{std::make_shared<const DiscoverySnapshot>()};
 
-  std::vector<Endpoint> snapshot_;
+  /** Protects the blocking-query index and last refresh error. */
+  mutable std::mutex refresh_state_mutex_;
 
   std::string last_error_;
 

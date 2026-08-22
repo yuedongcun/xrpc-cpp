@@ -1,4 +1,11 @@
-/** @file rpc_client_impl.h @brief Declares the private implementation of RpcClient. */
+/**
+ * @file rpc_client_impl.h
+ * @brief Declares client-side discovery, routing, and failover orchestration.
+ *
+ * RpcClient::Impl maintains an immutable endpoint snapshot, selects the first
+ * endpoint for each call, and performs only retries known to be safe.
+ * Endpoint-local network state remains inside TcpTransport.
+ */
 
 #pragma once
 
@@ -16,8 +23,6 @@
 
 #include <xrpc/rpc_client.h>
 
-#include "client/call_attempt_result.h"
-#include "client/effective_call_options.h"
 #include "client/tcp_transport.h"
 #include "naming/service_discovery.h"
 #include "protocol/frame_codec.h"
@@ -25,6 +30,14 @@
 
 namespace xrpc {
 
+/**
+ * @brief Coordinates service discovery, endpoint routing, and safe failover.
+ *
+ * Concurrent calls share immutable RoutingSnapshot objects. Transports are
+ * reused across discovery updates so an unchanged endpoint keeps its existing
+ * connection. A failed attempt is retried only when the transport reports that
+ * no request bytes were committed.
+ */
 class RpcClient::Impl final {
  public:
   explicit Impl(const RpcClientOptions &options);
@@ -34,54 +47,57 @@ class RpcClient::Impl final {
                           const CallOptions &options) -> StatusOr<std::string>;
 
  private:
-  struct EndpointSlot final {
-    explicit EndpointSlot(Endpoint endpoint) : endpoint_(std::move(endpoint)) {}
-
-    Endpoint endpoint_;
-    std::mutex mutex_;
-    std::unique_ptr<TcpTransport> transport_;
-  };
-
+  /** One virtual-node entry used for sticky endpoint selection. */
   struct HashRingEntry final {
     std::uint64_t hash_ = 0;
     std::size_t endpoint_index_ = 0;
   };
 
-  struct EndpointSet final {
-    std::vector<std::shared_ptr<EndpointSlot>> endpoints_;
+  /**
+   * Immutable routing state for one discovery snapshot.
+   *
+   * `transports_[i]` belongs to `(*endpoints_)[i]`; hash-ring entries refer to
+   * the same index space.
+   */
+  struct RoutingSnapshot final {
+    std::shared_ptr<const DiscoverySnapshot> endpoints_;
+    std::vector<std::shared_ptr<TcpTransport>> transports_;
     std::vector<HashRingEntry> hash_ring_;
   };
 
   [[nodiscard]] auto NextRequestId() -> std::uint64_t;
 
-  [[nodiscard]] auto RefreshEndpoints() -> Status;
+  /** Reconciles discovery membership and returns one immutable routing snapshot. */
+  [[nodiscard]] auto ResolveRoutingSnapshot() -> StatusOr<std::shared_ptr<const RoutingSnapshot>>;
 
-  [[nodiscard]] auto LoadEndpointSet() const -> std::shared_ptr<const EndpointSet>;
+  /** Selects a starting endpoint and performs only commit-safe failover. */
+  [[nodiscard]] auto CallWithFailover(const RequestEnvelope &request, const EffectiveCallOptions &options)
+      -> CallAttemptResult;
 
-  [[nodiscard]] auto CallEndpoints(const RequestEnvelope &request, const CallOptions &options) -> CallAttemptResult;
-
-  [[nodiscard]] auto CallAtEndpoint(const std::shared_ptr<EndpointSlot> &endpoint, const RequestEnvelope &request,
-                                    const EffectiveCallOptions &options) -> CallAttemptResult;
+  /** Returns the existing transport for an unchanged endpoint, if any. */
+  [[nodiscard]] static auto FindReusableTransport(const std::shared_ptr<const RoutingSnapshot> &snapshot,
+                                                  const Endpoint &endpoint) -> std::shared_ptr<TcpTransport>;
 
   [[nodiscard]] static auto MakeEndpointId(const Endpoint &endpoint) -> std::string;
 
-  [[nodiscard]] static auto BuildHashRing(const std::vector<std::shared_ptr<EndpointSlot>> &endpoints)
-      -> std::vector<HashRingEntry>;
+  /** Builds the immutable virtual-node ring used by sticky routing. */
+  [[nodiscard]] static auto BuildHashRing(const std::vector<Endpoint> &endpoints) -> std::vector<HashRingEntry>;
 
   [[nodiscard]] static auto SelectStickyStart(std::string_view sticky_key, const std::vector<HashRingEntry> &hash_ring)
       -> std::optional<std::size_t>;
 
   [[nodiscard]] static auto Fnv1a64(std::string_view value) -> std::uint64_t;
 
-  [[nodiscard]] static auto Matches(const EndpointSet &current, const std::vector<Endpoint> &discovered) -> bool;
-
   ProtocolLimits protocol_limits_;
   std::chrono::milliseconds default_timeout_;
   std::size_t max_inflight_per_endpoint_;
   std::unique_ptr<ServiceDiscovery> discovery_;
 
-  mutable std::mutex endpoints_mutex_;
-  std::shared_ptr<const EndpointSet> active_endpoints_;
+  /** Serializes routing snapshot rebuilds after discovery membership changes. */
+  std::mutex routing_update_mutex_;
+
+  /** Immutable routing state atomically published to concurrent calls. */
+  std::atomic<std::shared_ptr<const RoutingSnapshot>> routing_snapshot_;
 
   std::atomic<std::size_t> next_endpoint_index_{0};
   std::atomic<std::uint64_t> next_request_id_{1};

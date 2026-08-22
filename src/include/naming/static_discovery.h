@@ -24,11 +24,11 @@ class StaticDiscovery final : public ServiceDiscovery {
 
   [[nodiscard]] auto Start() -> Status override;
   void Stop() override;
-  [[nodiscard]] auto Snapshot() const -> std::vector<Endpoint> override;
+  [[nodiscard]] auto Snapshot() const -> std::shared_ptr<const DiscoverySnapshot> override;
   [[nodiscard]] auto last_error() const -> std::string override;
 
  private:
-  std::vector<Endpoint> endpoints_;
+  std::shared_ptr<const DiscoverySnapshot> snapshot_;
 };
 
 }  // namespace xrpc

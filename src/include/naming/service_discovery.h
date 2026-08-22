@@ -18,6 +18,9 @@
 
 namespace xrpc {
 
+/** Complete endpoint membership published as one immutable snapshot. */
+using DiscoverySnapshot = std::vector<Endpoint>;
+
 /**
  * @brief Supplies complete snapshots of currently available service endpoints.
  *
@@ -35,8 +38,8 @@ class ServiceDiscovery {
   /** Stops background refresh and waits for its worker thread to exit. */
   virtual void Stop() = 0;
 
-  /** Returns an owning copy of the latest complete endpoint snapshot. */
-  [[nodiscard]] virtual auto Snapshot() const -> std::vector<Endpoint> = 0;
+  /** Returns the latest immutable endpoint snapshot without copying its entries. */
+  [[nodiscard]] virtual auto Snapshot() const -> std::shared_ptr<const DiscoverySnapshot> = 0;
 
   [[nodiscard]] virtual auto last_error() const -> std::string = 0;
 };

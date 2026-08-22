@@ -11,6 +11,7 @@
 #include <charconv>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -93,13 +94,10 @@ void ConsulDiscovery::Stop() {
   }
 }
 
-auto ConsulDiscovery::Snapshot() const -> std::vector<Endpoint> {
-  std::lock_guard lock(mutex_);
-  return snapshot_;
-}
+auto ConsulDiscovery::Snapshot() const -> std::shared_ptr<const DiscoverySnapshot> { return snapshot_.load(); }
 
 auto ConsulDiscovery::last_error() const -> std::string {
-  std::lock_guard lock(mutex_);
+  std::lock_guard lock(refresh_state_mutex_);
   return last_error_;
 }
 
@@ -142,22 +140,26 @@ void ConsulDiscovery::RefreshLoop(const std::stop_token &stop_token) {
 }
 
 void ConsulDiscovery::SetSnapshot(std::vector<Endpoint> endpoints, std::uint64_t index) {
-  std::lock_guard lock(mutex_);
-  snapshot_ = std::move(endpoints);
+  const std::shared_ptr<const DiscoverySnapshot> current = snapshot_.load();
+  if (*current != endpoints) {
+    snapshot_.store(std::make_shared<const DiscoverySnapshot>(std::move(endpoints)));
+  }
+
   if (index != 0) {
+    std::lock_guard lock(refresh_state_mutex_);
     last_index_ = index;
   }
 }
 
 void ConsulDiscovery::SetLastError(std::string error) {
-  std::lock_guard lock(mutex_);
+  std::lock_guard lock(refresh_state_mutex_);
   last_error_ = std::move(error);
 }
 
 auto ConsulDiscovery::QueryPath(bool use_blocking_query) const -> std::string {
   std::uint64_t index = 0;
   {
-    std::lock_guard lock(mutex_);
+    std::lock_guard lock(refresh_state_mutex_);
     index = last_index_;
   }
 

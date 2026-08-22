@@ -1,4 +1,10 @@
-/** @file rpc_client.cpp @brief Implements the public synchronous RPC client facade. */
+/**
+ * @file rpc_client.cpp
+ * @brief Implements the synchronous RpcClient facade and its exception boundary.
+ *
+ * Public operations translate internal exceptions into StatusOr results and
+ * delegate discovery, routing, and transport work to RpcClient::Impl.
+ */
 
 #include <xrpc/rpc_client.h>
 

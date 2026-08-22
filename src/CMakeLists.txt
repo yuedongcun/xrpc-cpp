@@ -28,7 +28,6 @@ set(XRPC_SOURCES
     protocol/frame_header.cpp
     protocol/frame_codec.cpp
     common/xrpc_exception.cpp
-    client/client_config.cpp
     client/tcp_transport.cpp
     client/rpc_client_impl.cpp
     client/rpc_client.cpp

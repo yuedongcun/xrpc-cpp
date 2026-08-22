@@ -223,15 +223,20 @@ auto ConsulHttpClient::SendRequest(std::string_view method, std::string_view pat
       line_start = line_end + 2;
     }
 
-    // Select the response-body framing defined by the parsed headers.
+    // HTTP/1.1 gives Transfer-Encoding precedence over Content-Length. A
+    // non-chunked transfer coding and a response without either header are
+    // close-delimited; every request above asks the Agent to close the socket.
     const auto content_length_it = response.headers_.find("content-length");
     const auto transfer_encoding_it = response.headers_.find("transfer-encoding");
-    if (content_length_it != response.headers_.end()) {
+    if (transfer_encoding_it != response.headers_.end()) {
+      if (ToLower(transfer_encoding_it->second).find("chunked") != std::string::npos) {
+        response.body_ = ReadChunkedBody(socket, std::move(body_buffer));
+      } else {
+        response.body_ = ReadUntilClose(socket, std::move(body_buffer));
+      }
+    } else if (content_length_it != response.headers_.end()) {
       response.body_ =
           ReadContentLengthBody(socket, std::move(body_buffer), ParseContentLength(content_length_it->second));
-    } else if (transfer_encoding_it != response.headers_.end() &&
-               ToLower(transfer_encoding_it->second).find("chunked") != std::string::npos) {
-      response.body_ = ReadChunkedBody(socket, std::move(body_buffer));
     } else {
       response.body_ = ReadUntilClose(socket, std::move(body_buffer));
     }
