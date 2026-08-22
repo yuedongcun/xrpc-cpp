@@ -5,7 +5,6 @@
  * @brief Public RPC server API and service registration helpers.
  */
 
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -120,9 +119,6 @@ struct RpcServerOptions {
 
   /** Consul agent address used when service registration is enabled. */
   std::string consul_address_{"127.0.0.1:8500"};
-
-  /** Timeout for Consul registration and deregistration requests. */
-  std::chrono::milliseconds consul_timeout_{1000};
 };
 
 /**

@@ -13,9 +13,6 @@ auto ValidateClientOptions(const RpcClientOptions &options) -> ProtocolLimits {
   if (options.consul_address_.empty()) {
     throw ConfigException("RpcClient consul_address must not be empty");
   }
-  if (options.discovery_refresh_interval_ < std::chrono::milliseconds::zero()) {
-    throw ConfigException("RpcClient discovery_refresh_interval must not be negative");
-  }
   if (options.timeout_ < std::chrono::milliseconds::zero()) {
     throw ConfigException("RpcClient timeout must not be negative");
   }

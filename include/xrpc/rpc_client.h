@@ -43,9 +43,6 @@ struct RpcClientOptions {
   /** Consul agent address used only by `consul://` targets. */
   std::string consul_address_{"127.0.0.1:8500"};
 
-  /** Interval between background Consul discovery refreshes. */
-  std::chrono::milliseconds discovery_refresh_interval_{5000};
-
   /** Default call timeout. Zero disables the default deadline. */
   std::chrono::milliseconds timeout_{0};
 

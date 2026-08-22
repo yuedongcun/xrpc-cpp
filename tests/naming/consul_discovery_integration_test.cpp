@@ -142,7 +142,6 @@ TEST(ConsulDiscoveryIntegrationTest, DiscoversRegisteredEndpointAndCallsEcho) {
 
   xrpc::RpcClientOptions options;
   options.target_ = "consul://" + service_name;
-  options.discovery_refresh_interval_ = std::chrono::milliseconds(200);
   options.timeout_ = std::chrono::milliseconds(1000);
 
   xrpc::StatusOr<xrpc::RpcClient> client_result = xrpc::RpcClient::Create(options);

@@ -1,8 +1,10 @@
-/** @file consul_discovery.h @brief Declares Consul-backed service discovery. */
+/**
+ * @file consul_discovery.h
+ * @brief Defines endpoint discovery through Consul health queries.
+ */
 
 #pragma once
 
-#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <stop_token>
@@ -16,15 +18,19 @@
 namespace xrpc {
 
 /**
- * @brief Service discovery implementation with one Consul refresh thread.
+ * @brief Publishes healthy service endpoints from one Consul Agent.
  *
- * `Snapshot()` and `last_error()` synchronize with the refresh thread.
- * `Start()` and `Stop()` are called serially by the owning client runtime.
+ * `Start()` performs an initial query and then starts one refresh thread. The
+ * refresh thread uses Consul blocking queries after obtaining an index.
+ * Successful queries atomically replace the complete endpoint snapshot;
+ * failures preserve the previous snapshot and update `last_error()`.
+ *
+ * `Snapshot()` and `last_error()` may run concurrently with refresh. `Start()`
+ * and `Stop()` are serialized by the owning client implementation.
  */
 class ConsulDiscovery final : public ServiceDiscovery {
  public:
-  ConsulDiscovery(std::string service_name, const std::string &consul_address,
-                  std::chrono::milliseconds refresh_interval);
+  ConsulDiscovery(std::string service_name, const std::string &consul_address);
 
   ~ConsulDiscovery() override;
 
@@ -40,21 +46,23 @@ class ConsulDiscovery final : public ServiceDiscovery {
   [[nodiscard]] auto last_error() const -> std::string override;
 
  private:
-  [[nodiscard]] auto Fetch(bool blocking) -> Status;
+  /** Performs one immediate or Consul blocking health query. */
+  [[nodiscard]] auto Fetch(bool use_blocking_query) -> Status;
 
+  /** Runs blocking refresh queries until stop is requested. */
   void RefreshLoop(const std::stop_token &stop_token);
 
+  /** Replaces the published snapshot and advances the Consul query index. */
   void SetSnapshot(std::vector<Endpoint> endpoints, std::uint64_t index);
 
   void SetLastError(std::string error);
 
-  [[nodiscard]] auto QueryPath(bool blocking) const -> std::string;
+  /** Builds the passing-only health query, optionally using the last index. */
+  [[nodiscard]] auto QueryPath(bool use_blocking_query) const -> std::string;
 
   std::string service_name_;
 
   ConsulHttpClient http_client_;
-
-  std::chrono::milliseconds refresh_interval_;
 
   mutable std::mutex mutex_;
 

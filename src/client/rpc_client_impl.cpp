@@ -26,7 +26,7 @@ RpcClient::Impl::Impl(const RpcClientOptions &options)
     : protocol_limits_(ValidateClientOptions(options)),
       default_timeout_(options.timeout_),
       max_inflight_per_endpoint_(options.max_inflight_per_endpoint_),
-      discovery_(MakeServiceDiscovery(options.target_, options.consul_address_, options.discovery_refresh_interval_)) {
+      discovery_(MakeServiceDiscovery(options.target_, options.consul_address_)) {
   (void)discovery_->Start();
 }
 

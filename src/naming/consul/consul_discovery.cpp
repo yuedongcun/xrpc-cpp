@@ -1,8 +1,13 @@
-/** @file consul_discovery.cpp @brief Implements Consul-backed endpoint discovery. */
+/**
+ * @file consul_discovery.cpp
+ * @brief Implements snapshot refresh with Consul blocking health queries.
+ *
+ * Only passing service instances are published. A service address takes
+ * precedence over its node address when both are present.
+ */
 
 #include "naming/consul/consul_discovery.h"
 
-#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cstdint>
@@ -19,7 +24,8 @@ namespace xrpc {
 
 namespace {
 
-constexpr std::chrono::seconds CONSUL_ERROR_SLEEP{1};
+constexpr std::chrono::seconds CONSUL_RETRY_DELAY{1};
+constexpr std::chrono::seconds CONSUL_QUERY_WAIT{5};
 
 auto HeaderValue(const ConsulHttpResponse &response, const std::string &name) -> std::string {
   const auto it = response.headers_.find(name);
@@ -69,9 +75,8 @@ auto ParseEndpoints(const std::string &body) -> std::vector<Endpoint> {
 
 }  // namespace
 
-ConsulDiscovery::ConsulDiscovery(std::string service_name, const std::string &consul_address,
-                                 std::chrono::milliseconds refresh_interval)
-    : service_name_(std::move(service_name)), http_client_(consul_address), refresh_interval_(refresh_interval) {}
+ConsulDiscovery::ConsulDiscovery(std::string service_name, const std::string &consul_address)
+    : service_name_(std::move(service_name)), http_client_(consul_address) {}
 
 ConsulDiscovery::~ConsulDiscovery() { Stop(); }
 
@@ -98,11 +103,10 @@ auto ConsulDiscovery::last_error() const -> std::string {
   return last_error_;
 }
 
-auto ConsulDiscovery::Fetch(bool blocking) -> Status {
+auto ConsulDiscovery::Fetch(bool use_blocking_query) -> Status {
   const std::chrono::milliseconds request_timeout =
-      blocking ? refresh_interval_ + std::chrono::duration_cast<std::chrono::milliseconds>(CONSUL_ERROR_SLEEP)
-               : refresh_interval_;
-  const StatusOr<ConsulHttpResponse> response_result = http_client_.Get(QueryPath(blocking), request_timeout);
+      use_blocking_query ? CONSUL_QUERY_WAIT + CONSUL_HTTP_TIMEOUT : CONSUL_HTTP_TIMEOUT;
+  const StatusOr<ConsulHttpResponse> response_result = http_client_.Get(QueryPath(use_blocking_query), request_timeout);
   if (!response_result.ok()) {
     SetLastError(response_result.status().message());
     return response_result.status();
@@ -130,8 +134,9 @@ auto ConsulDiscovery::Fetch(bool blocking) -> Status {
 void ConsulDiscovery::RefreshLoop(const std::stop_token &stop_token) {
   while (!stop_token.stop_requested()) {
     const Status status = Fetch(true);
+    // Keep the previous snapshot and retry after a short delay when Consul is unavailable.
     if (!status.ok() && !stop_token.stop_requested()) {
-      std::this_thread::sleep_for(CONSUL_ERROR_SLEEP);
+      std::this_thread::sleep_for(CONSUL_RETRY_DELAY);
     }
   }
 }
@@ -149,7 +154,7 @@ void ConsulDiscovery::SetLastError(std::string error) {
   last_error_ = std::move(error);
 }
 
-auto ConsulDiscovery::QueryPath(bool blocking) const -> std::string {
+auto ConsulDiscovery::QueryPath(bool use_blocking_query) const -> std::string {
   std::uint64_t index = 0;
   {
     std::lock_guard lock(mutex_);
@@ -158,9 +163,8 @@ auto ConsulDiscovery::QueryPath(bool blocking) const -> std::string {
 
   std::ostringstream path;
   path << "/v1/health/service/" << service_name_ << "?passing=true";
-  if (blocking && index != 0) {
-    const auto wait_seconds = std::chrono::duration_cast<std::chrono::seconds>(refresh_interval_);
-    path << "&index=" << index << "&wait=" << std::max<std::int64_t>(wait_seconds.count(), 1) << "s";
+  if (use_blocking_query && index != 0) {
+    path << "&index=" << index << "&wait=" << CONSUL_QUERY_WAIT.count() << "s";
   }
   return path.str();
 }

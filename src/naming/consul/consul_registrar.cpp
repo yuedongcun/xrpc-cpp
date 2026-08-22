@@ -1,4 +1,7 @@
-/** @file consul_registrar.cpp @brief Implements Consul service registration and removal. */
+/**
+ * @file consul_registrar.cpp
+ * @brief Implements `RpcServer` registration through the Consul Agent API.
+ */
 
 #include "naming/consul/consul_registrar.h"
 
@@ -15,12 +18,12 @@ auto ConsulRegistrar::Register(const Options &options) -> Status {
   }
 
   const std::string payload = BuildRegisterPayload(options);
-  Status status = HandleAgentWriteResponse(http_client_.Put("/v1/agent/service/register", payload, options.timeout_));
+  Status status =
+      HandleAgentWriteResponse(http_client_.Put("/v1/agent/service/register", payload, CONSUL_HTTP_TIMEOUT));
   if (!status.ok()) {
     return {status.code(), status.message()};
   }
   registered_ = true;
-  timeout_ = options.timeout_;
   registered_service_id_ = options.service_id_;
   return Status::Ok();
 }
@@ -30,7 +33,7 @@ auto ConsulRegistrar::Deregister() -> Status {
     return Status::Ok();
   }
   const Status status = HandleAgentWriteResponse(
-      http_client_.Put("/v1/agent/service/deregister/" + registered_service_id_, "", timeout_));
+      http_client_.Put("/v1/agent/service/deregister/" + registered_service_id_, "", CONSUL_HTTP_TIMEOUT));
   if (!status.ok()) {
     return {status.code(), status.message()};
   }
@@ -54,9 +57,6 @@ auto ConsulRegistrar::ValidateOptions(const Options &options) -> Status {
   }
   if (options.service_port_ == 0) {
     return {StatusCode::InvalidArgument, "ConsulRegistrar service_port must be non-zero"};
-  }
-  if (options.timeout_ < std::chrono::milliseconds::zero()) {
-    return {StatusCode::InvalidArgument, "ConsulRegistrar timeout must not be negative"};
   }
   return Status::Ok();
 }

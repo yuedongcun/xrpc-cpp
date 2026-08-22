@@ -1,4 +1,7 @@
-/** @file static_discovery.cpp @brief Implements endpoint discovery from static configuration. */
+/**
+ * @file static_discovery.cpp
+ * @brief Parses `list://host:port,...` targets into immutable endpoint snapshots.
+ */
 
 #include "naming/static_discovery.h"
 

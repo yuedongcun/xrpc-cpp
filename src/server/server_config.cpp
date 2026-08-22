@@ -57,9 +57,6 @@ auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerConfig {
   if (options.max_pending_jobs_global_ == 0) {
     throw ConfigException("RpcServer max_pending_jobs_global must be greater than 0");
   }
-  if (options.consul_timeout_ < std::chrono::milliseconds::zero()) {
-    throw ConfigException("RpcServer consul_timeout must not be negative");
-  }
   if (options.service_name_.empty()) {
     if (!options.service_id_.empty()) {
       throw ConfigException("RpcServer service_id requires service_name");
@@ -91,7 +88,6 @@ auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerConfig {
               .service_address_ = options.service_address_,
               .service_port_ = options.service_port_,
               .agent_address_ = options.consul_address_,
-              .timeout_ = options.consul_timeout_,
           },
   };
 }
@@ -136,7 +132,6 @@ auto ResolveRegistrarOptions(const ServerConfig &config, std::string_view host, 
       .service_id_ = std::move(service_id),
       .service_address_ = std::move(service_address),
       .service_port_ = service_port,
-      .timeout_ = config.consul_.timeout_,
   };
 }
 

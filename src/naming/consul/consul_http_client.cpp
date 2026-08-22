@@ -1,4 +1,7 @@
-/** @file consul_http_client.cpp @brief Implements HTTP requests to the Consul agent. */
+/**
+ * @file consul_http_client.cpp
+ * @brief Implements one-request blocking HTTP/1.1 exchanges with a Consul Agent.
+ */
 
 #include "naming/consul/consul_http_client.h"
 
@@ -220,6 +223,7 @@ auto ConsulHttpClient::SendRequest(std::string_view method, std::string_view pat
       line_start = line_end + 2;
     }
 
+    // Select the response-body framing defined by the parsed headers.
     const auto content_length_it = response.headers_.find("content-length");
     const auto transfer_encoding_it = response.headers_.find("transfer-encoding");
     if (content_length_it != response.headers_.end()) {

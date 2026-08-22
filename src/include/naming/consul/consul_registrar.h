@@ -1,8 +1,11 @@
-/** @file consul_registrar.h @brief Declares Consul service registration support. */
+/**
+ * @file consul_registrar.h
+ * @brief Defines server registration through the Consul Agent API.
+ */
 
 #pragma once
 
-#include <chrono>
+#include <cstdint>
 #include <string>
 
 #include <xrpc/status.h>
@@ -14,8 +17,9 @@ namespace xrpc {
 /**
  * @brief Registers one server instance with a Consul agent.
  *
- * This is a server-lifecycle-owned component, not a concurrent service. Its
- * registration state is accessed only by the owning `RpcServer` runtime.
+ * Registration is owned and serialized by the server lifecycle. A successful
+ * `Register()` records the service id required by `Deregister()`. Failed
+ * writes do not change the current registration state.
  */
 class ConsulRegistrar final {
  public:
@@ -27,14 +31,14 @@ class ConsulRegistrar final {
     std::string service_address_;
 
     std::uint16_t service_port_ = 0;
-
-    std::chrono::milliseconds timeout_{1000};
   };
 
   explicit ConsulRegistrar(const std::string &consul_address);
 
+  /** Registers or replaces this server instance in the local Consul Agent. */
   [[nodiscard]] auto Register(const Options &options) -> Status;
 
+  /** Deregisters the recorded service id; succeeds when not registered. */
   [[nodiscard]] auto Deregister() -> Status;
 
   [[nodiscard]] auto registered() const -> bool;
@@ -44,12 +48,12 @@ class ConsulRegistrar final {
 
   [[nodiscard]] auto BuildRegisterPayload(const Options &options) const -> std::string;
 
+  /** Converts transport failures and non-2xx Agent responses into `Status`. */
   [[nodiscard]] static auto HandleAgentWriteResponse(const StatusOr<ConsulHttpResponse> &response) -> Status;
 
   ConsulHttpClient http_client_;
   bool registered_ = false;
   std::string registered_service_id_;
-  std::chrono::milliseconds timeout_{1000};
 };
 
 }  // namespace xrpc

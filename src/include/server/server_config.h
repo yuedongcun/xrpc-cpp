@@ -5,7 +5,6 @@
 
 #pragma once
 
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -26,7 +25,6 @@ struct ConsulRegistrationConfig {
   std::string service_address_;
   std::uint16_t service_port_;
   std::string agent_address_;
-  std::chrono::milliseconds timeout_;
 };
 
 /**

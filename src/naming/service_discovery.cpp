@@ -1,4 +1,7 @@
-/** @file service_discovery.cpp @brief Implements shared service discovery utilities. */
+/**
+ * @file service_discovery.cpp
+ * @brief Selects a discovery implementation from the `RpcClient` target scheme.
+ */
 
 #include "naming/service_discovery.h"
 
@@ -44,8 +47,8 @@ auto CanonicalizeEndpoints(std::vector<Endpoint> endpoints) -> std::vector<Endpo
   return endpoints;
 }
 
-auto MakeServiceDiscovery(std::string_view target, const std::string &consul_address,
-                          std::chrono::milliseconds refresh_interval) -> std::unique_ptr<ServiceDiscovery> {
+auto MakeServiceDiscovery(std::string_view target, const std::string &consul_address)
+    -> std::unique_ptr<ServiceDiscovery> {
   target = Trim(target);
 
   if (target.starts_with(LIST_SCHEME)) {
@@ -57,7 +60,7 @@ auto MakeServiceDiscovery(std::string_view target, const std::string &consul_add
     if (service_name.empty()) {
       throw ConfigException("consul target requires a service name");
     }
-    return std::make_unique<ConsulDiscovery>(std::move(service_name), consul_address, refresh_interval);
+    return std::make_unique<ConsulDiscovery>(std::move(service_name), consul_address);
   }
   throw ConfigException("unsupported RpcClient target scheme");
 }

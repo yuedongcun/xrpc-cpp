@@ -1,4 +1,7 @@
-/** @file static_discovery.h @brief Declares service discovery for static endpoint lists. */
+/**
+ * @file static_discovery.h
+ * @brief Defines discovery backed by a static endpoint list.
+ */
 
 #pragma once
 
@@ -9,6 +12,12 @@
 
 namespace xrpc {
 
+/**
+ * @brief Publishes an immutable snapshot parsed from a configured endpoint list.
+ *
+ * Construction parses and validates the complete target. `Start()` and
+ * `Stop()` have no runtime work because the snapshot never changes.
+ */
 class StaticDiscovery final : public ServiceDiscovery {
  public:
   explicit StaticDiscovery(std::string_view target);
