@@ -18,8 +18,9 @@ namespace xrpc {
  * @brief Registers one server instance with a Consul agent.
  *
  * Registration is owned and serialized by the server lifecycle. A successful
- * `Register()` records the service id required by `Deregister()`. Failed
- * writes do not change the current registration state.
+ * `Register()` publishes the advertised endpoint with a TCP health check and
+ * records the service id required by `Deregister()`. Failed writes do not
+ * change the current registration state.
  */
 class ConsulRegistrar final {
  public:
@@ -35,7 +36,7 @@ class ConsulRegistrar final {
 
   explicit ConsulRegistrar(const std::string &consul_address);
 
-  /** Registers or replaces this server instance in the local Consul Agent. */
+  /** Registers or replaces this instance and its TCP health check. */
   [[nodiscard]] auto Register(const Options &options) -> Status;
 
   /** Deregisters the recorded service id; succeeds when not registered. */

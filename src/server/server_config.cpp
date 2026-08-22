@@ -64,9 +64,6 @@ auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerConfig {
     if (!options.service_address_.empty()) {
       throw ConfigException("RpcServer service_address requires service_name");
     }
-    if (options.service_port_ != 0) {
-      throw ConfigException("RpcServer service_port requires service_name");
-    }
   } else if (options.consul_address_.empty()) {
     throw ConfigException("RpcServer consul_address must not be empty when service registration is enabled");
   }
@@ -86,7 +83,6 @@ auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerConfig {
               .service_name_ = options.service_name_,
               .service_id_ = options.service_id_,
               .service_address_ = options.service_address_,
-              .service_port_ = options.service_port_,
               .agent_address_ = options.consul_address_,
           },
   };
@@ -97,19 +93,14 @@ auto ServiceRegistrationEnabled(const ServerConfig &config) -> bool { return !co
 /**
  * @brief Resolves concrete Consul registration options from the normalized server configuration.
  *
- * Missing service address, port, and ID values are derived from the listening
+ * Missing service address and ID values are derived from the listening
  * endpoint when possible. A wildcard listen address requires an explicit
- * service address.
+ * service address. The registered port is always the actual listening port.
  */
 auto ResolveRegistrarOptions(const ServerConfig &config, std::string_view host, std::uint16_t listen_port)
     -> ConsulRegistrar::Options {
   if (!ServiceRegistrationEnabled(config)) {
     throw LifecycleException("service registration is not enabled");
-  }
-
-  const std::uint16_t service_port = config.consul_.service_port_ == 0 ? listen_port : config.consul_.service_port_;
-  if (service_port != listen_port) {
-    throw ConfigException("xRPC currently registers the same port used by the listening socket.");
   }
 
   std::string service_address = config.consul_.service_address_;
@@ -123,7 +114,7 @@ auto ResolveRegistrarOptions(const ServerConfig &config, std::string_view host, 
   std::string service_id = config.consul_.service_id_;
   if (service_id.empty()) {
     // Generate a process-unique default ID from the resolved service endpoint.
-    service_id = config.consul_.service_name_ + "_" + service_address + "_" + std::to_string(service_port) + "_" +
+    service_id = config.consul_.service_name_ + "_" + service_address + "_" + std::to_string(listen_port) + "_" +
                  std::to_string(static_cast<std::int64_t>(::getpid()));
   }
 
@@ -131,7 +122,7 @@ auto ResolveRegistrarOptions(const ServerConfig &config, std::string_view host, 
       .service_name_ = config.consul_.service_name_,
       .service_id_ = std::move(service_id),
       .service_address_ = std::move(service_address),
-      .service_port_ = service_port,
+      .service_port_ = listen_port,
   };
 }
 

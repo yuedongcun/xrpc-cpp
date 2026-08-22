@@ -304,18 +304,6 @@ TEST(FrameCodecRobustTest, EncodingHonorsPayloadLimit) {
   EXPECT_THROW(static_cast<void>(codec.Encode(request)), ProtocolException);
 }
 
-TEST(FrameCodecRobustTest, HeartbeatIsReservedButUnsupported) {
-  FrameCodec codec;
-  FrameHeader header;
-  header.message_type_ = MessageType::Heartbeat;
-
-  const FrameDecodeResult result = codec.Decode(EncodeFrameHeader(header));
-
-  EXPECT_EQ(result.error_, ProtocolError::UnsupportedMessageType);
-  EXPECT_EQ(result.consumed_, FrameHeader::SIZE);
-  EXPECT_FALSE(result.HasEnvelope());
-}
-
 TEST(FrameCodecRobustTest, CorruptedRequestMetadataReturnsDecodeError) {
   FrameCodec codec;
 

@@ -105,7 +105,7 @@ struct RpcServerOptions {
   /** Maximum serialized request or response payload. Must be positive. */
   std::size_t max_payload_size_ = DEFAULT_MAX_PAYLOAD_SIZE;
 
-  /** Consul service name. An empty value disables service registration. */
+  /** Consul service name. An empty value disables registration; otherwise a TCP health check is included. */
   std::string service_name_;
 
   /** Optional Consul service ID. An ID is generated when this is empty. */
@@ -113,9 +113,6 @@ struct RpcServerOptions {
 
   /** Optional advertised service address. Required for wildcard listen hosts. */
   std::string service_address_;
-
-  /** Advertised service port. Zero uses the listen port. */
-  std::uint16_t service_port_ = 0;
 
   /** Consul agent address used when service registration is enabled. */
   std::string consul_address_{"127.0.0.1:8500"};

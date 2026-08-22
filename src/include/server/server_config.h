@@ -23,7 +23,6 @@ struct ConsulRegistrationConfig {
   std::string service_name_;
   std::string service_id_;
   std::string service_address_;
-  std::uint16_t service_port_;
   std::string agent_address_;
 };
 
@@ -55,8 +54,8 @@ struct ServerConfig {
  * @brief Resolves concrete Consul registration options for the listening
  * endpoint.
  *
- * Missing service address, port, and ID values are derived where permitted by
- * the normalized configuration.
+ * Missing service address and ID values are derived where permitted. The
+ * concrete registration always uses the actual listening port.
  */
 [[nodiscard]] auto ResolveRegistrarOptions(const ServerConfig &config, std::string_view host, std::uint16_t listen_port)
     -> ConsulRegistrar::Options;

@@ -5,9 +5,20 @@
 
 #include "naming/consul/consul_registrar.h"
 
+#include <string_view>
+
 #include <nlohmann/json.hpp>
 
 namespace xrpc {
+namespace {
+
+// The local Consul Agent probes often enough to remove an unreachable instance
+// within a few seconds. One second leaves ample margin for a local/LAN connect
+// while keeping the failure bound shorter than the check interval.
+constexpr std::string_view TCP_CHECK_INTERVAL = "5s";
+constexpr std::string_view TCP_CHECK_TIMEOUT = "1s";
+
+}  // namespace
 
 ConsulRegistrar::ConsulRegistrar(const std::string &consul_address) : http_client_(consul_address) {}
 
@@ -18,8 +29,8 @@ auto ConsulRegistrar::Register(const Options &options) -> Status {
   }
 
   const std::string payload = BuildRegisterPayload(options);
-  Status status =
-      HandleAgentWriteResponse(http_client_.Put("/v1/agent/service/register", payload, CONSUL_HTTP_TIMEOUT));
+  Status status = HandleAgentWriteResponse(
+      http_client_.Put("/v1/agent/service/register?replace-existing-checks=true", payload, CONSUL_HTTP_TIMEOUT));
   if (!status.ok()) {
     return {status.code(), status.message()};
   }
@@ -67,6 +78,12 @@ auto ConsulRegistrar::BuildRegisterPayload(const Options &options) const -> std:
   payload["ID"] = options.service_id_;
   payload["Address"] = options.service_address_;
   payload["Port"] = options.service_port_;
+  payload["Check"] = {
+      {"Name", "xRPC TCP health check"},
+      {"TCP", options.service_address_ + ":" + std::to_string(options.service_port_)},
+      {"Interval", TCP_CHECK_INTERVAL},
+      {"Timeout", TCP_CHECK_TIMEOUT},
+  };
   return payload.dump();
 }
 

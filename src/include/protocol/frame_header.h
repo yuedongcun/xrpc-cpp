@@ -28,10 +28,6 @@ namespace xrpc {
 enum class MessageType : std::uint8_t {
   Request = 1,
   Response = 2,
-
-  // Reserved wire values; heartbeat frames are not supported by FrameCodec.
-  Heartbeat = 3,
-  HeartbeatAck = 4,
 };
 
 /** @brief Host representation of the fixed wire-frame prefix. */

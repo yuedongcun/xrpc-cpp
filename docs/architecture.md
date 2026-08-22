@@ -38,7 +38,7 @@ RpcClient::Call
 - 一个或多个 `ConnectionIoLoop`，每个对应一个 Connection I/O 线程；
 - 一个 `WorkerPool` 管理的 Worker 线程池；
 - 类型化服务注册表；
-- 可选的 Consul 注册器；
+- 可选的 Consul 注册器，注册实例时附带 TCP 健康检查；
 - 资源和生命周期状态。
 
 `AcceptLoop` 以 round-robin 方式分配新 socket。分配完成后，一条连接的 socket、读缓冲区、写队列和在途状态都由一个 Connection I/O 线程独占。这个所有权规则避免了全局 socket 锁。Worker 线程获得请求处理工作，但不接管连接本身；它们把响应工作返回给连接所有者。

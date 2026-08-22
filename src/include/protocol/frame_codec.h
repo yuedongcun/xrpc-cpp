@@ -45,7 +45,6 @@ enum class ProtocolError : std::uint8_t {
   InvalidMagic,
   UnsupportedVersion,
   InvalidMessageType,
-  UnsupportedMessageType,
   FrameTooLarge,
   DecodeError,
   EncodeError,

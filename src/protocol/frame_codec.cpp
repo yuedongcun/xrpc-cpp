@@ -262,10 +262,6 @@ auto FrameCodec::Decode(std::string_view buf) const -> FrameDecodeResult {
       return {.error_ = ProtocolError::Ok, .consumed_ = frame.consumed_, .response_ = std::move(response)};
     }
 
-    case MessageType::Heartbeat:
-    case MessageType::HeartbeatAck:
-      return {.error_ = ProtocolError::UnsupportedMessageType, .consumed_ = frame.consumed_};
-
     default:
       return {.error_ = ProtocolError::InvalidMessageType, .consumed_ = frame.consumed_};
   }
