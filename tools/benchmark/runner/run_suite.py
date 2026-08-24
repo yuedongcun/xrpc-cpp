@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import random
 import re
 import selectors
 import signal
@@ -31,6 +32,7 @@ class Config:
     payload_size: int
     server_worker_threads: int
     server_connection_io_threads: int
+    server_max_inflight_per_connection: int = 0
     warmup_duration: int = 0
     repetitions: int = 1
     threads: int | list[int] = 0
@@ -88,7 +90,7 @@ def load_config(path):
     if benchmark_type == "client":
         allowed = common | {"threads"}
     elif benchmark_type == "firehose":
-        allowed = common | {"connections", "inflight", "io_threads"}
+        allowed = common | {"connections", "inflight", "io_threads", "server_max_inflight_per_connection"}
     else:
         raise RuntimeError("type must be firehose or client")
 
@@ -104,6 +106,9 @@ def load_config(path):
         payload_size=require_int(data, "payload_size"),
         server_worker_threads=require_int(data, "server_worker_threads"),
         server_connection_io_threads=require_int(data, "server_connection_io_threads"),
+        server_max_inflight_per_connection=(
+            require_int(data, "server_max_inflight_per_connection") if benchmark_type == "firehose" else 0
+        ),
         threads=data.get("threads", 0),
         connections=data.get("connections", 0),
         inflight=data.get("inflight", 0),
@@ -143,6 +148,8 @@ def start_server(repo_root, server_bin, config):
         f"--worker_threads={config.server_worker_threads}",
         f"--io_threads={config.server_connection_io_threads}",
     ]
+    if config.server_max_inflight_per_connection > 0:
+        command.append(f"--max_inflight_per_connection={config.server_max_inflight_per_connection}")
     process = subprocess.Popen(
         command,
         cwd=repo_root,
@@ -245,8 +252,16 @@ def summarize(rows):
     for name, group in groups.items():
         qps = statistics.median(row["qps"] for row in group)
         p99 = statistics.median(row["p99_us"] for row in group)
+        qps_min = min(row["qps"] for row in group)
+        qps_max = max(row["qps"] for row in group)
+        p99_min = min(row["p99_us"] for row in group)
+        p99_max = max(row["p99_us"] for row in group)
         failed = sum(row["failed"] for row in group)
-        print(f"{name}: runs={len(group)} qps_median={qps:.2f} p99_us_median={p99:.2f} failed={failed}")
+        print(
+            f"{name}: runs={len(group)} "
+            f"qps_median={qps:.2f} qps_range=[{qps_min:.2f},{qps_max:.2f}] "
+            f"p99_us_median={p99:.2f} p99_us_range=[{p99_min:.2f},{p99_max:.2f}] failed={failed}"
+        )
 
 
 def parse_args(argv=None):
@@ -267,7 +282,9 @@ def main(argv=None):
     total = len(case_list) * config.repetitions
     index = 0
     for repetition in range(1, config.repetitions + 1):
-        for case in case_list:
+        repetition_cases = list(case_list)
+        random.Random(repetition).shuffle(repetition_cases)
+        for case in repetition_cases:
             index += 1
             print(f"\n[{index}/{total}] repetition={repetition} {case.name}")
             stats = run_case(repo_root, build_dir, config, case)

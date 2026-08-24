@@ -64,6 +64,9 @@ void ParseArg(ServerConfig &config, std::string_view arg) {
     config.options_.worker_threads_ = static_cast<std::size_t>(ParseUnsigned(value, "worker_threads"));
   } else if (key == "io_threads") {
     config.options_.connection_io_threads_ = static_cast<std::size_t>(ParseUnsigned(value, "io_threads"));
+  } else if (key == "max_inflight_per_connection") {
+    config.options_.max_inflight_per_connection_ =
+        static_cast<std::size_t>(ParseUnsigned(value, "max_inflight_per_connection"));
   } else if (key == "listen_backlog") {
     config.options_.listen_backlog_ = static_cast<std::size_t>(ParseUnsigned(value, "listen_backlog"));
   } else {
@@ -87,7 +90,8 @@ auto ParseConfig(int argc, char **argv) -> ServerConfig {
 
 auto Usage(const char *program) -> std::string {
   return std::string("Usage: ") + program +
-         " [--host=IP] [--port=N] [--delay_us=N] [--worker_threads=N] [--io_threads=N] [--listen_backlog=N]";
+         " [--host=IP] [--port=N] [--delay_us=N] [--worker_threads=N] [--io_threads=N] "
+         "[--max_inflight_per_connection=N] [--listen_backlog=N]";
 }
 
 auto MakeEchoHandler(std::uint64_t delay_us) {

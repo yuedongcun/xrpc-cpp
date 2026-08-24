@@ -10,7 +10,7 @@ xRPC 是一个基于 `io_uring` 和 C++20 协程构建的 Linux RPC 框架。
 - **多 I/O Loop 并发模型**：Accept 与连接 I/O 分离；每条连接建立后固定归属于一个 I/O Loop，由少量 I/O 线程驱动大量并发连接。
 - **I/O 与业务执行分离**：Connection I/O Loop 专注网络收发与连接状态，业务 Handler 在独立 worker 线程执行，响应完成后回到原 I/O Loop 写回。
 - **多路复用客户端**：多个同步 RPC 调用复用同一 TCP 连接，通过 request ID 独立匹配响应。
-- **Consul 服务发现**：客户端通过 Consul 动态发现服务实例并维护 Endpoint 状态，调用时完成目标选择与连接复用。
+- **Consul 服务发现**：客户端通过不可变 Endpoint 快照接收健康实例变化，调用时完成目标选择并复用未变化实例的连接。
 
 ## 架构
 
@@ -31,13 +31,13 @@ make
 启动服务端：
 
 ```bash
-./build/example/xrpc_echo_server
+./build/examples/xrpc_echo_server
 ```
 
 另一个终端启动客户端：
 
 ```bash
-./build/example/xrpc_echo_client
+./build/examples/xrpc_echo_client
 ```
 
 最小 API 示例：
@@ -62,7 +62,10 @@ if (status.ok()) status = server.Run();
 客户端：
 
 ```cpp
-auto client_result = xrpc::RpcClient::Create("127.0.0.1", 9000);
+xrpc::RpcClientOptions options;
+options.target_ = "list://127.0.0.1:9000";
+
+auto client_result = xrpc::RpcClient::Create(options);
 if (!client_result.ok()) return 1;
 
 auto client = std::move(client_result).value();
@@ -72,34 +75,15 @@ if (!response.ok()) return 1;
 
 ## 性能
 
-在 Intel Core i7-9750H、WSL2 loopback 环境中，使用 128 字节 Protobuf Echo 消息时：
+性能测试聚焦完整的服务端 Protobuf RPC 路径：连接接入、`io_uring` 收发、协议解析、Worker Pool 调度、Echo Handler 执行和响应写回。Firehose 仅作为低开销发压器，避免正式客户端先成为瓶颈。
 
-| 工作点 | QPS 中位数 | p99 中位数 | 失败数 |
-| --- | ---: | ---: | ---: |
-| 低延迟 | 96,103 | 0.86 ms | 0 |
-| 饱和点 | 422,391 | 8.14 ms | 0 |
+测试运行于 Intel Core i7-9750H、Linux 6.6 WSL2 loopback 和 Clang 20 Release 构建。服务端使用 3 个 Connection I/O 线程和 3 个 Worker 线程；固定 12 条 TCP 连接和 128 字节 Echo payload，逐步提高全局并发请求数。每个工作点预热 3 秒、测量 30 秒并重复 3 次；图中圆点表示中位数，范围线表示三轮最小值到最大值。
 
-这是单机 loopback 结果，不代表跨主机网络延迟。benchmark 不做绑核、控频、NUMA 调优或 perf 编排，只固定负载参数。
+![xRPC 服务端负载曲线](docs/server-performance.svg)
 
-先构建 Release 版本：
+低延迟参考点为 96 个并发请求，QPS 中位数为 173,328，p99 中位数为 0.95 ms；最高零失败测试点为 8,192 个并发请求，QPS 中位数为 606,053，p99 中位数为 26.16 ms。并发请求数提高到 12,288 后，三轮共出现 32,902 次失败，因此该点只用于标识过载边界，不作为有效容量成绩。
 
-```bash
-make release
-```
-
-复现服务端容量测试：
-
-```bash
-./tools/benchmark/runner/run_suite.py \
-  --config tools/benchmark/configs/firehose.json
-```
-
-复现正式客户端路径测试：
-
-```bash
-./tools/benchmark/runner/run_suite.py \
-  --config tools/benchmark/configs/client.json
-```
+这是单机 loopback 下的服务端负载曲线，不代表跨主机网络性能，也不用于与其他 RPC 框架横向比较。测试不做绑核、控频、NUMA 调优或 perf 编排；完整数据、配置和复现命令见 [Benchmark 工具](tools/benchmark/README.md)。
 
 ## 项目边界
 
@@ -109,7 +93,11 @@ xRPC 当前面向 Linux，提供基于 TCP 的请求—响应式 RPC：每次调
 
 ## 文档
 
-- [架构设计](docs/architecture.md)
+- [总体架构](docs/architecture.md)
+- [I/O 运行时](docs/io-runtime.md)
+- [服务端运行时](docs/server-runtime.md)
+- [客户端运行时](docs/client-runtime.md)
+- [线协议](docs/wire-protocol.md)
 - [测试说明](tests/README.md)
 - [Benchmark 工具](tools/benchmark/README.md)
 

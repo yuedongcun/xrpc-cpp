@@ -296,7 +296,7 @@ auto Socket::Write(std::string_view bytes) -> ssize_t {
   }
 
   while (true) {
-    const ssize_t sent = ::send(fd_, bytes.data(), bytes.size(), 0);
+    const ssize_t sent = ::send(fd_, bytes.data(), bytes.size(), MSG_NOSIGNAL);
     if (sent >= 0) {
       return sent;
     }

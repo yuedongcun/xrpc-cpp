@@ -36,7 +36,7 @@ if(XRPC_BUILD_TOOLS)
 endif()
 
 if(XRPC_BUILD_EXAMPLES)
-    add_subdirectory(example)
+    add_subdirectory(examples)
 endif()
 
 # -----------------------------------------------------------------------

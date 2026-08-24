@@ -329,7 +329,7 @@ auto UringContext::Send(int fd, const void *buffer, std::size_t len) -> UringAwa
   operation->awaitable_state_ = state;
 
   runtime_->SubmitAwaitableOperation(std::move(operation), [fd, buffer, len](io_uring_sqe *sqe) -> void {
-    io_uring_prep_send(sqe, fd, buffer, len, 0);
+    io_uring_prep_send(sqe, fd, buffer, len, MSG_NOSIGNAL);
   });
 
   return awaitable;
