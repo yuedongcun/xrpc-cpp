@@ -94,20 +94,17 @@ auto ServerConnection::ReadLoop() -> runtime::Task<void> {
 
 协程返回类型需要向编译器提供 `promise_type`。在 xRPC 中，`Task<void>::promise_type` 实际指向存放在 coroutine frame 内的 `TaskPromise<void>`。它参与整个协程从创建到结束的过程：
 
-```text
-调用协程函数
-  ↓
-创建 coroutine frame 和 promise
-  ↓
-get_return_object() 产生 Task<void>
-  ↓
-initial_suspend() 让新协程保持挂起
-  ↓
-Task::Start() 恢复并执行函数体
-  ↓
-return_void() / unhandled_exception()
-  ↓
-final_suspend() 发布完成并恢复 continuation
+```mermaid
+flowchart TB
+  call["调用协程函数"] --> frame["创建 coroutine frame<br/>构造 promise"]
+  frame --> result["get_return_object()<br/>产生 Task&lt;void&gt;"]
+  result --> initial["initial_suspend()<br/>新协程保持挂起"]
+  initial --> start["Task::Start()<br/>恢复并执行函数体"]
+  start --> outcome{"执行结果"}
+  outcome -->|正常返回| returned["return_void()"]
+  outcome -->|未捕获异常| failed["unhandled_exception()<br/>保存 exception_ptr"]
+  returned --> final["final_suspend()<br/>发布完成并恢复 continuation"]
+  failed --> final
 ```
 
 这些函数是 C++ 协程协议规定的 promise 钩子，编译器会在相应阶段调用它们：
@@ -161,151 +158,178 @@ const io::IoResult result = awaiter.await_resume();
 
 `co_await` 挂起协程后，Linux 只知道某个 io_uring operation 已经完成，并不知道对应哪个 C++ coroutine frame。`UringContext` 必须把 CQE 转换为 `IoResult`，找到等待该结果的 coroutine handle，并在 I/O 线程上恢复它。
 
-本节只讨论 `Accept()`、`Recv()`、`Send()` 和 `SleepFor()` 这类内核异步操作。写队列使用的用户态 awaiter 不提交 SQE，也不经过 CQE。
+### 完成状态设计
+
+一次 awaitable I/O 使用两个状态对象：`AwaitableState` 服务协程等待侧，`Operation` 服务内核完成侧。下面的结构图只展示与 completion 生命周期有关的成员和关系：
+
+```mermaid
+classDiagram
+  direction LR
+
+  class UringContext {
+    +Accept() UringAwaitable
+    +Recv() UringAwaitable
+    +Send() UringAwaitable
+    +SleepFor() UringAwaitable
+  }
+
+  class UringAwaitable {
+    -shared_ptr state_
+    +await_ready() bool
+    +await_suspend(handle) bool
+    +await_resume() IoResult
+  }
+
+  class AwaitableState {
+    +IoResult result_
+    +bool ready_
+    +coroutine_handle continuation_
+  }
+
+  class Operation {
+    +OperationType type_
+    +CompletionCategory completion_category_
+    +int fd_
+    +buffer_
+    +size_t length_
+    +timeout_
+    +weak_ptr awaitable_state_
+  }
+
+  UringContext --> UringAwaitable : 创建并返回
+  UringContext --> Operation : 创建并回收
+  UringAwaitable --> AwaitableState : shared_ptr 强引用
+  Operation --> AwaitableState : weak_ptr 弱引用
+```
+
+`AwaitableState` 是协程侧的完成槽。它保存 CQE 转换得到的 `IoResult`、结果是否就绪，以及等待该结果的 coroutine handle。`UringAwaitable` 通过 `shared_ptr` 保证这份状态在等待期间有效。
+
+`Operation` 是每个 SQE 对应的内核侧提交记录。它保存 operation 类型、completion 类别以及 fd、buffer、长度或 timeout 等提交信息，但只通过 `weak_ptr` 观察 `AwaitableState`，不会延长等待者的生命周期。
+
+`Operation` 由 `UringContext` 创建。提交 SQE 时，它的指针被写入 `user_data`；CQE 到达后，`UringContext` 从同一个字段取回 `Operation`，并在处理完成后回收它。
 
 ### 正常完成路径
 
-一次异步 I/O 使用两个相互关联的状态对象：
-
-```text
-Task
-└─ coroutine frame
-   └─ UringAwaitable
-      └─ shared_ptr<AwaitableState>
-         ├─ IoResult
-         ├─ ready_
-         └─ continuation_
-
-Operation
-├─ operation type / fd / buffer
-└─ weak_ptr<AwaitableState>
-```
-
-`UringContext::Recv()` 等接口会先创建 `AwaitableState` 和 `Operation`，再准备并提交 SQE。`UringAwaitable` 强引用等待状态；`Operation` 保存它的弱引用。SQE 的 `user_data` 保存 `Operation*`，让对应 CQE 能够找回这次提交的运行时状态。
+`UringContext::Recv()` 等接口会先创建 `AwaitableState` 和 `Operation`，再准备并提交 SQE。随后 `co_await` 将当前 coroutine handle 保存到 `AwaitableState`，等待 CQE 沿着 `Operation` 的弱引用返回结果。
 
 完整的恢复路径如下：
 
-```text
-协程执行 co_await UringAwaitable
-  ↓
-await_suspend() 把 coroutine handle 写入 continuation_
-  ↓
-协程挂起，I/O 线程继续运行事件循环
-  ↓
-内核完成 I/O 并产生 CQE
-  ↓
-UringContext 从 CQE 取回 Operation
-  ↓
-把 CQE 结果转换为 IoResult
-  ↓
-Operation 锁定 AwaitableState
-  ↓
-写入 result_，设置 ready_
-  ↓
-resume continuation_
-  ↓
-协程从 co_await 之后继续执行
+```mermaid
+sequenceDiagram
+  participant C as 连接协程
+  participant S as AwaitableState
+  participant U as UringContext
+  participant K as Linux io_uring
+
+  C->>U: Recv(fd, buffer, size)
+  U->>U: 创建 AwaitableState 和 Operation
+  U->>K: 提交 SQE，user_data 保存 Operation*
+  U-->>C: 返回 UringAwaitable
+
+  C->>S: await_suspend(handle)
+  Note over C: 协程挂起，I/O 线程继续运行
+
+  K-->>U: 返回 CQE 和 Operation*
+  U->>U: 将 CQE 转换为 IoResult
+  U->>S: 锁定 weak_ptr，写入结果并设置 ready_
+  S-->>C: continuation_.resume()
+
+  Note over C: 从 co_await 之后继续执行
 ```
 
-CQE 路径取回 `Operation*` 后会重新建立 `unique_ptr` 所有权，因此无论等待协程是否仍然存在，`Operation` 最终都会在 completion 处理结束后被回收。
+### 边界时序
 
-### I/O 先于等待完成
+下面两种情况不是 I/O 错误，而是 awaitable 需要正确处理的生命周期顺序。
 
-SQE 在 `Accept()`、`Recv()`、`Send()` 或 `SleepFor()` 返回 `UringAwaitable` 前就已经提交。调用方也可以暂时保存这个 awaitable，稍后才执行 `co_await`，因此完成结果可能先被事件循环处理。
+#### 结果先于协程挂起就绪
 
-此时 `AwaitableState` 先保存 `IoResult` 并将 `ready_` 设为 `true`。协程随后执行 `co_await` 时，`await_ready()` 会直接返回 `true`，编译器跳过挂起步骤并调用 `await_resume()` 取得结果。完成事件不会丢失，协程也不会被重复恢复。
+**情况：** 调用方可以先取得 `UringAwaitable`，稍后才执行 `co_await`；context 已经停止时，提交接口也会在返回 awaitable 前直接写入取消结果。因此协程准备挂起时，`IoResult` 可能已经就绪。
 
-### 等待者先于 I/O 结束
+**行为：** `AwaitableState` 保存结果并将 `ready_` 设为 `true`。后续 `await_ready()` 返回 `true`，编译器跳过挂起步骤，直接通过 `await_resume()` 取得结果。
 
-另一种顺序是：`UringAwaitable` 或所属 coroutine frame 已经销毁，但内核 operation 仍然 pending。此时 `AwaitableState` 随最后一个 `shared_ptr` 销毁，而 `Operation` 继续存活到 CQE 到达。
+#### 等待者先于 I/O 结束
 
-CQE 路径尝试锁定 `weak_ptr<AwaitableState>`：
+**情况：** `UringAwaitable` 或所属 coroutine frame 已经销毁，但提交给内核的 operation 仍然 pending。`AwaitableState` 随最后一个 `shared_ptr` 销毁，`Operation` 则继续等待对应 CQE。
 
-```text
-锁定成功
-→ 等待状态仍然有效
-→ 写入结果并恢复协程
+**行为：** CQE 路径无法从 `weak_ptr` 锁定 `AwaitableState`，因此不会写入结果或恢复 coroutine handle，只处理并回收 `Operation`。这样可以避免访问已经销毁的 coroutine frame。
 
-锁定失败
-→ 等待者已经不存在
-→ 不写结果，也不恢复协程
-→ 只回收 Operation
-```
+正常服务端路径会保留连接及其 Task，直到相关 I/O 完成或取消；这两个分支用于保证底层 awaitable 在边界顺序下仍然安全。
 
-这样可以避免 CQE 访问已经销毁的 coroutine frame，也避免恢复无效的 coroutine handle。
+## CQE 的三种处理方式
 
-### 为什么需要两个状态对象
+`Operation::completion_category_` 将 CQE 分成三类，它区分的是“收到 CQE 后运行时要做什么”。
 
-`Operation` 属于内核 completion 路径，提交后必须活到 CQE 到达；`AwaitableState` 属于协程等待路径，只需要跟随等待者存活。二者可能以不同顺序结束，因此当前实现没有让 `Operation` 直接持有 coroutine handle，而是通过 `weak_ptr` 观察独立的等待状态。
-
-这层关系只保护 completion state，不拥有 `Recv()` / `Send()` 使用的 buffer，也不拥有 socket。上层仍然必须让 buffer 活到 I/O 完成，并在关闭连接时取消或等待 pending operation。服务端通过保留连接及其 Task，直到相关 I/O 完成或关闭流程结束，来满足这个约束。
-
-## 不同类型的完成事件
-
-运行时处理三类 completion：
-
-| 类别 | 用途 | CQE 到达后的行为 |
+| 类别 | 来源 | CQE 到达后的行为 |
 | --- | --- | --- |
-| Awaitable I/O | `Accept`、`Recv`、`Send`、`Timeout` | 生成 `IoResult` 并恢复等待协程 |
-| Cancel | 取消指定 fd 上的 pending I/O | 校验取消结果，不恢复业务协程 |
-| Wakeup | `eventfd` 唤醒事件循环 | 执行 posted callbacks 或推进停止流程 |
+| Awaitable I/O | `Accept`、`Recv`、`Send`、`SleepFor` | 转换为 `IoResult`，再恢复等待协程 |
+| Cancel | `CancelFd()`、停止时取消 timeout | 确认取消请求，不直接恢复业务协程 |
+| Wakeup | `eventfd` poll | 排空 eventfd 与 posted callback，或推进停止流程 |
 
-Cancel 和 Wakeup 是运行时控制操作，不会被强行包装成协程等待结果。这样，业务 I/O completion 和事件循环控制路径保持分离。
+Cancel CQE 只表示“取消请求已经被内核处理”。被取消的 `Accept`、`Recv` 或 `Send` 仍会各自产生 completion；原协程由那一条 I/O completion 恢复，而不是由 Cancel CQE 恢复。
 
-## 跨线程交接
+Wakeup CQE 是 `Post()` 与 `RequestStop()` 的共同落点。正常运行时，`UringContext` 排空 eventfd 和 callback queue 后会重新提交 eventfd poll；已经请求停止时则不再重挂该 poll，并开始取消 pending timeout。
 
-`Post()` 是外部线程向 `UringContext` 交接工作的入口：
+## 跨线程控制与停止
+
+`Accept()`、`Recv()`、`Send()`、`SleepFor()` 与 `CancelFd()` 只能由 `UringContext::Run()` 所在线程调用。其他线程不能直接碰 socket I/O，只能通过 `Post()` 或 `RequestStop()` 发送控制命令。
+
+### Post()
+
+`Post()` 将 callback 放入 mutex 保护的队列。队列从空变为非空时，调用方写入 eventfd；已经挂起的 eventfd poll 因而产生 Wakeup CQE，最终由 I/O 线程取出并执行 callback：
 
 ```text
 其他线程
-  │
-  ├─ Post(callback)
-  ├─ callback 进入受 mutex 保护的队列
-  └─ write(eventfd)
-         │
-         ▼
-io_uring poll CQE
-  │
-  ├─ 读取 eventfd
-  ├─ 取出 callback batch
-  └─ 在 I/O 线程执行 callback
+  ↓
+Post(callback)
+  ↓
+callback queue + eventfd write
+  ↓
+Wakeup CQE
+  ↓
+I/O 线程执行 callback
 ```
 
-服务端使用这条路径把新连接和 Worker 完成的响应交给对应 I/O 线程。`Post()` 只负责线程间交接，不会让接收回调的连接对象变成可由任意线程访问的对象。
+服务端通过这条路径把已接受 socket 交给 Connection I/O Loop，也把 Worker 经 `DispatchMailbox` 返回的 completion 交给原连接的 I/O 线程。交接的是工作，不是连接所有权；连接的可变状态仍只由所属 I/O 线程修改。
 
-当 `RequestStop()` 已经发起停止后，新的 `Post()` 不再进入 callback queue；停止前已经入队的回调仍会由 I/O 线程处理。
+### 停止请求、I/O 取消与资源释放
 
-## 停止与取消
+关闭运行时需要分别解决三个问题：事件循环何时退出、尚未完成的 socket I/O 如何结束，以及 fd 由谁释放。它们对应三个不同接口：
 
-`RequestStop()` 表示“停止事件循环并排空已经提交的工作”，而不是立即销毁 ring：
+| 层次 | 接口 | 职责 |
+| --- | --- | --- |
+| Context 级 | `RequestStop()` | 不再接受新的 `Post()`，并让 `Run()` 在所有已提交 operation 都完成后退出 |
+| I/O 级 | `CancelFd(fd)` | 向 io_uring 提交取消请求，使该 fd 上尚未完成的 `Accept`、`Recv` 或 `Send` 尽快产生 completion |
+| 资源级 | `Socket::Close()` | 释放 socket 文件描述符；socket 的所有者负责调用 |
+
+`RequestStop()` 不是“立即终止所有 I/O”。它只表达整个 context 的退出意图，并通过 eventfd 唤醒 `Run()`。`Run()` 仍会继续消费 CQE，直到 pending operation 计数归零，避免在内核仍可能返回 completion 时销毁运行时状态。
+
+`CancelFd()` 也不是另一种 context shutdown。它只针对一个 fd：提交 cancel SQE 后，取消请求本身会产生一个 Cancel CQE；被取消的原始 I/O 也会各自产生自己的 CQE，并以 `ECANCELED` 等结果恢复对应协程。事件循环必须处理完这两类 CQE，相关 operation 才算真正结束。
+
+`UringContext` 只借用 fd，不拥有 socket，因此无法自行决定某条连接应该自然完成还是立即终止。上层 socket owner 负责选择关闭策略：优雅关闭时先排空已接收工作和响应；需要终止连接时，在所属 I/O 线程调用 `CancelFd(fd)`，再调用 `Socket::Close()` 释放 fd。
+
+两种连接关闭路径只在调用 `Close()` 的时机上不同：
+
+| 场景 | 关闭前的处理 | 最终动作 |
+| --- | --- | --- |
+| 优雅关闭 | 停止读取新请求，等待 Handler 完成并写回响应 | 调用 `ServerConnection::Close()` |
+| 异常或立即停止 | 不等待现有工作排空 | 直接调用 `ServerConnection::Close()` |
+
+两条路径随后执行相同的资源回收流程：
 
 ```text
-停止接受新的 Post
-→ 唤醒 Run()
-→ 执行已经入队的 callback
-→ 取消 pending timeout
-→ 继续处理剩余 CQE
-→ 没有 pending I/O 和 wakeup poll
-→ Run() 返回
+ServerConnection::Close()
+→ CancelFd(fd)
+→ Socket::Close()
+→ 处理 Cancel CQE 和原始 I/O CQE
+→ pending operation 归零
+→ RequestStop() 已发起后，UringContext::Run() 返回
 ```
 
-`RequestStop()` 不会自动取消 pending `Accept`、`Recv` 或 `Send`。socket 的所有者必须让这些操作自然完成，或者关闭 fd 并在所属 I/O 线程调用 `CancelFd()`。取消请求本身也会产生 CQE，因此仍要由事件循环处理和回收。
+因此，`RequestStop()` 管理的是 event loop 生命周期，`CancelFd()` 管理的是 pending I/O，`Socket::Close()` 管理的是 fd 生命周期。服务端关闭流程将三者按顺序组合，而不是依赖其中某一个接口完成全部工作。
 
-这个约束保证 `UringContext` 不会在内核仍可能返回 CQE 时销毁相关状态。服务端关闭流程会先停止接收连接、关闭或排空连接 I/O，再让对应 `UringContext::Run()` 退出。
+## 运行时约束
 
-## Socket 边界
-
-`io::Socket` 是文件描述符的 RAII 包装，负责 bind、listen、阻塞式 connect 和显式 close。它不拥有事件循环；服务端连接的异步收发由 `UringContext` 完成。
-
-同步和异步发送路径都使用 `MSG_NOSIGNAL`。对端提前关闭连接时，发送操作会以 `EPIPE` 等普通 I/O 错误返回，而不会通过 `SIGPIPE` 终止整个进程。
-
-## 设计边界
-
-这套运行时刻意保持较小的职责范围：
-
-- `UringContext` 只负责 I/O 提交、completion 和跨线程唤醒；
-- `Task` 只负责 coroutine frame 的执行与结果；
-- 连接所有权、buffer 生命周期和关闭顺序由上层 runtime 管理；
-- RPC 帧解析、业务调度、服务发现和客户端路由不属于 I/O 层。
-
-核心原则是让可变 I/O 状态归属于一个 event-loop 线程，并通过 SQE/CQE 和少数跨线程交接点驱动整个服务端网络路径。
+- 一个 `UringContext` 只由一条 `Run()` 线程驱动；同一个 ring 中可以同时有多条 pending I/O。
+- 可能等待的 I/O 必须通过 `co_await` 挂起协程，不能在 I/O 线程使用阻塞式等待。
+- `UringContext` 负责 SQE 提交、CQE 处理、协程恢复和跨线程唤醒；`Task` 负责 coroutine frame。
+- 连接状态、RPC 帧解析、业务调度、服务发现和客户端路由属于上层 runtime，不属于 I/O 层。
