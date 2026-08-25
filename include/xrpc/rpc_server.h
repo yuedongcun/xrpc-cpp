@@ -37,7 +37,7 @@ struct MethodRegistration final {
 };
 
 /**
- * @brief Adapts a typed unary Protobuf handler for `RpcServer` registration.
+ * @brief Adapts a unary Protobuf handler for `RpcServer` registration.
  *
  * `Request` must support `ParseFromArray`; `Response` must support
  * `SerializeToString`; and `func` must be callable as `Response(Request)`.
@@ -99,7 +99,7 @@ struct RpcServerOptions {
   /** Maximum queued response bytes on one client connection. Must be positive. */
   std::size_t max_write_queue_bytes_per_connection_ = 8U * 1024U * 1024U;
 
-  /** Maximum admitted worker jobs across all connections. Must be positive. */
+  /** Maximum RPCs awaiting or undergoing Worker execution across all connections. Must be positive. */
   std::size_t max_pending_jobs_global_ = 10000;
 
   /** Maximum serialized request or response payload. Must be positive. */
@@ -150,7 +150,7 @@ class RpcServer final {
   auto operator=(RpcServer &&) noexcept -> RpcServer &;
 
   /**
-   * @brief Registers a typed unary Protobuf method before `Run()`.
+   * @brief Registers a unary Protobuf method before `Run()`.
    *
    * Registration remains available after `Listen()` and is frozen when
    * `Run()` begins. The handler may then be called concurrently by worker

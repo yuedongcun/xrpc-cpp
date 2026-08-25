@@ -123,7 +123,7 @@ class RpcClient final {
     } catch (const std::exception &exception) {
       return StatusOr<Resp>(Status{StatusCode::Internal, exception.what()});
     } catch (...) {
-      return StatusOr<Resp>(Status{StatusCode::Internal, "failed to serialize typed request"});
+      return StatusOr<Resp>(Status{StatusCode::Internal, "failed to serialize Protobuf request"});
     }
 
     StatusOr<std::string> payload_result =
@@ -135,13 +135,13 @@ class RpcClient final {
     try {
       Resp response;
       if (!response.ParseFromString(payload_result.value())) {
-        return StatusOr<Resp>(Status(StatusCode::DataLoss, "failed to decode typed response"));
+        return StatusOr<Resp>(Status(StatusCode::DataLoss, "failed to decode Protobuf response"));
       }
       return StatusOr<Resp>(std::move(response));
     } catch (const std::exception &exception) {
       return StatusOr<Resp>(Status{StatusCode::Internal, exception.what()});
     } catch (...) {
-      return StatusOr<Resp>(Status{StatusCode::Internal, "failed to decode typed response"});
+      return StatusOr<Resp>(Status{StatusCode::Internal, "failed to decode Protobuf response"});
     }
   }
 

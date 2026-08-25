@@ -105,11 +105,11 @@ WorkerPool::TrySubmitBatch
   ↓
 ServiceRegistry::Dispatch
   ↓
-类型化 request ParseFromArray
+Protobuf request ParseFromArray
   ↓
 User Handler
   ↓
-类型化 response SerializeToString
+Protobuf response SerializeToString
   ↓
 FrameCodec::Encode
 ```

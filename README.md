@@ -10,7 +10,7 @@ xRPC 是一个基于 `io_uring` 和 C++20 协程构建的 Linux RPC 框架。
 - **多 I/O Loop 并发模型**：Accept 与连接 I/O 分离；每条连接建立后固定归属于一个 I/O Loop，由少量 I/O 线程驱动大量并发连接。
 - **I/O 与业务执行分离**：Connection I/O Loop 专注网络收发与连接状态，业务 Handler 在独立 worker 线程执行，响应完成后回到原 I/O Loop 写回。
 - **多路复用客户端**：多个同步 RPC 调用复用同一 TCP 连接，通过 request ID 独立匹配响应。
-- **Consul 服务发现**：客户端通过不可变 Endpoint 快照接收健康实例变化，调用时完成目标选择并复用未变化实例的连接。
+- **Consul 服务发现**：客户端通过 Consul 发现健康服务实例，调用时选择目标并复用连接。
 
 ## 架构
 
@@ -77,19 +77,21 @@ if (!response.ok()) return 1;
 
 性能测试聚焦完整的服务端 Protobuf RPC 路径：连接接入、`io_uring` 收发、协议解析、Worker Pool 调度、Echo Handler 执行和响应写回。Firehose 仅作为低开销发压器，避免正式客户端先成为瓶颈。
 
-测试运行于 Intel Core i7-9750H、Linux 6.6 WSL2 loopback 和 Clang 20 Release 构建。服务端使用 3 个 Connection I/O 线程和 3 个 Worker 线程；固定 12 条 TCP 连接和 128 字节 Echo payload，逐步提高全局并发请求数。每个工作点预热 3 秒、测量 30 秒并重复 3 次；图中圆点表示中位数，范围线表示三轮最小值到最大值。
+测试运行于 WSL2（Ubuntu 24.04.3 LTS、Linux 6.6），CPU 为 Intel Core i7-9750H（6 核 12 线程），使用 Clang 20 进行 Release 构建，网络路径为本机 loopback。服务端使用 3 个 Connection I/O 线程和 3 个 Worker 线程；固定 12 条 TCP 连接和 128 字节 Echo payload，逐步提高全局并发请求数。每个工作点预热 3 秒、测量 30 秒并重复 3 次；图中圆点表示中位数，范围线表示三轮最小值到最大值。
 
 ![xRPC 服务端负载曲线](docs/server-performance.svg)
 
-低延迟参考点为 96 个并发请求，QPS 中位数为 173,328，p99 中位数为 0.95 ms；最高零失败测试点为 8,192 个并发请求，QPS 中位数为 606,053，p99 中位数为 26.16 ms。并发请求数提高到 12,288 后，三轮共出现 32,902 次失败，因此该点只用于标识过载边界，不作为有效容量成绩。
+- **低延迟**：96 个并发请求，QPS 中位数为 173,328，p99 中位数为 0.95 ms。
+- **零失败容量**：8,192 个并发请求，QPS 中位数为 606,053，p99 中位数为 26.16 ms。
+- **过载边界**：12,288 个并发请求超过服务端 10,000 个 RPC 的全局 Worker 准入上限，触发 `ResourceExhausted` 背压响应，三轮共出现 32,902 次失败。该点不作为有效容量成绩。
 
-这是单机 loopback 下的服务端负载曲线，不代表跨主机网络性能，也不用于与其他 RPC 框架横向比较。测试不做绑核、控频、NUMA 调优或 perf 编排；完整数据、配置和复现命令见 [Benchmark 工具](tools/benchmark/README.md)。
+结果仅代表单机 loopback 环境，不用于推断跨主机性能或与其他 RPC 框架横向比较。完整数据、配置和复现命令见 [Benchmark 工具](tools/benchmark/README.md)。
 
 ## 项目边界
 
-xRPC 当前面向 Linux，提供基于 TCP 的请求—响应式 RPC：每次调用对应一个请求和一个响应，支持类型化 Protobuf 消息和原始字节载荷。
+xRPC 当前面向 Linux，提供基于 TCP 的请求—响应式 RPC：每次调用对应一个请求和一个响应，支持 Protobuf 消息和原始字节载荷。
 
-传输使用项目自定义的 XRPC 帧协议，不兼容 gRPC；TLS、身份认证、流式 RPC 和跨语言代码生成暂未提供。
+项目在 TCP 之上使用自定义 RPC 线协议（wire protocol），其中 metadata 和用户消息采用 Protobuf 编码。该协议不兼容 gRPC；TLS、身份认证、流式 RPC 和跨语言代码生成暂未提供。
 
 ## 文档
 

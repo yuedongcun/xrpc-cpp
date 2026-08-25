@@ -35,7 +35,7 @@ RpcClient
    └─ request-id counter
 ```
 
-- `RpcClient` 负责公开类型化 API 和异常到 `Status` 的边界；
+- `RpcClient` 负责公开 Protobuf 消息 API 和异常到 `Status` 的边界；
 - `RpcClient::Impl` 负责发现、路由、request ID 和安全 failover；
 - `ServiceDiscovery` 发布完整、不可变的 Endpoint 集合；
 - `RoutingSnapshot` 把同一版 Endpoint、transport 和一致性哈希环绑定在一起；

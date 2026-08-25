@@ -2,7 +2,7 @@
 
 ## 协议定位
 
-xRPC 在 TCP 之上使用项目自定义的二进制帧协议。Protobuf 用于 RPC metadata 和用户消息序列化，但这不是 gRPC 协议，也没有跨语言兼容承诺。
+xRPC 在 TCP 之上定义了一套请求—响应线协议（wire protocol），用于划分消息边界、关联请求与响应，并承载 RPC metadata 和用户 payload。metadata 和用户消息采用 Protobuf 编码，但这不是 gRPC 协议，也没有跨语言兼容承诺。
 
 当前协议版本为 1，只支持两种消息：
 
@@ -61,7 +61,7 @@ OK 且没有错误文本的 response metadata 使用 Protobuf 默认值，可编
 
 payload 是用户请求或响应消息的已序列化字节。协议层只复制和传输它，不知道具体 Protobuf message 类型。
 
-因此一次类型化调用有两层 Protobuf：
+因此一次 Protobuf 消息调用有两层 Protobuf 数据：
 
 ```text
 RPC metadata
@@ -75,7 +75,7 @@ user payload
 
 ## 请求编码
 
-客户端类型化调用的编码路径是：
+客户端 Protobuf 消息调用的编码路径是：
 
 ```text
 用户 Request message
@@ -135,7 +135,7 @@ ResponseMetadata + payload
 
 frame bytes 通过 `DispatchMailbox` 返回原 Connection I/O 线程并写入 socket。
 
-客户端 reader 解码 `ResponseMetadata` 和 payload，根据 `request_id` 找到等待中的调用。公开类型化 `Call<Resp>()` 最后再通过 `Resp::ParseFromString()` 解析用户 response。
+客户端 reader 解码 `ResponseMetadata` 和 payload，根据 `request_id` 找到等待中的调用。公开 `Call<Resp, Req>()` 最后再通过 `Resp::ParseFromString()` 解析用户 response。
 
 ## TCP 字节流与增量解码
 
