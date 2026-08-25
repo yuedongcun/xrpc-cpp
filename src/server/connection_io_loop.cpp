@@ -154,29 +154,28 @@ void ConnectionIoLoop::StartConnectionOnContext(io::Socket client_socket) {
     OnConnectionClosed();
     throw;
   }
-  ConnectionEntry entry{.connection_ = connection, .read_task_ = connection->ReadLoop()};
-  entry.read_task_.Start();
-  connections_.push_back(std::move(entry));
+  connections_.push_back(connection);
+  connection->Start();
 }
 
 void ConnectionIoLoop::CollectClosedConnections() {
-  std::erase_if(connections_, [](const ConnectionEntry &entry) -> bool {
-    return entry.connection_->IsClosed() && entry.read_task_.Done();
+  std::erase_if(connections_, [](const std::shared_ptr<ServerConnection> &connection) -> bool {
+    return connection->CanBeCollected();
   });
 }
 
 void ConnectionIoLoop::CloseConnectionsOnContext() {
-  for (auto &entry : connections_) {
-    if (!entry.connection_->IsClosed()) {
-      entry.connection_->Close();
+  for (const auto &connection : connections_) {
+    if (!connection->IsClosed()) {
+      connection->Close();
     }
   }
   CollectClosedConnections();
 }
 
 void ConnectionIoLoop::BeginDrainOnContext() {
-  for (auto &entry : connections_) {
-    entry.connection_->BeginDrain();
+  for (const auto &connection : connections_) {
+    connection->BeginDrain();
   }
 }
 

@@ -24,7 +24,6 @@
 
 namespace {
 
-constexpr auto PollInterval = std::chrono::milliseconds(1);
 constexpr auto WaitTimeout = std::chrono::milliseconds(1000);
 
 auto Echo(const xrpc::test::EchoRequest &request) -> xrpc::test::EchoResponse {
@@ -152,18 +151,26 @@ class UringContextRunner final {
   std::exception_ptr error_;
 };
 
-template <typename T>
-void StartTaskOnContext(xrpc::io::UringContext &context, xrpc::runtime::Task<T> &task) {
-  context.Post([&task]() { task.Start(); });
-}
+class ConnectionClosedSignal final {
+ public:
+  ConnectionClosedSignal() : future_(promise_.get_future()) {}
 
-auto WaitTaskDone(xrpc::runtime::Task<void> &task, std::chrono::milliseconds timeout,
-                  std::chrono::milliseconds poll_interval) -> bool {
-  const auto deadline = std::chrono::steady_clock::now() + timeout;
-  while (!task.Done() && std::chrono::steady_clock::now() < deadline) {
-    std::this_thread::sleep_for(poll_interval);
+  auto Callback() -> std::function<void()> {
+    return [this]() -> void { promise_.set_value(); };
   }
-  return task.Done();
+
+  [[nodiscard]] auto WaitFor(std::chrono::milliseconds timeout) -> bool {
+    return future_.wait_for(timeout) == std::future_status::ready;
+  }
+
+ private:
+  std::promise<void> promise_;
+  std::future<void> future_;
+};
+
+void StartConnectionOnContext(xrpc::io::UringContext &context,
+                              const std::shared_ptr<xrpc::ServerConnection> &connection) {
+  context.Post([connection]() -> void { connection->Start(); });
 }
 
 auto DecodeEchoMessage(std::string_view frame, std::uint64_t expected_request_id) -> std::string {
@@ -207,11 +214,11 @@ auto MakeConnectedPair() -> ConnectedPair {
   return ConnectedPair{.client_socket_ = std::move(client_socket), .server_socket_ = listen_socket.Accept()};
 }
 
-auto WaitForConnectionTask(xrpc::runtime::Task<void> &task, xrpc::io::UringContext &context, UringContextRunner &runner)
-    -> bool {
-  const bool done = WaitTaskDone(task, WaitTimeout, PollInterval);
+auto StopAfterConnectionCloses(ConnectionClosedSignal &closed, xrpc::io::UringContext &context,
+                               UringContextRunner &runner) -> bool {
+  const bool connection_closed = closed.WaitFor(WaitTimeout);
   runner.StopAndJoin(context);
-  return done;
+  return connection_closed;
 }
 
 }  // namespace
@@ -222,11 +229,12 @@ TEST(ServerConnectionTest, EchoesSingleFrameAndClosesAfterPeerShutdown) {
   xrpc::WorkerPool worker_pool(1);
   xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
   auto mailbox = std::make_shared<xrpc::DispatchMailbox>(context);
-  auto connection = std::make_shared<xrpc::ServerConnection>(
-      context, registry, worker_pool, *mailbox, std::move(pair.server_socket_), MakeConnectionConfig(), []() {});
-  xrpc::runtime::Task<void> task = connection->ReadLoop();
+  ConnectionClosedSignal closed;
+  auto connection =
+      std::make_shared<xrpc::ServerConnection>(context, registry, worker_pool, *mailbox, std::move(pair.server_socket_),
+                                               MakeConnectionConfig(), closed.Callback());
   UringContextRunner runner;
-  StartTaskOnContext(context, task);
+  StartConnectionOnContext(context, connection);
   runner.Start(context);
 
   std::string received_buffer;
@@ -236,7 +244,7 @@ TEST(ServerConnectionTest, EchoesSingleFrameAndClosesAfterPeerShutdown) {
   const std::string response = RecvFrame(pair.client_socket_, received_buffer);
   pair.client_socket_.Close();
 
-  ASSERT_TRUE(WaitForConnectionTask(task, context, runner));
+  ASSERT_TRUE(StopAfterConnectionCloses(closed, context, runner));
   EXPECT_TRUE(connection->IsClosed());
   EXPECT_EQ(DecodeEchoMessage(response, 7), "echo: hello");
 }
@@ -247,15 +255,16 @@ TEST(ServerConnectionTest, ServerDrainClosesConnection) {
   xrpc::WorkerPool worker_pool(1);
   xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
   auto mailbox = std::make_shared<xrpc::DispatchMailbox>(context);
-  auto connection = std::make_shared<xrpc::ServerConnection>(
-      context, registry, worker_pool, *mailbox, std::move(pair.server_socket_), MakeConnectionConfig(), []() {});
-  xrpc::runtime::Task<void> task = connection->ReadLoop();
+  ConnectionClosedSignal closed;
+  auto connection =
+      std::make_shared<xrpc::ServerConnection>(context, registry, worker_pool, *mailbox, std::move(pair.server_socket_),
+                                               MakeConnectionConfig(), closed.Callback());
   UringContextRunner runner;
-  StartTaskOnContext(context, task);
+  StartConnectionOnContext(context, connection);
   context.Post([connection]() { connection->BeginDrain(); });
   runner.Start(context);
 
-  ASSERT_TRUE(WaitForConnectionTask(task, context, runner));
+  ASSERT_TRUE(StopAfterConnectionCloses(closed, context, runner));
   EXPECT_TRUE(connection->IsClosed());
   char byte = 0;
   EXPECT_EQ(pair.client_socket_.Read(&byte, sizeof(byte)), 0);
@@ -268,11 +277,12 @@ TEST(ServerConnectionTest, HandlesHalfPacketsAndStickyPackets) {
   xrpc::WorkerPool worker_pool(1);
   xrpc::ServiceRegistry registry = MakeRegistry(MakeSlowEchoHandler());
   auto mailbox = std::make_shared<xrpc::DispatchMailbox>(context);
-  auto connection = std::make_shared<xrpc::ServerConnection>(
-      context, registry, worker_pool, *mailbox, std::move(pair.server_socket_), MakeConnectionConfig(), []() {});
-  xrpc::runtime::Task<void> task = connection->ReadLoop();
+  ConnectionClosedSignal closed;
+  auto connection =
+      std::make_shared<xrpc::ServerConnection>(context, registry, worker_pool, *mailbox, std::move(pair.server_socket_),
+                                               MakeConnectionConfig(), closed.Callback());
   UringContextRunner runner;
-  StartTaskOnContext(context, task);
+  StartConnectionOnContext(context, connection);
   runner.Start(context);
 
   const std::string first_request = MakeRequestFrame("first", 11);
@@ -290,7 +300,7 @@ TEST(ServerConnectionTest, HandlesHalfPacketsAndStickyPackets) {
   const std::string second_response = RecvFrame(pair.client_socket_, received_buffer);
   pair.client_socket_.Close();
 
-  ASSERT_TRUE(WaitForConnectionTask(task, context, runner));
+  ASSERT_TRUE(StopAfterConnectionCloses(closed, context, runner));
   EXPECT_TRUE(connection->IsClosed());
   EXPECT_EQ(DecodeEchoMessage(first_response, 11), "echo: first");
   EXPECT_EQ(DecodeEchoMessage(second_response, 12), "echo: second");
@@ -302,11 +312,12 @@ TEST(ServerConnectionTest, HandlesPipelinedRequestsOnOneConnection) {
   xrpc::WorkerPool worker_pool(1);
   xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
   auto mailbox = std::make_shared<xrpc::DispatchMailbox>(context);
-  auto connection = std::make_shared<xrpc::ServerConnection>(
-      context, registry, worker_pool, *mailbox, std::move(pair.server_socket_), MakeConnectionConfig(), []() {});
-  xrpc::runtime::Task<void> task = connection->ReadLoop();
+  ConnectionClosedSignal closed;
+  auto connection =
+      std::make_shared<xrpc::ServerConnection>(context, registry, worker_pool, *mailbox, std::move(pair.server_socket_),
+                                               MakeConnectionConfig(), closed.Callback());
   UringContextRunner runner;
-  StartTaskOnContext(context, task);
+  StartConnectionOnContext(context, connection);
   runner.Start(context);
 
   const std::string first_request = MakeRequestFrame("first", 21);
@@ -320,10 +331,40 @@ TEST(ServerConnectionTest, HandlesPipelinedRequestsOnOneConnection) {
   pair.client_socket_.ShutdownWrite();
   pair.client_socket_.Close();
 
-  ASSERT_TRUE(WaitForConnectionTask(task, context, runner));
+  ASSERT_TRUE(StopAfterConnectionCloses(closed, context, runner));
   EXPECT_TRUE(connection->IsClosed());
   EXPECT_EQ(DecodeEchoMessage(first_response, 21), "echo: first");
   EXPECT_EQ(DecodeEchoMessage(second_response, 22), "echo: second");
+}
+
+TEST(ServerConnectionTest, WakesIdleWriteLoopForLaterResponse) {
+  ConnectedPair pair = MakeConnectedPair();
+  xrpc::io::UringContext context;
+  xrpc::WorkerPool worker_pool(1);
+  xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
+  auto mailbox = std::make_shared<xrpc::DispatchMailbox>(context);
+  ConnectionClosedSignal closed;
+  auto connection =
+      std::make_shared<xrpc::ServerConnection>(context, registry, worker_pool, *mailbox, std::move(pair.server_socket_),
+                                               MakeConnectionConfig(), closed.Callback());
+  UringContextRunner runner;
+  StartConnectionOnContext(context, connection);
+  runner.Start(context);
+
+  std::string received_buffer;
+  pair.client_socket_.WriteAll(MakeRequestFrame("first", 23));
+  const std::string first_response = RecvFrame(pair.client_socket_, received_buffer);
+
+  pair.client_socket_.WriteAll(MakeRequestFrame("second", 24));
+  const std::string second_response = RecvFrame(pair.client_socket_, received_buffer);
+
+  pair.client_socket_.ShutdownWrite();
+  pair.client_socket_.Close();
+
+  ASSERT_TRUE(StopAfterConnectionCloses(closed, context, runner));
+  EXPECT_TRUE(connection->IsClosed());
+  EXPECT_EQ(DecodeEchoMessage(first_response, 23), "echo: first");
+  EXPECT_EQ(DecodeEchoMessage(second_response, 24), "echo: second");
 }
 
 TEST(ServerConnectionTest, ClosesOnInvalidFrame) {
@@ -332,11 +373,12 @@ TEST(ServerConnectionTest, ClosesOnInvalidFrame) {
   xrpc::WorkerPool worker_pool(1);
   xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
   auto mailbox = std::make_shared<xrpc::DispatchMailbox>(context);
-  auto connection = std::make_shared<xrpc::ServerConnection>(
-      context, registry, worker_pool, *mailbox, std::move(pair.server_socket_), MakeConnectionConfig(), []() {});
-  xrpc::runtime::Task<void> task = connection->ReadLoop();
+  ConnectionClosedSignal closed;
+  auto connection =
+      std::make_shared<xrpc::ServerConnection>(context, registry, worker_pool, *mailbox, std::move(pair.server_socket_),
+                                               MakeConnectionConfig(), closed.Callback());
   UringContextRunner runner;
-  StartTaskOnContext(context, task);
+  StartConnectionOnContext(context, connection);
   runner.Start(context);
 
   std::string invalid_request = MakeRequestFrame("hello", 42);
@@ -345,7 +387,7 @@ TEST(ServerConnectionTest, ClosesOnInvalidFrame) {
   pair.client_socket_.ShutdownWrite();
   pair.client_socket_.Close();
 
-  ASSERT_TRUE(WaitForConnectionTask(task, context, runner));
+  ASSERT_TRUE(StopAfterConnectionCloses(closed, context, runner));
   EXPECT_TRUE(connection->IsClosed());
 }
 
@@ -355,11 +397,12 @@ TEST(ServerConnectionTest, HandlesConcurrentResponsesWithWorkerPool) {
   xrpc::WorkerPool worker_pool(2);
   xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
   auto mailbox = std::make_shared<xrpc::DispatchMailbox>(context);
-  auto connection = std::make_shared<xrpc::ServerConnection>(
-      context, registry, worker_pool, *mailbox, std::move(pair.server_socket_), MakeConnectionConfig(), []() {});
-  xrpc::runtime::Task<void> task = connection->ReadLoop();
+  ConnectionClosedSignal closed;
+  auto connection =
+      std::make_shared<xrpc::ServerConnection>(context, registry, worker_pool, *mailbox, std::move(pair.server_socket_),
+                                               MakeConnectionConfig(), closed.Callback());
   UringContextRunner runner;
-  StartTaskOnContext(context, task);
+  StartConnectionOnContext(context, connection);
   runner.Start(context);
 
   xrpc::test::EchoRequest slow_request;
@@ -387,7 +430,7 @@ TEST(ServerConnectionTest, HandlesConcurrentResponsesWithWorkerPool) {
   pair.client_socket_.ShutdownWrite();
   pair.client_socket_.Close();
 
-  ASSERT_TRUE(WaitForConnectionTask(task, context, runner));
+  ASSERT_TRUE(StopAfterConnectionCloses(closed, context, runner));
   EXPECT_TRUE(connection->IsClosed());
 
   const xrpc::FrameDecodeResult first_decoded = codec.Decode(first_response);
@@ -428,34 +471,33 @@ TEST(ServerConnectionTest, KeepsReadingWhileWorkerHandlerIsPending) {
   auto mailbox = std::make_shared<xrpc::DispatchMailbox>(context);
   const auto config =
       MakeConnectionConfig(xrpc::ConnectionBackpressureLimits{.max_inflight_ = 1, .max_write_queue_bytes_ = 1024});
+  ConnectionClosedSignal closed;
   auto connection = std::make_shared<xrpc::ServerConnection>(context, registry, worker_pool, *mailbox,
-                                                             std::move(pair.server_socket_), config, []() {});
-  xrpc::runtime::Task<void> task = connection->ReadLoop();
+                                                             std::move(pair.server_socket_), config, closed.Callback());
   UringContextRunner runner;
-  StartTaskOnContext(context, task);
+  StartConnectionOnContext(context, connection);
   runner.Start(context);
 
   pair.client_socket_.WriteAll(MakeRequestFrame("first", 81));
   const std::future_status handler_started_status = handler_started_future.wait_for(WaitTimeout);
 
-  bool task_done_before_handler_release = false;
+  bool connection_closed_before_handler_release = false;
   if (handler_started_status == std::future_status::ready) {
     pair.client_socket_.WriteAll(MakeRequestFrame("second", 82));
     std::string received_buffer;
     const std::string rejection_response = RecvFrame(pair.client_socket_, received_buffer);
     const xrpc::Status rejection_status = DecodeResponseStatus(rejection_response, 82);
     EXPECT_EQ(rejection_status.code(), xrpc::StatusCode::ResourceExhausted);
-    task_done_before_handler_release = WaitTaskDone(task, std::chrono::milliseconds(20), PollInterval);
+    connection_closed_before_handler_release = closed.WaitFor(std::chrono::milliseconds(20));
   }
   release_handler.set_value();
 
   pair.client_socket_.ShutdownWrite();
   pair.client_socket_.Close();
-  ASSERT_TRUE(WaitTaskDone(task, WaitTimeout, PollInterval));
-  runner.StopAndJoin(context);
+  ASSERT_TRUE(StopAfterConnectionCloses(closed, context, runner));
 
   EXPECT_EQ(handler_started_status, std::future_status::ready);
-  EXPECT_FALSE(task_done_before_handler_release);
+  EXPECT_FALSE(connection_closed_before_handler_release);
   EXPECT_TRUE(connection->IsClosed());
 }
 
@@ -471,11 +513,11 @@ TEST(ServerConnectionTest, RejectsEntireReadBatchWhenInflightLimitWouldBeExceede
   auto mailbox = std::make_shared<xrpc::DispatchMailbox>(context);
   const auto config =
       MakeConnectionConfig(xrpc::ConnectionBackpressureLimits{.max_inflight_ = 1, .max_write_queue_bytes_ = 1024});
+  ConnectionClosedSignal closed;
   auto connection = std::make_shared<xrpc::ServerConnection>(context, registry, worker_pool, *mailbox,
-                                                             std::move(pair.server_socket_), config, []() {});
-  xrpc::runtime::Task<void> task = connection->ReadLoop();
+                                                             std::move(pair.server_socket_), config, closed.Callback());
   UringContextRunner runner;
-  StartTaskOnContext(context, task);
+  StartConnectionOnContext(context, connection);
   runner.Start(context);
 
   xrpc::test::EchoRequest request;
@@ -497,9 +539,8 @@ TEST(ServerConnectionTest, RejectsEntireReadBatchWhenInflightLimitWouldBeExceede
   EXPECT_EQ(DecodeResponseStatus(second_rejection, 52).code(), xrpc::StatusCode::ResourceExhausted);
 
   pair.client_socket_.ShutdownWrite();
-  ASSERT_TRUE(WaitTaskDone(task, WaitTimeout, PollInterval));
   pair.client_socket_.Close();
-  runner.StopAndJoin(context);
+  ASSERT_TRUE(StopAfterConnectionCloses(closed, context, runner));
 
   EXPECT_EQ(handler_calls.load(), 0U);
   EXPECT_TRUE(connection->IsClosed());
@@ -513,16 +554,16 @@ TEST(ServerConnectionTest, ClosesWhenWriteQueueByteLimitIsReached) {
   auto mailbox = std::make_shared<xrpc::DispatchMailbox>(context);
   const auto config =
       MakeConnectionConfig(xrpc::ConnectionBackpressureLimits{.max_inflight_ = 8, .max_write_queue_bytes_ = 1});
+  ConnectionClosedSignal closed;
   auto connection = std::make_shared<xrpc::ServerConnection>(context, registry, worker_pool, *mailbox,
-                                                             std::move(pair.server_socket_), config, []() {});
-  xrpc::runtime::Task<void> task = connection->ReadLoop();
+                                                             std::move(pair.server_socket_), config, closed.Callback());
   UringContextRunner runner;
-  StartTaskOnContext(context, task);
+  StartConnectionOnContext(context, connection);
   runner.Start(context);
 
   pair.client_socket_.WriteAll(MakeRequestFrame("response-is-larger-than-one-byte", 71));
 
-  ASSERT_TRUE(WaitTaskDone(task, WaitTimeout, PollInterval));
+  ASSERT_TRUE(closed.WaitFor(WaitTimeout));
   pair.client_socket_.Close();
   runner.StopAndJoin(context);
 

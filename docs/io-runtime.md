@@ -73,7 +73,7 @@ sequenceDiagram
 | --- | --- | --- |
 | `RpcServer::Impl::AcceptLoop()` | `Accept()` | 持续接收新 TCP 连接 |
 | `ServerConnection::ReadLoop()` | `Recv()` | 读取并解析一条连接上的请求字节流 |
-| `ServerConnection::WriteLoop()` | `Send()` | 按顺序发送该连接写队列中的响应 |
+| `ServerConnection::WriteLoop()` | 写队列通知、`Send()` | 等待并按顺序发送该连接写队列中的响应 |
 
 三者都返回 `Task<void>`。当前客户端不使用协程，生产路径也没有其他返回 `Task` 的函数。下面是连接读协程的简化结构：
 
@@ -88,9 +88,66 @@ auto ServerConnection::ReadLoop() -> runtime::Task<void> {
 }
 ```
 
-调用协程函数时，编译器会创建 coroutine frame，用来保存局部变量、当前执行位置和 promise。`Task<void>` 持有这个 frame 的 coroutine handle；xRPC 的 `Task` 初始处于挂起状态，由所属 runtime 通过 `Start()` 启动。
+调用协程函数时，编译器会把函数转换为状态机，并创建 coroutine frame，用来保存局部变量、当前执行位置和 promise。`Task<void>` 持有这个 frame 的 coroutine handle；xRPC 的 `Task` 初始处于挂起状态，由所属 runtime 通过 `Start()` 启动。
 
-执行到 `co_await UringAwaitable` 时，可以把编译器协议简化为三个步骤。这里的三个 `await_*` 是 `UringAwaitable` 提供给编译器的 awaiter 接口，不是另外三个协程函数：
+每条服务端连接固定拥有一条读协程和一条写协程。读协程通过 `Recv()` 等待内核网络输入；写协程在有数据时通过 `Send()` 等待 socket，在队列为空时通过一个单等待者 awaiter 等待用户态入队通知。两种等待都只挂起当前协程，不阻塞 Connection I/O 线程。
+
+协程返回类型需要向编译器提供 `promise_type`。在 xRPC 中，`Task<void>::promise_type` 实际指向存放在 coroutine frame 内的 `TaskPromise<void>`。它参与整个协程从创建到结束的过程：
+
+```text
+调用协程函数
+  ↓
+创建 coroutine frame 和 promise
+  ↓
+get_return_object() 产生 Task<void>
+  ↓
+initial_suspend() 让新协程保持挂起
+  ↓
+Task::Start() 恢复并执行函数体
+  ↓
+return_void() / unhandled_exception()
+  ↓
+final_suspend() 发布完成并恢复 continuation
+```
+
+这些函数是 C++ 协程协议规定的 promise 钩子，编译器会在相应阶段调用它们：
+
+| Promise 钩子 | 在 xRPC 中的作用 |
+| --- | --- |
+| `get_return_object()` | 创建持有 coroutine handle 的 `Task<void>` |
+| `initial_suspend()` | 返回 `suspend_always`，让 Task 创建后先保持挂起 |
+| `return_void()` | 处理协程正常执行到 `co_return` |
+| `unhandled_exception()` | 保存未捕获异常，供 Task 的观察者重新抛出 |
+| `final_suspend()` | 发布完成状态，并恢复等待该 Task 的 continuation |
+
+这里的 coroutine promise 是 C++ 协程协议的一部分，与线程同步中常见的 `std::promise` 没有关系。它管理整个协程的生命周期；协程运行过程中遇到的每一次 `co_await`，则由对应的 awaiter 管理。
+
+C++20 只定义协程的语言协议，不提供事件循环或网络运行时。编译器看到 `co_await expression` 时，会从表达式取得一个 awaiter，并按标准协议调用 `await_ready()`、`await_suspend()` 和 `await_resume()`。这些名称来自 C++ 协程协议，不是 xRPC 自行约定的接口。
+
+一个类型可以通过 `operator co_await` 返回单独的 awaiter，也可以直接实现这三个方法。xRPC 采用后者：`UringContext::Recv()` 返回的 `UringAwaitable` 本身就是 awaiter。因此下面的代码：
+
+```cpp
+const io::IoResult result =
+    co_await context_->Recv(fd, buffer, size);
+```
+
+可以近似理解为编译器生成了以下控制流程：
+
+```cpp
+UringAwaitable awaiter = context_->Recv(fd, buffer, size);
+
+if (!awaiter.await_ready()) {
+  // current_handle 由编译器从当前 coroutine frame 构造。
+  const bool should_suspend = awaiter.await_suspend(current_handle);
+  if (should_suspend) {
+    // 挂起当前协程，并把控制权返回给调用方。
+  }
+}
+
+const io::IoResult result = awaiter.await_resume();
+```
+
+这是便于理解的等价流程，不是编译器实际生成的完整 C++ 源码。`UringAwaitable` 的三个方法分别控制这一个 I/O 等待点：
 
 | 方法 | 作用 |
 | --- | --- |
@@ -98,13 +155,17 @@ auto ServerConnection::ReadLoop() -> runtime::Task<void> {
 | `await_suspend(handle)` | 保存当前协程 handle，并在结果未就绪时挂起 |
 | `await_resume()` | 协程恢复后返回 `IoResult` |
 
-挂起只会保存连接协程的执行状态并把控制权交还给事件循环，不会阻塞 I/O 线程。该线程可以继续处理其他连接；对应 CQE 到达后，`UringContext` 写入 `IoResult` 并调用保存的 handle，连接协程随后从 `co_await` 之后继续执行。
+挂起只会保存连接协程的执行状态并把控制权交还给事件循环，不会阻塞 I/O 线程。该线程可以继续处理其他连接；对应 CQE 到达后，`UringContext` 写入 `IoResult` 并恢复保存的 handle，连接协程随后从 `co_await` 之后继续执行。
 
-## 内核操作与等待协程
+## I/O 完成后如何恢复协程
 
-协程挂起后，内核 operation 和等待它的 coroutine frame 具有不同的生命周期。本节说明 CQE 如何找到原协程，以及等待者提前销毁时如何避免访问失效状态。
+`co_await` 挂起协程后，Linux 只知道某个 io_uring operation 已经完成，并不知道对应哪个 C++ coroutine frame。`UringContext` 必须把 CQE 转换为 `IoResult`，找到等待该结果的 coroutine handle，并在 I/O 线程上恢复它。
 
-一次普通异步 I/O 涉及四个内部对象：
+本节只讨论 `Accept()`、`Recv()`、`Send()` 和 `SleepFor()` 这类内核异步操作。写队列使用的用户态 awaiter 不提交 SQE，也不经过 CQE。
+
+### 正常完成路径
+
+一次异步 I/O 使用两个相互关联的状态对象：
 
 ```text
 Task
@@ -112,24 +173,72 @@ Task
    └─ UringAwaitable
       └─ shared_ptr<AwaitableState>
          ├─ IoResult
-         └─ coroutine continuation
+         ├─ ready_
+         └─ continuation_
 
 Operation
-├─ 内核操作与 CQE completion 信息
+├─ operation type / fd / buffer
 └─ weak_ptr<AwaitableState>
 ```
 
-`Accept()`、`Recv()`、`Send()` 和 `SleepFor()` 会创建 `Operation` 与 `AwaitableState`，准备 SQE 并立即提交，而不是等到 `await_suspend()` 才提交。因此 CQE 可能在协程真正挂起前到达，`AwaitableState` 会记录这一完成事实，使随后的 `co_await` 直接继续执行，避免丢失完成事件或重复恢复。
+`UringContext::Recv()` 等接口会先创建 `AwaitableState` 和 `Operation`，再准备并提交 SQE。`UringAwaitable` 强引用等待状态；`Operation` 保存它的弱引用。SQE 的 `user_data` 保存 `Operation*`，让对应 CQE 能够找回这次提交的运行时状态。
 
-### 为什么 `Operation` 和 `AwaitableState` 分开
+完整的恢复路径如下：
 
-`Operation` 属于内核完成路径：提交后必须一直存在，直到对应 CQE 到达并由 `UringContext` 回收。
+```text
+协程执行 co_await UringAwaitable
+  ↓
+await_suspend() 把 coroutine handle 写入 continuation_
+  ↓
+协程挂起，I/O 线程继续运行事件循环
+  ↓
+内核完成 I/O 并产生 CQE
+  ↓
+UringContext 从 CQE 取回 Operation
+  ↓
+把 CQE 结果转换为 IoResult
+  ↓
+Operation 锁定 AwaitableState
+  ↓
+写入 result_，设置 ready_
+  ↓
+resume continuation_
+  ↓
+协程从 co_await 之后继续执行
+```
 
-`AwaitableState` 属于协程等待路径：它只在等待者仍然存在时接收结果并保存 continuation。
+CQE 路径取回 `Operation*` 后会重新建立 `unique_ptr` 所有权，因此无论等待协程是否仍然存在，`Operation` 最终都会在 completion 处理结束后被回收。
 
-二者的生命周期可能分叉，因此 `UringAwaitable` 通过 `shared_ptr` 持有 `AwaitableState`，`Operation` 只保存 `weak_ptr`。如果等待者提前销毁，内核操作和 `Operation` 仍可正常完成和回收，但 CQE 不会写入已经失效的状态，也不会恢复已经销毁的协程。
+### I/O 先于等待完成
 
-这层关系只保护 completion state，不拥有 `Recv()` / `Send()` 使用的 buffer，也不拥有 socket。上层必须保证 buffer 在 CQE 到达前有效，并负责协调 socket 的关闭与取消。服务端通过持有连接及其 Task，直到相关 I/O 完成或关闭流程结束，来满足这个条件。
+SQE 在 `Accept()`、`Recv()`、`Send()` 或 `SleepFor()` 返回 `UringAwaitable` 前就已经提交。调用方也可以暂时保存这个 awaitable，稍后才执行 `co_await`，因此完成结果可能先被事件循环处理。
+
+此时 `AwaitableState` 先保存 `IoResult` 并将 `ready_` 设为 `true`。协程随后执行 `co_await` 时，`await_ready()` 会直接返回 `true`，编译器跳过挂起步骤并调用 `await_resume()` 取得结果。完成事件不会丢失，协程也不会被重复恢复。
+
+### 等待者先于 I/O 结束
+
+另一种顺序是：`UringAwaitable` 或所属 coroutine frame 已经销毁，但内核 operation 仍然 pending。此时 `AwaitableState` 随最后一个 `shared_ptr` 销毁，而 `Operation` 继续存活到 CQE 到达。
+
+CQE 路径尝试锁定 `weak_ptr<AwaitableState>`：
+
+```text
+锁定成功
+→ 等待状态仍然有效
+→ 写入结果并恢复协程
+
+锁定失败
+→ 等待者已经不存在
+→ 不写结果，也不恢复协程
+→ 只回收 Operation
+```
+
+这样可以避免 CQE 访问已经销毁的 coroutine frame，也避免恢复无效的 coroutine handle。
+
+### 为什么需要两个状态对象
+
+`Operation` 属于内核 completion 路径，提交后必须活到 CQE 到达；`AwaitableState` 属于协程等待路径，只需要跟随等待者存活。二者可能以不同顺序结束，因此当前实现没有让 `Operation` 直接持有 coroutine handle，而是通过 `weak_ptr` 观察独立的等待状态。
+
+这层关系只保护 completion state，不拥有 `Recv()` / `Send()` 使用的 buffer，也不拥有 socket。上层仍然必须让 buffer 活到 I/O 完成，并在关闭连接时取消或等待 pending operation。服务端通过保留连接及其 Task，直到相关 I/O 完成或关闭流程结束，来满足这个约束。
 
 ## 不同类型的完成事件
 

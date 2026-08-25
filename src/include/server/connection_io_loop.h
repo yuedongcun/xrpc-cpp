@@ -17,7 +17,6 @@
 #include <thread>
 #include <vector>
 
-#include "common/task.h"
 #include "io/socket.h"
 #include "io/uring_context.h"
 #include "protocol/frame_codec.h"
@@ -72,11 +71,6 @@ class ConnectionIoLoop final {
     Stopped,
   };
 
-  struct ConnectionEntry {
-    std::shared_ptr<ServerConnection> connection_;
-    runtime::Task<void> read_task_;
-  };
-
   // Immediate fallback used only by destruction or failed shutdown cleanup.
   void StopImmediately() noexcept;
 
@@ -99,7 +93,7 @@ class ConnectionIoLoop final {
   WorkerPool *worker_pool_;
   ConnectionBackpressureLimits limits_;
   ProtocolLimits protocol_limits_;
-  std::vector<ConnectionEntry> connections_;
+  std::vector<std::shared_ptr<ServerConnection>> connections_;
   std::jthread thread_;
   std::exception_ptr error_;
   std::mutex drain_mutex_;

@@ -35,9 +35,25 @@ ServerConnection::ServerConnection(io::UringContext &context, ServiceRegistry &r
       socket_(std::move(socket)),
       read_buffer_(MakeReadBufferSize(), '\0'),
       limits_(config.limits_),
-      on_closed_(std::move(on_closed)) {}
+      on_closed_(std::move(on_closed)),
+      read_loop_task_(ReadLoop()),
+      write_loop_task_(WriteLoop()) {}
 
 ServerConnection::~ServerConnection() = default;
+
+void ServerConnection::Start() {
+  write_loop_task_.Start();
+  read_loop_task_.Start();
+}
+
+auto ServerConnection::WriteQueueAwaiter::await_ready() const noexcept -> bool {
+  return connection_.state_ == State::Closed || !connection_.write_queue_.empty();
+}
+
+void ServerConnection::WriteQueueAwaiter::await_suspend(std::coroutine_handle<> continuation) const noexcept {
+  assert(!connection_.write_queue_waiter_);
+  connection_.write_queue_waiter_ = continuation;
+}
 
 auto ServerConnection::ReadLoop() -> runtime::Task<void> {
   while (state_ == State::Active) {
@@ -106,7 +122,7 @@ void ServerConnection::Close() {
   state_ = State::Closed;
   write_queue_.clear();
   pending_write_bytes_ = 0;
-  write_loop_active_ = false;
+  WakeWriteLoop();
   context_->CancelFd(socket_.fd());
   socket_.Close();
   if (on_closed_) {
@@ -159,13 +175,7 @@ auto ServerConnection::EnqueueWrite(std::string bytes) -> bool {
   }
 
   write_queue_.push_back(std::move(bytes));
-  if (write_loop_active_) {
-    return true;
-  }
-
-  write_loop_active_ = true;
-  write_task_.emplace(WriteLoop());
-  write_task_->Start();
+  WakeWriteLoop();
   return true;
 }
 
@@ -186,38 +196,56 @@ void ServerConnection::ReleaseWriteBytes(std::size_t bytes) {
 }
 
 auto ServerConnection::WriteLoop() -> runtime::Task<void> {
-  while (state_ != State::Closed && !write_queue_.empty()) {
-    std::string frame = std::move(write_queue_.front());
-    write_queue_.pop_front();
-    std::size_t frame_size = frame.size();
-    if (!write_queue_.empty()) {
-      const std::size_t max_batch_bytes = MakeMaxWriteBatchBytes();
-      frame.reserve(std::min(pending_write_bytes_, max_batch_bytes));
-      while (!write_queue_.empty() && frame.size() + write_queue_.front().size() <= max_batch_bytes) {
-        frame_size += write_queue_.front().size();
-        frame.append(write_queue_.front());
-        write_queue_.pop_front();
-      }
-    }
-    std::size_t offset = 0;
-    while (state_ != State::Closed && offset < frame.size()) {
-      const std::string_view remaining(frame.data() + offset, frame.size() - offset);
-      const io::IoResult send_result = co_await context_->Send(socket_.fd(), remaining.data(), remaining.size());
-      if (state_ == State::Closed) {
-        co_return;
-      }
-      if (send_result.result_ <= 0) {
-        ReleaseWriteBytes(frame_size);
-        Close();
-        co_return;
+  while (state_ != State::Closed) {
+    co_await WriteQueueAwaiter(*this);
+
+    while (state_ != State::Closed && !write_queue_.empty()) {
+      std::string frame = std::move(write_queue_.front());
+      write_queue_.pop_front();
+      std::size_t frame_size = frame.size();
+      if (!write_queue_.empty()) {
+        const std::size_t max_batch_bytes = MakeMaxWriteBatchBytes();
+        frame.reserve(std::min(pending_write_bytes_, max_batch_bytes));
+        while (!write_queue_.empty() && frame.size() + write_queue_.front().size() <= max_batch_bytes) {
+          frame_size += write_queue_.front().size();
+          frame.append(write_queue_.front());
+          write_queue_.pop_front();
+        }
       }
 
-      offset += send_result.bytes_transferred_;
+      std::size_t offset = 0;
+      while (state_ != State::Closed && offset < frame.size()) {
+        const std::string_view remaining(frame.data() + offset, frame.size() - offset);
+        const io::IoResult send_result = co_await context_->Send(socket_.fd(), remaining.data(), remaining.size());
+        if (state_ == State::Closed) {
+          co_return;
+        }
+        if (send_result.result_ <= 0) {
+          ReleaseWriteBytes(frame_size);
+          Close();
+          co_return;
+        }
+
+        offset += send_result.bytes_transferred_;
+      }
+      ReleaseWriteBytes(frame_size);
     }
-    ReleaseWriteBytes(frame_size);
+
+    TryFinishDrain();
   }
-  write_loop_active_ = false;
-  TryFinishDrain();
+}
+
+void ServerConnection::WakeWriteLoop() {
+  if (!write_queue_waiter_) {
+    return;
+  }
+
+  const std::coroutine_handle<> continuation = std::exchange(write_queue_waiter_, nullptr);
+  continuation.resume();
+}
+
+auto ServerConnection::CanBeCollected() const -> bool {
+  return state_ == State::Closed && read_loop_task_.Done() && write_loop_task_.Done();
 }
 
 auto ServerConnection::SubmitDispatchBatch(std::vector<RequestEnvelope> requests) -> bool {
@@ -305,8 +333,8 @@ void ServerConnection::TryFinishDrain() {
     return;
   }
 
-  if (inflight_requests_ == 0 && !write_loop_active_ && write_queue_.empty()) {
-    assert(pending_write_bytes_ == 0);
+  if (inflight_requests_ == 0 && pending_write_bytes_ == 0) {
+    assert(write_queue_.empty());
     Close();
   }
 }

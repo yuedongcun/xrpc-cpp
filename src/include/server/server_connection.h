@@ -2,12 +2,12 @@
 
 #pragma once
 
+#include <coroutine>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <functional>
 #include <memory>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -23,6 +23,7 @@
 namespace xrpc {
 
 class DispatchMailbox;
+class ConnectionIoLoop;
 class ServiceRegistry;
 
 struct ServerConnectionConfig final {
@@ -54,12 +55,13 @@ class ServerConnection final : public std::enable_shared_from_this<ServerConnect
   auto operator=(ServerConnection &&) noexcept -> ServerConnection & = delete;
 
   /**
-   * @brief Reads and decodes requests until the connection stops receiving.
+   * @brief Starts the connection's read and write coroutines.
    *
-   * This coroutine is started once and runs only on the owning I/O context
-   * thread. Connection shutdown waits for the read loop to finish.
+   * The owning `ConnectionIoLoop` calls this once after taking ownership of
+   * the connection. Both coroutines then remain alive until `Close()` wakes or
+   * cancels their current wait and they return.
    */
-  [[nodiscard]] auto ReadLoop() -> runtime::Task<void>;
+  void Start();
 
   void Close();
 
@@ -68,6 +70,7 @@ class ServerConnection final : public std::enable_shared_from_this<ServerConnect
   [[nodiscard]] auto IsClosed() const -> bool { return state_ == State::Closed; }
 
  private:
+  friend class ConnectionIoLoop;
   friend class DispatchMailbox;
 
   enum class State : std::uint8_t {
@@ -75,6 +78,23 @@ class ServerConnection final : public std::enable_shared_from_this<ServerConnect
     Draining,
     Closed,
   };
+
+  class WriteQueueAwaiter final {
+   public:
+    explicit WriteQueueAwaiter(ServerConnection &connection) : connection_(connection) {}
+
+    [[nodiscard]] auto await_ready() const noexcept -> bool;
+
+    void await_suspend(std::coroutine_handle<> continuation) const noexcept;
+
+    void await_resume() const noexcept {}
+
+   private:
+    ServerConnection &connection_;
+  };
+
+  /** @brief Reads and decodes requests until the connection stops receiving. */
+  [[nodiscard]] auto ReadLoop() -> runtime::Task<void>;
 
   void OnEncodedDispatchComplete(std::string &&response_bytes, std::size_t completed_jobs);
 
@@ -89,12 +109,17 @@ class ServerConnection final : public std::enable_shared_from_this<ServerConnect
   void ReleaseWriteBytes(std::size_t bytes);
 
   /**
-   * @brief Sends queued responses until the write queue becomes empty.
+   * @brief Waits for and sends responses until the connection closes.
    *
-   * The loop is started on demand, runs on the owning I/O context thread, and
-   * never has more than one active instance for this connection.
+   * An empty queue suspends this coroutine on `WriteQueueAwaiter`; socket
+   * backpressure suspends it on `UringContext::Send()`.
    */
   [[nodiscard]] auto WriteLoop() -> runtime::Task<void>;
+
+  void WakeWriteLoop();
+
+  /** @return true after both connection I/O coroutines have completed. */
+  [[nodiscard]] auto CanBeCollected() const -> bool;
 
   [[nodiscard]] auto HandleFeedResult(FrameStreamFeedResult &&feed) -> bool;
 
@@ -127,9 +152,7 @@ class ServerConnection final : public std::enable_shared_from_this<ServerConnect
 
   std::deque<std::string> write_queue_;
 
-  std::optional<runtime::Task<void>> write_task_;
-
-  bool write_loop_active_ = false;
+  std::coroutine_handle<> write_queue_waiter_;
 
   std::size_t inflight_requests_ = 0;
 
@@ -140,6 +163,10 @@ class ServerConnection final : public std::enable_shared_from_this<ServerConnect
   std::function<void()> on_closed_;
 
   State state_ = State::Active;
+
+  runtime::Task<void> read_loop_task_;
+
+  runtime::Task<void> write_loop_task_;
 };
 
 }  // namespace xrpc
