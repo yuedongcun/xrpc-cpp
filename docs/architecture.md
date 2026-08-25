@@ -14,7 +14,7 @@ xRPC 是一个面向 Linux 的 C++20 RPC 工程实践项目，用于探索和验
 
 ## 总体结构
 
-![xRPC Runtime Architecture](architecture-overview.svg)
+![xRPC Runtime Architecture](assets/architecture-overview.svg)
 
 xRPC 由客户端和服务端两部分组成，两端通过基于 TCP 的 XRPC 线协议通信。客户端负责服务发现、Endpoint 路由和同步 RPC 调用，服务端负责连接接入、异步网络 I/O、业务执行和响应写回。
 

@@ -154,14 +154,14 @@ void ConnectionIoLoop::StartConnectionOnContext(io::Socket client_socket) {
     OnConnectionClosed();
     throw;
   }
-  ConnectionEntry entry{.connection_ = connection, .task_ = connection->Run()};
-  entry.task_.Start();
+  ConnectionEntry entry{.connection_ = connection, .read_task_ = connection->ReadLoop()};
+  entry.read_task_.Start();
   connections_.push_back(std::move(entry));
 }
 
 void ConnectionIoLoop::CollectClosedConnections() {
   std::erase_if(connections_, [](const ConnectionEntry &entry) -> bool {
-    return entry.connection_->IsClosed() && entry.task_.Done();
+    return entry.connection_->IsClosed() && entry.read_task_.Done();
   });
 }
 

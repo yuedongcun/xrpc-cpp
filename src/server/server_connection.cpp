@@ -39,7 +39,7 @@ ServerConnection::ServerConnection(io::UringContext &context, ServiceRegistry &r
 
 ServerConnection::~ServerConnection() = default;
 
-auto ServerConnection::Run() -> runtime::Task<void> {
+auto ServerConnection::ReadLoop() -> runtime::Task<void> {
   while (state_ == State::Active) {
     const io::IoResult recv_result = co_await context_->Recv(socket_.fd(), read_buffer_.data(), read_buffer_.size());
     if (state_ == State::Closed) {
@@ -106,7 +106,7 @@ void ServerConnection::Close() {
   state_ = State::Closed;
   write_queue_.clear();
   pending_write_bytes_ = 0;
-  write_in_progress_ = false;
+  write_loop_active_ = false;
   context_->CancelFd(socket_.fd());
   socket_.Close();
   if (on_closed_) {
@@ -159,12 +159,12 @@ auto ServerConnection::EnqueueWrite(std::string bytes) -> bool {
   }
 
   write_queue_.push_back(std::move(bytes));
-  if (write_in_progress_) {
+  if (write_loop_active_) {
     return true;
   }
 
-  write_in_progress_ = true;
-  write_task_.emplace(DrainWriteQueue());
+  write_loop_active_ = true;
+  write_task_.emplace(WriteLoop());
   write_task_->Start();
   return true;
 }
@@ -185,7 +185,7 @@ void ServerConnection::ReleaseWriteBytes(std::size_t bytes) {
   pending_write_bytes_ -= bytes;
 }
 
-auto ServerConnection::DrainWriteQueue() -> runtime::Task<void> {
+auto ServerConnection::WriteLoop() -> runtime::Task<void> {
   while (state_ != State::Closed && !write_queue_.empty()) {
     std::string frame = std::move(write_queue_.front());
     write_queue_.pop_front();
@@ -216,7 +216,7 @@ auto ServerConnection::DrainWriteQueue() -> runtime::Task<void> {
     }
     ReleaseWriteBytes(frame_size);
   }
-  write_in_progress_ = false;
+  write_loop_active_ = false;
   TryFinishDrain();
 }
 
@@ -305,7 +305,7 @@ void ServerConnection::TryFinishDrain() {
     return;
   }
 
-  if (inflight_requests_ == 0 && !write_in_progress_ && write_queue_.empty()) {
+  if (inflight_requests_ == 0 && !write_loop_active_ && write_queue_.empty()) {
     assert(pending_write_bytes_ == 0);
     Close();
   }

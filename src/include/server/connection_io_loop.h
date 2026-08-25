@@ -74,7 +74,7 @@ class ConnectionIoLoop final {
 
   struct ConnectionEntry {
     std::shared_ptr<ServerConnection> connection_;
-    runtime::Task<void> task_;
+    runtime::Task<void> read_task_;
   };
 
   // Immediate fallback used only by destruction or failed shutdown cleanup.

@@ -86,7 +86,7 @@ Draining
 - `Draining`：不再读取或提交新请求，但允许已接收请求完成并写回；
 - `Closed`：socket 已关闭，不再启动新的 I/O。
 
-`inflight_requests_`、`write_in_progress_`、`write_queue_` 和 `pending_write_bytes_` 是与生命周期正交的资源状态，不是额外 lifecycle state。
+`inflight_requests_`、`write_loop_active_`、`write_queue_` 和 `pending_write_bytes_` 是与生命周期正交的资源状态，不是额外 lifecycle state。
 
 ## 请求 dispatch
 
@@ -134,14 +134,14 @@ Worker thread
   ├─ lock weak ServerConnection
   ├─ 释放 inflight accounting
   ├─ response 加入 write queue
-  └─ 启动或继续 DrainWriteQueue coroutine
+  └─ 启动或继续 WriteLoop coroutine
 ```
 
 每个 `ConnectionIoLoop` 有自己的 mailbox，因此 completion 天然回到产生请求的 I/O 域。多个 Worker submission 可以合并到一次 posted callback 中。
 
 ## 写路径
 
-每条连接最多有一个活跃的 `DrainWriteQueue()` coroutine。新的 response 只进入 `write_queue_`；如果 writer 已经运行，不再创建第二个 writer。
+每条连接最多有一个活跃的 `WriteLoop()` coroutine。新的 response 只进入 `write_queue_`；如果 writer 已经运行，不再创建第二个 writer。
 
 写协程会把相邻 response frame 合并为不超过 64 KiB 的发送 batch，并处理 partial send。响应可能按 Worker 完成顺序写出，客户端依靠 `request_id` 匹配，而不要求请求与响应严格同序。
 

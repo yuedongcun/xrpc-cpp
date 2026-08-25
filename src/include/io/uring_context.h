@@ -7,7 +7,7 @@
  * submit work on that thread and return move-only awaitables that resume
  * the awaiting coroutine with an `IoResult`.
  *
- * `Post()` and `Stop()` form the cross-thread control boundary. They wake the
+ * `Post()` and `RequestStop()` form the cross-thread control boundary. They wake the
  * event loop safely, but callbacks themselves always execute on the run thread.
  * `CancelFd()` and all awaitable I/O submission must run on that same thread.
  */

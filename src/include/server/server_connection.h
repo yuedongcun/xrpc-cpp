@@ -53,8 +53,13 @@ class ServerConnection final : public std::enable_shared_from_this<ServerConnect
   ServerConnection(ServerConnection &&) noexcept = delete;
   auto operator=(ServerConnection &&) noexcept -> ServerConnection & = delete;
 
-  // I/O-context-thread-only lifecycle operations.
-  [[nodiscard]] auto Run() -> runtime::Task<void>;
+  /**
+   * @brief Reads and decodes requests until the connection stops receiving.
+   *
+   * This coroutine is started once and runs only on the owning I/O context
+   * thread. Connection shutdown waits for the read loop to finish.
+   */
+  [[nodiscard]] auto ReadLoop() -> runtime::Task<void>;
 
   void Close();
 
@@ -83,7 +88,13 @@ class ServerConnection final : public std::enable_shared_from_this<ServerConnect
 
   void ReleaseWriteBytes(std::size_t bytes);
 
-  [[nodiscard]] auto DrainWriteQueue() -> runtime::Task<void>;
+  /**
+   * @brief Sends queued responses until the write queue becomes empty.
+   *
+   * The loop is started on demand, runs on the owning I/O context thread, and
+   * never has more than one active instance for this connection.
+   */
+  [[nodiscard]] auto WriteLoop() -> runtime::Task<void>;
 
   [[nodiscard]] auto HandleFeedResult(FrameStreamFeedResult &&feed) -> bool;
 
@@ -118,7 +129,7 @@ class ServerConnection final : public std::enable_shared_from_this<ServerConnect
 
   std::optional<runtime::Task<void>> write_task_;
 
-  bool write_in_progress_ = false;
+  bool write_loop_active_ = false;
 
   std::size_t inflight_requests_ = 0;
 

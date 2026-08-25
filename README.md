@@ -18,7 +18,7 @@ xRPC 将连接管理、网络 I/O 与 RPC 执行分离：客户端通过服务�
 
 一次 RPC 在所属 I/O Loop 中完成收包与解码，随后交由共享 Worker Pool 执行业务逻辑；响应编码完成后回到原 I/O Loop，并通过对应连接写回客户端。
 
-![xRPC Runtime Architecture](docs/architecture-overview.svg)
+![xRPC Runtime Architecture](docs/assets/architecture-overview.svg)
 
 ## 快速开始
 
@@ -79,7 +79,7 @@ if (!response.ok()) return 1;
 
 测试运行于 WSL2（Ubuntu 24.04.3 LTS、Linux 6.6），CPU 为 Intel Core i7-9750H（6 核 12 线程），使用 Clang 20 进行 Release 构建，网络路径为本机 loopback。服务端使用 3 个 Connection I/O 线程和 3 个 Worker 线程；固定 12 条 TCP 连接和 128 字节 Echo payload，逐步提高全局并发请求数。每个工作点预热 3 秒、测量 30 秒并重复 3 次；图中圆点表示中位数，范围线表示三轮最小值到最大值。
 
-![xRPC 服务端负载曲线](docs/server-performance.svg)
+![xRPC 服务端负载曲线](docs/assets/server-performance.svg)
 
 - **低延迟**：96 个并发请求，QPS 中位数为 173,328，p99 中位数为 0.95 ms。
 - **零失败容量**：8,192 个并发请求，QPS 中位数为 606,053，p99 中位数为 26.16 ms。
