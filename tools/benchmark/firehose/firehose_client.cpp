@@ -679,20 +679,26 @@ class EpollFirehoseWorker final {
     }
 
     auto now = std::chrono::steady_clock::now();
-    for (auto &connection : connections_) {
+    for (std::size_t i = 0; i < connections_.size(); ++i) {
+      auto &connection = connections_[i];
       connection->PumpWrites(now, deadline);
-      AddToEpoll(*connection, now, deadline);
+      AddToEpoll(i, *connection, now, deadline);
     }
 
     std::array<epoll_event, MAX_EPOLL_EVENTS> events{};
+    bool deadline_applied = false;
     while (!AllDone()) {
       now = std::chrono::steady_clock::now();
-      for (auto &connection : connections_) {
-        if (connection->closed()) {
-          continue;
+      if (!deadline_applied && now >= deadline) {
+        deadline_applied = true;
+        for (std::size_t i = 0; i < connections_.size(); ++i) {
+          auto &connection = connections_[i];
+          if (connection->closed()) {
+            continue;
+          }
+          connection->MarkDeadline(now, deadline);
+          UpdateEpoll(i, *connection, now, deadline);
         }
-        connection->MarkDeadline(now, deadline);
-        UpdateEpoll(*connection, now, deadline);
       }
 
       const int timeout_ms = EpollTimeout(now, deadline);
@@ -705,27 +711,28 @@ class EpollFirehoseWorker final {
       }
 
       for (int i = 0; i < ready; ++i) {
-        auto *connection = static_cast<EpollFirehoseConnection *>(events[static_cast<std::size_t>(i)].data.ptr);
-        if (connection == nullptr || connection->closed()) {
+        const std::size_t connection_index = events[static_cast<std::size_t>(i)].data.u64;
+        EpollFirehoseConnection &connection = *connections_[connection_index];
+        if (connection.closed()) {
           continue;
         }
 
         const std::uint32_t event_mask = events[static_cast<std::size_t>(i)].events;
         now = std::chrono::steady_clock::now();
-        connection->MarkDeadline(now, deadline);
+        connection.MarkDeadline(now, deadline);
         if ((event_mask & EPOLLOUT) != 0) {
-          connection->PumpWrites(now, deadline);
+          connection.PumpWrites(now, deadline);
         }
         if ((event_mask & EPOLLIN) != 0) {
-          connection->ReadAvailable();
+          connection.ReadAvailable();
           now = std::chrono::steady_clock::now();
-          connection->MarkDeadline(now, deadline);
-          connection->PumpWrites(now, deadline);
+          connection.MarkDeadline(now, deadline);
+          connection.PumpWrites(now, deadline);
         }
         if ((event_mask & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) != 0) {
-          connection->HandlePeerClosed();
+          connection.HandlePeerClosed();
         }
-        UpdateEpoll(*connection, now, deadline);
+        UpdateEpoll(connection_index, connection, now, deadline);
       }
     }
 
@@ -736,44 +743,34 @@ class EpollFirehoseWorker final {
     epoll_fd_ = -1;
   }
 
-  void AddToEpoll(EpollFirehoseConnection &connection, std::chrono::steady_clock::time_point now,
-                  std::chrono::steady_clock::time_point deadline) {
+  void AddToEpoll(std::size_t connection_index, EpollFirehoseConnection &connection,
+                  std::chrono::steady_clock::time_point now, std::chrono::steady_clock::time_point deadline) {
     epoll_event event{};
     event.events = connection.Events(now, deadline);
-    event.data.ptr = &connection;
+    event.data.u64 = connection_index;
     if (::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, connection.fd(), &event) < 0) {
       throw std::runtime_error(std::string("epoll_ctl(ADD) failed: ") + std::strerror(errno));
     }
     current_events_.push_back(event.events);
   }
 
-  void UpdateEpoll(EpollFirehoseConnection &connection, std::chrono::steady_clock::time_point now,
-                   std::chrono::steady_clock::time_point deadline) {
+  void UpdateEpoll(std::size_t connection_index, EpollFirehoseConnection &connection,
+                   std::chrono::steady_clock::time_point now, std::chrono::steady_clock::time_point deadline) {
     if (connection.closed()) {
       return;
     }
-    const std::size_t index = ConnectionIndex(connection);
     const std::uint32_t new_events = connection.Events(now, deadline);
-    if (current_events_[index] == new_events) {
+    if (current_events_[connection_index] == new_events) {
       return;
     }
 
     epoll_event event{};
     event.events = new_events;
-    event.data.ptr = &connection;
+    event.data.u64 = connection_index;
     if (::epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, connection.fd(), &event) < 0) {
       throw std::runtime_error(std::string("epoll_ctl(MOD) failed: ") + std::strerror(errno));
     }
-    current_events_[index] = new_events;
-  }
-
-  [[nodiscard]] auto ConnectionIndex(const EpollFirehoseConnection &connection) const -> std::size_t {
-    for (std::size_t i = 0; i < connections_.size(); ++i) {
-      if (connections_[i].get() == &connection) {
-        return i;
-      }
-    }
-    throw std::logic_error("epoll connection was not owned by the worker");
+    current_events_[connection_index] = new_events;
   }
 
   [[nodiscard]] auto AllDone() const -> bool {

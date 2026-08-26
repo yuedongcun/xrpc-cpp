@@ -110,6 +110,8 @@ def load_config(path):
         has_inflight_per_connection = "inflight_per_connection" in data
         if has_inflight == has_inflight_per_connection:
             raise RuntimeError("firehose config must set exactly one of inflight or inflight_per_connection")
+        if has_inflight_per_connection and require_int(data, "inflight_per_connection") <= 0:
+            raise RuntimeError("inflight_per_connection must be greater than zero")
 
     config = Config(
         benchmark_type=benchmark_type,

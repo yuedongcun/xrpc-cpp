@@ -85,6 +85,10 @@ if (!response.ok()) return 1;
 - **零失败容量**：8,192 个并发请求，QPS 中位数为 606,053，p99 中位数为 26.16 ms。
 - **过载边界**：12,288 个并发请求超过服务端 10,000 个 RPC 的全局 Worker 准入上限，触发 `ResourceExhausted` 背压响应，三轮共出现 32,902 次失败。该点不作为有效容量成绩。
 
+连接规模测试让每条 TCP 连接保持一个在途 RPC，并将活跃连接数从 12 增加到 3,072；所有工作点均为零失败。3,072 条连接时，QPS 中位数为 52,852，p99 中位数为 109.25 ms。
+
+![xRPC 活跃连接规模](docs/assets/connection-scale.svg)
+
 结果仅代表单机 loopback 环境，不用于推断跨主机性能或与其他 RPC 框架横向比较。完整数据、配置和复现命令见 [Benchmark 工具](tools/benchmark/README.md)。
 
 ## 项目边界
