@@ -55,9 +55,37 @@ consul://echo-service
 
 `StaticDiscovery` 在构造时解析、排序并去重固定列表，此后始终返回同一个快照。
 
-`ConsulDiscovery` 首先执行一次立即查询，然后由一条 refresh thread 使用 Consul blocking query 等待服务变化。查询带有 `passing=true`，因此只发布通过 Consul 健康检查的实例。查询失败时保留上一版可用快照，并记录最近错误供调用失败信息使用。
+`ConsulDiscovery` 首先执行一次立即查询，然后由一条 refresh thread 等待服务变化。查询带有 `passing=true`，因此只发布通过 Consul 健康检查的实例。查询失败时保留上一版可用快照，并记录最近错误供调用失败信息使用。
 
 发现层通过 `atomic<shared_ptr<const DiscoverySnapshot>>` 发布新快照。读者取得 `shared_ptr` 后，该次调用看到的 Endpoint 列表在整个路由过程中保持不变。
+
+### Consul 变化如何到达客户端
+
+Consul 不会主动向 xRPC 推送实例上下线通知。客户端使用 Consul blocking query，在 HTTP 请求中携带上一次响应返回的查询索引：
+
+```text
+GET /v1/health/service/echo-service?passing=true&index=1234&wait=5s
+```
+
+这条请求会在健康实例集合发生变化时提前返回；如果没有变化，最多等待 5 秒后返回，客户端随后立即发起下一次查询。响应头 `X-Consul-Index` 提供下一次查询使用的新索引。
+
+```text
+服务端注册、主动注销或健康检查状态变化
+  ↓
+Consul 更新健康查询结果和 index
+  ↓
+客户端 blocking query 返回
+  ↓
+解析所有 passing 实例
+  ↓
+原子发布新的 DiscoverySnapshot
+  ↓
+后续调用据此构建并使用新的 RoutingSnapshot
+```
+
+正常注销和健康检查失败最终都表现为 Endpoint 从新快照中消失。已经取得旧快照的调用可以继续使用其中的 Endpoint 和 `TcpTransport`；新快照只影响后续路由，不会在调用过程中替换其视图。
+
+Consul 暂时不可用时，refresh thread 保留上一份成功快照，并在 1 秒后重试。这保证短暂的控制面故障不会立即清空客户端路由，但旧 Endpoint 在此期间也可能已经失效，实际连接错误仍由 `TcpTransport` 和 failover 规则处理。
 
 ## 路由快照
 

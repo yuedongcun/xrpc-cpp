@@ -1,195 +1,263 @@
 # 服务端运行时
 
-## 组件与所有权
+xRPC 服务端把监听、连接 I/O 和业务执行分到不同线程，并通过明确的交接点组成一条有界的 RPC 执行路径。本篇关注这些组件如何组合、请求如何流动以及服务端如何关闭；协程和 `io_uring` 的底层机制见 [I/O 运行时](io-runtime.md)。
 
-`RpcServer` 是公开 facade，内部实现集中在 `RpcServer::Impl`。`Impl` 负责组件组装和生命周期协调，不参与每次 RPC 的具体 dispatch。
+## 总体结构
+
+`RpcServer` 是公开接口，`RpcServer::Impl` 负责组装内部组件并协调生命周期：
 
 ```text
-RpcServer::Impl
-├─ ServerConfig
-├─ ServiceRegistry
-├─ WorkerPool
-├─ ConsulRegistrar（可选）
-├─ listen socket
-├─ accept UringContext
-├─ AcceptLoop Task
-└─ ConnectionIoLoop[]
-   ├─ connection UringContext
-   ├─ I/O thread
-   ├─ DispatchMailbox
-   └─ ServerConnection[]
+RpcServer
+└─ RpcServer::Impl
+   ├─ ServerConfig
+   ├─ ServiceRegistry
+   ├─ WorkerPool
+   ├─ ConsulRegistrar（可选）
+   ├─ listen socket
+   ├─ accept UringContext
+   ├─ AcceptLoop Task
+   └─ ConnectionIoLoop[]
+      ├─ connection UringContext
+      ├─ I/O thread
+      ├─ DispatchMailbox
+      └─ ServerConnection[]
+         ├─ ReadLoop Task
+         └─ WriteLoop Task
 ```
 
-这里有三个真正的执行域：
+服务端运行在三类线程上：
 
-- **Server Run 线程**：驱动 Accept `UringContext`，接收连接并协调关闭；
-- **Connection I/O 线程**：每个 `ConnectionIoLoop` 一个，负责所属连接的收发和状态；
-- **Worker 线程**：由 `WorkerPool` 管理，执行服务查找、Protobuf 转换、用户 Handler 和响应编码。
+| 执行线程 | 主要职责 |
+| --- | --- |
+| Server Run 线程 | 驱动 Accept `UringContext`，接收连接并协调服务端关闭 |
+| Connection I/O 线程 | 管理所属连接的 socket I/O、帧解析、写队列和连接状态 |
+| Worker 线程 | 查找服务方法、解析用户 Protobuf、执行 Handler 并编码响应 |
 
-## 启动与监听
+`RpcServer::Impl` 只负责组合和协调，不参与每次 RPC 的数据处理。连接的网络状态归属于 Connection I/O 线程，用户 Handler 则不会在 I/O 线程执行。
 
-服务端生命周期是：
+## 启动与连接建立
+
+服务端生命周期为：
 
 ```text
 Created → Listening → Running → Stopping → Stopped
 ```
 
-各公开操作的边界如下：
+正常启动过程如下：
 
-- `Create()` 归一化配置并创建内部组件；
-- `RegisterMethod()` 在 `Created` 和 `Listening` 阶段可用；
-- `Listen()` 只 bind/listen 本地 socket，不启动 Accept，也不发布 Consul 服务；
-- `Run()` 冻结方法注册，启动连接 I/O loops 和 AcceptLoop，并按需注册 Consul；
-- `Stop()` 是线程安全、幂等的关闭请求；
-- `Run()` 返回表示正常 graceful shutdown 已经完成，或运行时失败已经完成清理。
+```mermaid
+flowchart TB
+  create["RpcServer::Create()<br/>校验配置并创建内部组件"]
+  register["RegisterMethod()（0～N 次）<br/>注册 service → method → handler"]
+  listen["Listen()<br/>bind + listen"]
+  run["Run()<br/>冻结方法注册"]
+  io["启动 Connection I/O threads"]
+  accept["准备 AcceptLoop"]
+  consul{"是否启用 Consul 注册？"}
+  register_consul["注册服务实例"]
+  run_context["在当前线程运行 Accept UringContext"]
+  accepting["AcceptLoop 开始接收连接"]
 
-`AcceptLoop()` 在 Server Run 线程上反复 `co_await Accept()`。新 socket 以 round-robin 方式交给一个 `ConnectionIoLoop::PostStartConnection()`，从此连接固定归属于该 I/O 线程。
+  create --> register
+  register --> listen
+  listen --> run
+  run --> io
+  io --> accept
+  accept --> consul
+  consul -->|是| register_consul
+  consul -->|否| run_context
+  register_consul --> run_context
+  run_context --> accepting
+```
 
-## 连接 I/O 域
+`Listen()` 不启动 AcceptLoop，也不发布 Consul 服务，因此在 `Listen()` 之后、`Run()` 之前仍可注册方法。`Run()` 开始后，Registry 不再修改，Worker 可以在 dispatch 热路径只读访问它。
 
-一个 `ConnectionIoLoop` 拥有一个 `UringContext`、一条 I/O 线程、一个 `DispatchMailbox` 和若干 `ServerConnection`。
+### 连接分配与线程归属
 
-它的线程边界是：
+AcceptLoop 只负责接收新 socket。每个 socket 随后被分配给一个 `ConnectionIoLoop`，由对应 I/O 线程负责创建和管理连接：
 
 ```text
-Server Run / Accept 线程
-  └─ PostStartConnection(socket)
+Server Run 线程
+  │
+  └─ AcceptLoop 得到 client socket
          │
-         ▼
+         ├─ round-robin 选择一个 ConnectionIoLoop
+         └─ PostStartConnection(socket)
+                       │
+          ─────── 跨线程交接 ───────
+                       │
+                       ▼
 Connection I/O 线程
-  ├─ 创建 ServerConnection
-  ├─ 启动 connection Run Task
-  ├─ 维护 connections_
-  └─ 清理已经 Closed 且 Task 已完成的连接
+  │
+  ├─ 创建 ServerConnection(socket)
+  ├─ 保存到本线程的 connections_
+  └─ 启动 ReadLoop 和 WriteLoop
 ```
 
-`connections_` 和每条连接的可变网络状态只由 I/O 线程访问。跨线程控制通过 `UringContext::Post()` 转交，不在每个连接字段上加锁。
+`PostStartConnection()` 完成连接从 Server Run 线程到 Connection I/O 线程的唯一一次交接。此后 socket I/O 和连接可变状态都限制在该线程中，连接不会迁移到其他 I/O loop。
 
-## 单条连接状态机
+## 一次 RPC 的执行路径
 
-`ServerConnection` 使用三个生命周期状态：
+一次请求跨越 Connection I/O 和 Worker 两个执行域，最终回到原 I/O 线程：
+
+```mermaid
+sequenceDiagram
+  participant IO as Connection I/O 线程
+  participant Pool as WorkerPool
+  participant Worker as Worker 线程
+  participant Handler as ServiceRegistry / Handler
+  participant Mailbox as DispatchMailbox
+
+  IO->>IO: ReadLoop co_await Recv()
+  IO->>IO: RpcFrameStream::FeedBytes()
+  IO->>IO: 检查单连接 inflight 上限
+  IO->>Pool: TrySubmitBatch(requests)
+
+  Pool-->>Worker: 取出已准入的 job
+
+  Worker->>Handler: Dispatch(RequestEnvelope)
+  Handler->>Handler: ParseFromArray()
+  Handler->>Handler: User Handler
+  Handler->>Handler: SerializeToString()
+  Handler-->>Worker: ResponseEnvelope
+
+  Worker->>Worker: FrameCodec::Encode()
+  Worker->>Mailbox: Submit(DispatchCompletion)
+
+  Mailbox-->>IO: Post completion 到原 I/O 线程
+  IO->>IO: 释放 inflight 计数
+  IO->>IO: 加入 response write queue
+  IO->>IO: 唤醒 WriteLoop
+  IO->>IO: WriteLoop co_await Send()
+```
+
+这里有两个关键线程边界：
+
+- `WorkerPool::TrySubmitBatch()` 把 CPU 和业务工作从 I/O 线程交给 Worker；
+- `DispatchMailbox` 把编码后的响应交回产生请求的 Connection I/O 线程。
+
+Worker 不直接访问 socket，也不修改连接状态。每个 `ConnectionIoLoop` 拥有自己的 mailbox，因此 completion 会回到正确的 I/O 域。
+
+一次 `FeedBytes()` 解出的 request batch 采用 all-or-nothing 准入：整批满足单连接 inflight 上限时才提交给 WorkerPool，否则整批返回 `ResourceExhausted`。WorkerPool 再以 batch 中的逻辑 RPC 数检查全局容量。
+
+Worker 可以把同一 batch 的多个 Response frame 合并后回投；WriteLoop 也会合并写队列中相邻 frame，但单次发送 batch 不超过 64 KiB。合并只减少提交和发送次数，不改变线协议中的 frame 边界。
+
+## 连接状态机
+
+`ServerConnection::State` 表示连接当前所处的生命周期阶段，只包含 `Active`、`Draining` 和 `Closed`：
+
+```mermaid
+stateDiagram-v2
+  [*] --> Active
+
+  Active --> Draining: peer EOF / BeginDrain / WorkerPool 停止准入
+  Active --> Closed: protocol / socket / backpressure error
+  Draining --> Closed: socket / encode error
+  Draining --> Closed: inflight = 0 且 pending write bytes = 0
+
+  Closed --> [*]: ReadLoop 和 WriteLoop 均已结束
+```
+
+状态直接决定连接允许进行的工作：
+
+| 状态 | 读取新请求 | 提交新 RPC | 处理已准入请求的响应 | 发送响应 |
+| --- | --- | --- | --- | --- |
+| `Active` | 是 | 是 | 是 | 是 |
+| `Draining` | 否 | 否 | 是 | 是 |
+| `Closed` | 否 | 否 | 丢弃迟到的响应 | 否 |
+
+每个连接固定拥有一条 `ReadLoop()` 和一条 `WriteLoop()`。ReadLoop 只在 `Active` 状态继续接收和提交请求；进入 `Draining` 后停止读取。WriteLoop 在 `Active` 和 `Draining` 状态都可以发送响应，直到连接进入 `Closed`。
+
+`inflight_requests_`、`write_queue_` 和 `pending_write_bytes_` 记录连接当前尚未完成的请求和响应，不构成新的生命周期阶段。其中 inflight 和 pending write bytes 共同决定 drain 是否完成：
 
 ```text
-Active
-  ├─ peer EOF / BeginDrain / worker admission closed ──→ Draining
-  └─ protocol/socket/backpressure fatal error ─────────→ Closed
-
-Draining
-  ├─ 接收已 admitted worker completion
-  ├─ flush 已排队 response
-  └─ inflight == 0 且 write queue 为空 ────────────────→ Closed
+state == Draining
+&& inflight_requests_ == 0
+&& pending_write_bytes_ == 0
+→ Closed
 ```
 
-状态语义：
-
-- `Active`：继续 Recv、解析和提交新请求；
-- `Draining`：不再读取或提交新请求，但允许已接收请求完成并写回；
-- `Closed`：socket 已关闭，不再启动新的 I/O。
-
-`inflight_requests_`、`write_queue_` 和 `pending_write_bytes_` 是与生命周期正交的资源状态，不是额外 lifecycle state。
-
-## 请求 dispatch
-
-服务端收到字节后的主路径如下：
+进入 `Closed` 时，连接取消 pending socket I/O、关闭 fd，并唤醒可能正在等待写队列的 WriteLoop。对象释放还需要满足更强的条件：
 
 ```text
-co_await Recv
-  ↓
-RpcFrameStream::FeedBytes
-  ↓
-零个、一个或多个 RequestEnvelope
-  ↓
-per-connection batch admission
-  ↓
-WorkerPool::TrySubmitBatch
-  ↓
-ServiceRegistry::Dispatch
-  ↓
-Protobuf request ParseFromArray
-  ↓
-User Handler
-  ↓
-Protobuf response SerializeToString
-  ↓
-FrameCodec::Encode
+state == Closed
+&& ReadLoop Task 已结束
+&& WriteLoop Task 已结束
+→ ConnectionIoLoop 可以释放 ServerConnection
 ```
 
-一次 `FeedBytes()` 解出的 request batch 采用 all-or-nothing 准入：整批满足单连接 inflight 上限才进入 WorkerPool；否则整批返回 `ResourceExhausted`。WorkerPool 对 batch 代表的逻辑 RPC 数做全局容量检查。
+两条协程及连接的全部可变状态都限制在所属 Connection I/O 线程中。Worker 只能通过 `DispatchMailbox` 返回 completion，因此连接字段不需要跨 Worker 加锁。
 
-`ServiceRegistry` 直接维护 `service_name → method_name → handler`。`Run()` 开始后注册被冻结，因此 Worker 线程只读 registry，不需要在 dispatch 热路径加锁。
+## 资源边界
 
-## Worker completion 回投
-
-Worker 线程不直接修改连接，也不直接发送 socket：
-
-```text
-Worker thread
-  └─ DispatchMailbox::Submit(DispatchCompletion)
-         │
-         ├─ mutex 下加入 completion batch
-         └─ context.Post(ProcessCompletionsOnContext)
-                    │
-                    ▼
-原 Connection I/O 线程
-  ├─ lock weak ServerConnection
-  ├─ 释放 inflight accounting
-  ├─ response 加入 write queue
-  └─ 唤醒所属连接的 WriteLoop coroutine
-```
-
-每个 `ConnectionIoLoop` 有自己的 mailbox，因此 completion 天然回到产生请求的 I/O 域。多个 Worker submission 可以合并到一次 posted callback 中。
-
-## 写路径
-
-每条连接固定拥有一条 `ReadLoop()` 和一条 `WriteLoop()`。`ReadLoop()` 等待 socket 输入；`WriteLoop()` 在写队列为空时等待用户态通知，有 response 入队后继续发送。两条协程都只在所属 Connection I/O 线程恢复，不需要并发访问连接状态。
-
-写协程会把相邻 response frame 合并为不超过 64 KiB 的发送 batch，并处理 partial send。响应可能按 Worker 完成顺序写出，客户端依靠 `request_id` 匹配，而不要求请求与响应严格同序。
-
-## 背压
-
-服务端保留三个相互独立的资源上限：
+服务端使用三个独立上限约束不同资源：
 
 | 上限 | 所有者 | 保护的资源 | 过载行为 |
 | --- | --- | --- | --- |
-| `max_inflight_per_connection` | `ServerConnection` | 单连接已接收但未完成的 RPC | 整批返回 `ResourceExhausted` |
-| `max_pending_jobs_global` | `WorkerPool` | 全局 admitted 逻辑 RPC | 返回 `ResourceExhausted` |
-| `max_write_queue_bytes_per_connection` | `ServerConnection` | 慢客户端积压的 response bytes | 关闭该连接 |
+| `max_inflight_per_connection` | `ServerConnection` | 单连接已接收但尚未完成的 RPC | 整批返回 `ResourceExhausted` |
+| `max_pending_jobs_global` | `WorkerPool` | 全局已准入的逻辑 RPC | 返回 `ResourceExhausted` |
+| `max_write_queue_bytes_per_connection` | `ServerConnection` | 慢客户端积压的响应字节 | 关闭对应连接 |
 
-第三个上限不能由 inflight 数替代：Worker completion 释放 inflight 后，response 仍可能因客户端读取过慢而停留在写队列中。
+这三个限制不能互相替代。尤其是 Worker completion 到达后，RPC 已从 inflight 中释放，但响应仍可能因客户端读取缓慢而停留在写队列，因此写队列必须拥有独立的字节上限。
 
 ## Graceful shutdown
 
-正常停止顺序是：
+`Stop()` 线程安全且幂等，只负责发起停止；正在执行 `Run()` 的线程负责完成关闭并最终发布 `Stopped`：
 
-```text
-Stop()
-  ↓
-关闭 WorkerPool 新提交准入
-  ↓
-停止 Accept，不再建立新连接
-  ↓
-所有 ServerConnection 进入 Draining
-  ↓
-WorkerPool::DrainAndJoin
-  ├─ 已 admitted Handler 继续执行
-  ├─ response 继续编码
-  └─ completion 继续通过 DispatchMailbox 回投
-  ↓
-ConnectionIoLoop::FinishDrain
-  ├─ 等待 inflight 清零
-  ├─ 等待 response flush 或连接失败关闭
-  ├─ 停止 UringContext
-  └─ join I/O thread
-  ↓
-Stopped，Run() 返回
+```mermaid
+sequenceDiagram
+    participant S as Stop 调用线程
+    participant R as Server Run 线程
+    participant A as Accept Runtime
+    participant W as Worker Pool
+    participant C as Connection I/O Loops
+    participant D as Consul
+
+    S->>W: 停止接受新任务
+    S->>A: 请求停止 Accept
+    S-->>S: Stop() 返回
+
+    A-->>R: Accept Loop 结束
+    R->>C: 所有连接进入 Draining
+    R->>D: 注销服务实例
+    R->>W: DrainAndJoin()
+
+    Note over W,C: 已准入的 Handler 继续执行<br/>响应继续回投原 Connection I/O Loop
+
+    W-->>R: 所有 Worker 任务完成
+    R->>C: FinishDrain()
+    C-->>R: 响应发送完成，连接关闭，I/O 线程退出
+    R-->>R: 状态切换为 Stopped
+    R-->>S: Run() 返回
 ```
 
-关键 invariant 是：WorkerPool 排空之前，Connection I/O loops 和 mailbox 必须仍然可用。否则已完成的 Handler 无法把 response 返回原连接。
+关闭过程最重要的约束是：Worker Pool 排空期间，Connection I/O Loops 和 `DispatchMailbox` 必须继续运行，确保已准入请求能够完成响应编码、回投和发送。
 
-如果 Handler 永远不返回，graceful shutdown 也会一直等待。当前没有 shutdown timeout 或 force-close 公共机制。
+如果 Handler 永远不返回，graceful shutdown 会一直等待；当前没有 shutdown timeout 或强制关闭机制。`Run()` 发生异常时也会执行同一套组件清理，再将失败返回给调用者。
 
-## Consul 注册
+在 `Created` 或 `Listening` 状态调用 `Stop()` 时，没有运行中的 AcceptLoop 或连接需要排空，服务端可以直接清理资源并进入 `Stopped`；之后调用 `Run()` 会失败。
 
-配置了 `service_name_` 时，`Run()` 将实际监听地址和端口注册到 Consul Agent。注册内容对应一个服务实例，而不是一个 RPC method，并附带 TCP 健康检查：Consul 周期性连接服务端口，只把通过检查的实例提供给客户端健康查询。
+## Consul 实例注册与健康检查
 
-停止时服务端尝试 deregister。Consul 失败不会改变本地连接 drain 的顺序。
+启用服务注册后，`Run()` 通过配置的 Consul Agent 注册整个服务实例，而不是逐个注册 RPC method。假设 Echo 服务监听在 `10.0.0.12:9000`，注册请求的 JSON 类似：
+
+```json
+{
+  "Name": "echo-service",
+  "ID": "echo-service-10.0.0.12-9000",
+  "Address": "10.0.0.12",
+  "Port": 9000,
+  "Check": {
+    "Name": "xRPC TCP health check",
+    "TCP": "10.0.0.12:9000",
+    "Interval": "5s",
+    "Timeout": "1s"
+  }
+}
+```
+
+注册完成后不需要 xRPC 定期续租或发送心跳。Consul Agent 每 5 秒尝试连接一次服务端口，单次连接最多等待 1 秒；检查失败时实例会变为非健康状态，并从客户端使用的 `passing=true` 查询结果中消失。该机制只验证 TCP 端口是否可以建立连接，不执行一次真实 RPC。
+
+正常关闭时，服务端主动按实例 ID 注销。进程异常退出时无法主动注销，实例仍可能保留在 Consul Catalog 中，但健康检查失败后不会继续作为健康 Endpoint 提供给客户端。
+
+客户端如何感知健康实例变化并更新路由，见 [客户端运行时](client-runtime.md#consul-变化如何到达客户端)。
