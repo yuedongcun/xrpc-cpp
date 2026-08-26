@@ -293,43 +293,33 @@ I/O 线程执行 callback
 
 ### 停止请求、I/O 取消与资源释放
 
-关闭运行时需要分别解决三个问题：事件循环何时退出、尚未完成的 socket I/O 如何结束，以及 fd 由谁释放。它们对应三个不同接口：
+`UringContext` 负责在给定 fd 上提交和完成异步 I/O，但不管理 socket 的生命周期。socket 由上层连接对象拥有，并由其决定何时关闭。
 
-| 层次 | 接口 | 职责 |
-| --- | --- | --- |
-| Context 级 | `RequestStop()` | 不再接受新的 `Post()`，并让 `Run()` 在所有已提交 operation 都完成后退出 |
-| I/O 级 | `CancelFd(fd)` | 向 io_uring 提交取消请求，使该 fd 上尚未完成的 `Accept`、`Recv` 或 `Send` 尽快产生 completion |
-| 资源级 | `Socket::Close()` | 释放 socket 文件描述符；socket 的所有者负责调用 |
+因此，运行时停止、pending I/O 取消和 fd 释放是三个独立问题：
 
-`RequestStop()` 不是“立即终止所有 I/O”。它只表达整个 context 的退出意图，并通过 eventfd 唤醒 `Run()`。`Run()` 仍会继续消费 CQE，直到 pending operation 计数归零，避免在内核仍可能返回 completion 时销毁运行时状态。
+| 接口                | 职责                                                         |
+| ----------------- | ---------------------------------------------------------- |
+| `RequestStop()`   | 请求 event loop 停止；`Run()` 会继续处理 CQE，直到所有已提交 operation 完成后返回 |
+| `CancelFd(fd)`    | 取消指定 fd 上尚未完成的 I/O，使对应 operation 尽快产生 completion           |
+| `Socket::Close()` | 关闭并释放 socket fd，由 socket owner 负责调用                        |
 
-`CancelFd()` 也不是另一种 context shutdown。它只针对一个 fd：提交 cancel SQE 后，取消请求本身会产生一个 Cancel CQE；被取消的原始 I/O 也会各自产生自己的 CQE，并以 `ECANCELED` 等结果恢复对应协程。事件循环必须处理完这两类 CQE，相关 operation 才算真正结束。
+`RequestStop()` 不会直接终止 pending I/O。它只表达 `UringContext` 的停止意图，并通过 eventfd 唤醒 `Run()`。在停止请求发出后，`Run()` 仍会继续处理已有 CQE，直到 pending operation 归零后才返回。
 
-`UringContext` 只借用 fd，不拥有 socket，因此无法自行决定某条连接应该自然完成还是立即终止。上层 socket owner 负责选择关闭策略：优雅关闭时先排空已接收工作和响应；需要终止连接时，在所属 I/O 线程调用 `CancelFd(fd)`，再调用 `Socket::Close()` 释放 fd。
+`CancelFd(fd)` 也不会停止整个 context。它只针对指定 fd 提交取消操作。取消请求本身会产生 Cancel CQE，被取消的原始 I/O 也会产生自己的 CQE，因此这些 completion 仍需要由 `Run()` 正常处理，相关 operation 才能完成回收。
 
-两种连接关闭路径只在调用 `Close()` 的时机上不同：
+连接何时取消 I/O 和关闭 socket 属于上层连接生命周期策略。正常 shutdown 可以先停止接收新请求并排空已经接收的工作；发生连接错误或要求立即停止时，也可以直接终止连接。`UringContext` 不参与这些策略判断，只负责已提交 I/O 的执行、取消和 completion 处理。
 
-| 场景 | 关闭前的处理 | 最终动作 |
-| --- | --- | --- |
-| 优雅关闭 | 停止读取新请求，等待 Handler 完成并写回响应 | 调用 `ServerConnection::Close()` |
-| 异常或立即停止 | 不等待现有工作排空 | 直接调用 `ServerConnection::Close()` |
+因此：
 
-两条路径随后执行相同的资源回收流程：
+* `RequestStop()` 管理 `UringContext` / event loop 的生命周期；
+* `CancelFd(fd)` 管理指定 fd 上 pending I/O 的取消；
+* `Socket::Close()` 管理 socket fd 的生命周期。
 
-```text
-ServerConnection::Close()
-→ CancelFd(fd)
-→ Socket::Close()
-→ 处理 Cancel CQE 和原始 I/O CQE
-→ pending operation 归零
-→ RequestStop() 已发起后，UringContext::Run() 返回
-```
-
-因此，`RequestStop()` 管理的是 event loop 生命周期，`CancelFd()` 管理的是 pending I/O，`Socket::Close()` 管理的是 fd 生命周期。服务端关闭流程将三者按顺序组合，而不是依赖其中某一个接口完成全部工作。
+三者职责独立，由上层 runtime 在关闭流程中协调使用。
 
 ## 运行时约束
 
-- 一个 `UringContext` 只由一条 `Run()` 线程驱动；同一个 ring 中可以同时有多条 pending I/O。
-- 可能等待的 I/O 必须通过 `co_await` 挂起协程，不能在 I/O 线程使用阻塞式等待。
-- `UringContext` 负责 SQE 提交、CQE 处理、协程恢复和跨线程唤醒；`Task` 负责 coroutine frame。
-- 连接状态、RPC 帧解析、业务调度、服务发现和客户端路由属于上层 runtime，不属于 I/O 层。
+* 一个 `UringContext` 只由一条 `Run()` 线程驱动；同一个 ring 中可以同时存在多条 pending I/O。
+* `Accept()`、`Recv()`、`Send()` 和 `SleepFor()` 等异步操作通过 `UringAwaitable` 与 `co_await` 挂起调用方；I/O 线程本身不执行阻塞式等待。
+* `UringContext` 负责 SQE 提交、CQE 处理、协程恢复和跨线程唤醒；`Task` 负责 coroutine frame。
+* 连接状态、RPC 帧解析、业务调度、服务发现和客户端路由属于上层 runtime，不属于 I/O 层。

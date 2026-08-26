@@ -1,45 +1,130 @@
 # xRPC 线协议
 
-## 协议定位
+xRPC 在 TCP 字节流之上定义请求—响应帧，用固定前缀划分消息边界，用 metadata 表达 RPC 语义，并用 payload 承载用户 Protobuf 消息。
 
-xRPC 在 TCP 之上定义了一套请求—响应线协议（wire protocol），用于划分消息边界、关联请求与响应，并承载 RPC metadata 和用户 payload。metadata 和用户消息采用 Protobuf 编码，但这不是 gRPC 协议，也没有跨语言兼容承诺。
+## 一次 RPC 在网络上如何表示
 
-当前协议版本为 1，只支持两种消息：
-
-```text
-Request  = 1
-Response = 2
-```
-
-每次调用对应一个 Request frame 和一个 Response frame，不支持 streaming 或 heartbeat frame。
-
-## 帧布局
-
-每个 frame 由三段组成：
+一次调用发送一个 Request frame，并接收一个具有相同 `request_id` 的 Response frame。两种 frame 使用相同的物理布局：
 
 ```text
-FrameHeader (24 bytes) | Protobuf metadata | serialized user payload
+┌────────────────────────┬────────────────────────┬────────────────────────┐
+│ FrameHeader            │ Metadata bytes         │ Payload bytes          │
+│ 24 bytes               │ metadata_size bytes    │ payload_size bytes     │
+└────────────────────────┴────────────────────────┴────────────────────────┘
 ```
 
-固定前缀的布局如下，所有多字节整数使用网络字节序：
+Request 和 Response 的区别是 metadata 与 payload 所表达的内容：
+
+| 内容 | Request frame | Response frame |
+| --- | --- | --- |
+| `message_type` | `Request` | `Response` |
+| Metadata 类型 | `RequestMetadata` | `ResponseMetadata` |
+| Metadata 字段 | `service_name`, `method_name` | `error_code`, `error_text` |
+| Payload | 序列化的用户请求 | 序列化的用户响应 |
+
+Request frame 的编码过程如下：
 
 ```text
-offset  size  field
-──────  ────  ─────────────
-0       4     magic = "XRPC"
-4       1     version = 1
-5       1     message_type
-6       2     flags
-8       4     metadata_size
-12      4     payload_size
-16      8     request_id
+RequestEnvelope
+├─ request_id
+├─ service_name
+├─ method_name
+└─ payload                  已序列化的用户请求
+        │
+        ▼ FrameCodec::Encode()
+        │
+        ├─ FrameHeader
+        │    ├─ magic             = XRPC
+        │    ├─ version           = 1
+        │    ├─ message_type      = Request
+        │    ├─ flags             = 0
+        │    ├─ metadata_size     = Metadata bytes 长度
+        │    ├─ payload_size      = Payload bytes 长度
+        │    └─ request_id        = RequestEnvelope.request_id
+        │
+        ├─ Metadata bytes
+        │    └─ RequestMetadata::SerializeToString()
+        │         ├─ service_name = RequestEnvelope.service_name
+        │         └─ method_name  = RequestEnvelope.method_name
+        │
+        └─ Payload bytes
+             └─ RequestEnvelope.payload，不做再次序列化
+
+        三个区段按顺序拼接
+        ▼
+┌────────────────────────┬────────────────────────┬────────────────────────┐
+│ FrameHeader            │ Metadata bytes         │ Payload bytes          │
+└────────────────────────┴────────────────────────┴────────────────────────┘
+                           Request frame
 ```
 
-`flags` 当前编码为 0，尚未定义行为。`request_id` 由客户端分配，服务端原样复制到对应 response，用于在一条多路复用连接上匹配调用。
+解码沿相反方向还原相同字段：
+
+```text
+                           Request frame
+┌────────────────────────┬────────────────────────┬────────────────────────┐
+│ FrameHeader            │ Metadata bytes         │ Payload bytes          │
+└────────────────────────┴────────────────────────┴────────────────────────┘
+        │
+        ▼ FrameCodec::Decode()
+        │
+        ├─ FrameHeader
+        │    ├─ 验证 magic、version 和 message_type
+        │    ├─ 用 metadata_size 和 payload_size 确定区段边界
+        │    └─ 取出 request_id
+        │
+        ├─ Metadata bytes
+        │    └─ RequestMetadata::ParseFromArray()
+        │         ├─ 取出 service_name
+        │         └─ 取出 method_name
+        │
+        └─ Payload bytes
+             └─ 复制字节，不解析用户 Protobuf 类型
+
+        三部分合并为
+        ▼
+RequestEnvelope
+├─ request_id            来自 FrameHeader
+├─ service_name          来自 RequestMetadata
+├─ method_name           来自 RequestMetadata
+└─ payload               来自 Payload bytes
+```
+
+`RequestEnvelope` 是进程内的协议对象，不是额外的 wire section。Response 使用相同过程，只是改用 `ResponseEnvelope` 和 `ResponseMetadata`。
+
+一条 TCP 连接可以同时承载多个未完成调用。Worker 完成请求的先后顺序不固定，因此 Response frame 不保证与 Request frame 按相同顺序返回；客户端依靠 `request_id` 将每个响应交给对应调用。
+
+## FrameHeader
+
+每个 frame 都以 24 字节固定前缀开始。多字节整数使用网络字节序：
+
+```text
+0               4               5               6               8                 12                16                24
+┌───────────────┬───────────────┬───────────────┬───────────────┬─────────────────┬─────────────────┬─────────────────┐
+│ magic         │ version       │ message_type  │ flags         │ metadata_size   │ payload_size    │ request_id      │
+└───────────────┴───────────────┴───────────────┴───────────────┴─────────────────┴─────────────────┴─────────────────┘
+     4 bytes         1 byte          1 byte          2 bytes          4 bytes           4 bytes           8 bytes
+```
+
+| 字段 | 当前语义 |
+| --- | --- |
+| `magic` | 固定为 ASCII `XRPC`，用于识别 xRPC frame |
+| `version` | 当前版本为 `1` |
+| `message_type` | `Request = 1`，`Response = 2` |
+| `flags` | 编码时固定为 `0`，当前没有定义行为 |
+| `metadata_size` | 紧随固定前缀的 metadata 字节数 |
+| `payload_size` | metadata 之后的用户 payload 字节数 |
+| `request_id` | 由客户端分配，服务端复制到对应响应 |
+
+长度字段使接收端能够从 TCP 字节流中确定完整 frame 的边界：
+
+```text
+frame size = 24 + metadata_size + payload_size
+```
 
 ## Metadata 与 payload
 
-Request metadata 是内部 Protobuf 消息：
+Request metadata 描述服务端路由目标：
 
 ```proto
 message RequestMetadata {
@@ -48,7 +133,7 @@ message RequestMetadata {
 }
 ```
 
-Response metadata 保存 RPC 状态：
+Response metadata 描述 RPC 执行结果：
 
 ```proto
 message ResponseMetadata {
@@ -57,129 +142,50 @@ message ResponseMetadata {
 }
 ```
 
-OK 且没有错误文本的 response metadata 使用 Protobuf 默认值，可编码为空字节串。
+状态为 `Ok` 且没有错误文本时，`ResponseMetadata` 全部采用 Protobuf 默认值，其编码结果为空，因此 response 的 `metadata_size` 可以为 `0`。解码到未定义的状态码时，客户端将其转换为 `DataLoss`，不会把未知整数暴露为 `StatusCode`。
 
-payload 是用户请求或响应消息的已序列化字节。协议层只复制和传输它，不知道具体 Protobuf message 类型。
+payload 是已经序列化的用户请求或响应。协议层把它视为不透明字节，不知道具体的 Protobuf message 类型。因此一个 frame 中可能同时存在两层 Protobuf 编码：
 
-因此一次 Protobuf 消息调用有两层 Protobuf 数据：
+| 数据 | 定义者 | 用途 |
+| --- | --- | --- |
+| `RequestMetadata` / `ResponseMetadata` | xRPC | 服务、方法和 RPC 状态 |
+| request / response payload | 应用 | 用户业务消息 |
 
-```text
-RPC metadata
-  └─ xRPC 内部 RequestMetadata / ResponseMetadata
+## FrameCodec 的边界
 
-user payload
-  └─ 应用自己的 Request / Response message
-```
+`FrameCodec` 在 Envelope 与完整 frame bytes 之间转换。它负责固定 Header 和 xRPC Metadata，但始终把用户 payload 当作不透明字节，不依赖具体的业务消息类型。
 
-它们用途不同：metadata 用于路由和状态，payload 用于业务数据。
+用户 Protobuf 消息的序列化和解析位于协议层之外：客户端调用代码处理用户 Request 和 Response，服务端注册方法的类型适配器完成对应转换。
 
-## 请求编码
+## TCP 字节流
 
-客户端 Protobuf 消息调用的编码路径是：
-
-```text
-用户 Request message
-  ↓ SerializeAsString
-payload bytes
-  ↓
-RequestEnvelope
-  ├─ request_id
-  ├─ service_name
-  ├─ method_name
-  └─ payload
-  ↓ FrameCodec::Encode
-RequestMetadata SerializeToString
-  ↓
-FrameHeader + metadata bytes + payload bytes
-```
-
-`FrameCodec` 一次分配完整 frame 字符串，然后把固定前缀、metadata 和 payload 写到最终位置。
-
-## 请求解码与业务调用
-
-服务端收到完整 Request frame 后：
-
-```text
-FrameHeader
-  ├─ 验证 magic / version / type
-  ├─ 验证 metadata_size
-  └─ 验证 payload_size
-         ↓
-RequestMetadata ParseFromArray
-         ↓
-RequestEnvelope
-         ↓ ServiceRegistry
-注册方法的类型适配器
-         ↓ user Request::ParseFromArray(payload)
-User Handler
-```
-
-这里 `FrameCodec` 只解码 xRPC metadata；用户 request 的 Protobuf 反序列化在 Worker 线程执行的注册方法适配器中完成，不占用 Connection I/O 线程。
-
-## 响应编码与解码
-
-Handler 返回后，Worker 线程执行：
-
-```text
-用户 Response message
-  ↓ SerializeToString
-ResponseEnvelope
-  ├─ request_id
-  ├─ Status
-  └─ payload
-  ↓ FrameCodec::Encode
-ResponseMetadata + payload
-  ↓
-完整 Response frame
-```
-
-frame bytes 通过 `DispatchMailbox` 返回原 Connection I/O 线程并写入 socket。
-
-客户端 reader 解码 `ResponseMetadata` 和 payload，根据 `request_id` 找到等待中的调用。公开 `Call<Resp, Req>()` 最后再通过 `Resp::ParseFromString()` 解析用户 response。
-
-## TCP 字节流与增量解码
-
-TCP 不保留消息边界，一次 recv 可能得到半个 frame、一个 frame 或多个 frame。
-
-服务端使用 `RpcFrameStream` 保存每条连接的未消费字节：
+TCP 不保留 frame 边界：一次 `recv` 可能只得到部分 frame，也可能同时得到多个 frame。服务端通过 `RpcFrameStream` 缓冲收到的字节，并反复调用 `FrameCodec::Decode()`：
 
 ```text
 recv bytes
-  ↓ append ByteBuffer
   ↓
-FrameCodec::Decode(readable bytes)
-  ├─ NeedMoreData → 保留现有字节，等待下一次 recv
-  ├─ Ok           → 消费一个 frame，继续解码
-  └─ protocol error → 永久关闭该 stream 和连接
+RpcFrameStream buffer
+  ↓
+FrameCodec::Decode()
+  ├─ NeedMoreData    → 保留现有字节，等待下一次 recv
+  ├─ Ok              → 消费一个 frame，继续解码
+  └─ protocol error  → 关闭当前连接
 ```
 
-一次 `FeedBytes()` 可以返回多个 `RequestEnvelope`。客户端 reader 采用相同的“缓冲字节、反复解完整 frame”思路，但直接在 `TcpTransport::ReaderLoop()` 中维护 buffer。
+因此一次 `FeedBytes()` 可以解出零个、一个或多个 `RequestEnvelope`。
 
-## 大小限制
+## 限制与失败语义
 
-协议在分配和解析内容前检查：
+- Metadata 最大 64 KiB。
+- Payload 默认最大 4 MiB，可通过 client/server options 调整。
+- 长度在内容分配和 Protobuf 解析前检查。
+- `NeedMoreData` 表示 frame 尚未接收完整，不是协议错误。
+- 其他非法 frame 会终止当前连接；xRPC 不尝试跳过错误数据或重新同步字节流。
 
-- metadata 默认最大 64 KiB；
-- request/response payload 默认最大 4 MiB，可通过 client/server options 调整；
-- metadata 和 payload 长度必须能由 32 位 wire 字段表达；
-- 完整 frame 长度计算必须能由本机 `size_t` 表达。
+## 协议边界
 
-这些限制分别保护协议控制数据和用户数据。固定前缀不需要单独配置，总 frame 上限由三段长度共同决定。
+当前协议版本为 `1`，每次调用只包含一个 Request frame 和一个 Response frame，不支持 streaming、heartbeat 或协议协商。
 
-## 错误语义
+xRPC 使用 Protobuf 序列化 metadata 和用户 payload，但 TCP 帧格式、请求匹配和错误语义均由项目自行定义，因此不能与 gRPC 直接通信。
 
-`FrameCodec::Decode()` 可能返回：
-
-- `NeedMoreData`：正常的 TCP 流状态，不是错误；
-- `InvalidMagic`：不是 xRPC frame；
-- `UnsupportedVersion`：协议版本不支持；
-- `InvalidMessageType`：消息类型不是 Request 或 Response；
-- `FrameTooLarge`：超过配置上限或长度不可表示；
-- `DecodeError`：Protobuf metadata 无法解析；
-- `EncodeError`：保留的编码错误类别。
-
-服务端遇到不可恢复的 frame error 会关闭连接。客户端遇到无效 response frame 会使当前 transport 失败，并唤醒该连接上的 pending calls。
-
-## 兼容性边界
-
-协议当前适合本仓库内同版本 client/server 学习和实验。虽然 payload 使用 Protobuf，跨语言实现仍需复制固定前缀、metadata schema、状态码、大小限制和失败语义；项目目前不把这些细节承诺为稳定公共协议。
+当前只保证本仓库同版本客户端与服务端互通。其他语言可以按本文实现协议，但项目暂不提供跨语言或跨版本兼容性保证。
