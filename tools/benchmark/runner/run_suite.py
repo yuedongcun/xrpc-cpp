@@ -38,6 +38,7 @@ class Config:
     threads: int | list[int] = 0
     connections: int | list[int] = 0
     inflight: int | list[int] = 0
+    inflight_per_connection: int = 0
     io_threads: int = 0
 
 
@@ -90,13 +91,25 @@ def load_config(path):
     if benchmark_type == "client":
         allowed = common | {"threads"}
     elif benchmark_type == "firehose":
-        allowed = common | {"connections", "inflight", "io_threads", "server_max_inflight_per_connection"}
+        allowed = common | {
+            "connections",
+            "inflight",
+            "inflight_per_connection",
+            "io_threads",
+            "server_max_inflight_per_connection",
+        }
     else:
         raise RuntimeError("type must be firehose or client")
 
     unknown = sorted(set(data) - allowed)
     if unknown:
         raise RuntimeError("unknown config keys: " + ", ".join(unknown))
+
+    if benchmark_type == "firehose":
+        has_inflight = "inflight" in data
+        has_inflight_per_connection = "inflight_per_connection" in data
+        if has_inflight == has_inflight_per_connection:
+            raise RuntimeError("firehose config must set exactly one of inflight or inflight_per_connection")
 
     config = Config(
         benchmark_type=benchmark_type,
@@ -112,6 +125,7 @@ def load_config(path):
         threads=data.get("threads", 0),
         connections=data.get("connections", 0),
         inflight=data.get("inflight", 0),
+        inflight_per_connection=optional_int(data, "inflight_per_connection", 0),
         io_threads=require_int(data, "io_threads") if benchmark_type == "firehose" else 0,
     )
     return config
@@ -123,7 +137,12 @@ def cases(config):
 
     result = []
     for connections in values(config.connections, "connections"):
-        for inflight in values(config.inflight, "inflight"):
+        inflights = (
+            [connections * config.inflight_per_connection]
+            if config.inflight_per_connection > 0
+            else values(config.inflight, "inflight")
+        )
+        for inflight in inflights:
             if inflight < connections:
                 raise RuntimeError("inflight must be greater than or equal to connections")
             result.append(Case(name=f"connections={connections} inflight={inflight}", connections=connections, inflight=inflight))

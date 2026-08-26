@@ -1,8 +1,9 @@
 # Benchmark 工具
 
-这里保留两条性能测试路径：
+这里保留三条性能测试路径：
 
 - `firehose.json`：使用 benchmark 专用 Firehose 客户端持续施压，测量服务端完整 Protobuf RPC 路径的吞吐量与延迟。
+- `connection-scale.json`：每条连接固定一个在途 RPC，逐步增加同时活跃的 TCP 连接数，观察连接规模下的服务端路径。
 - `client.json`：使用正式 `RpcClient::Call()`，观察公开客户端 API 的延迟和并发扩展。
 
 Firehose 是发压工具，不是生产客户端模型。生产客户端路径请看 `client.json`。
@@ -32,6 +33,13 @@ make release
 ```bash
 ./tools/benchmark/runner/run_suite.py \
   --config tools/benchmark/configs/firehose.json
+```
+
+活跃连接规模测试：
+
+```bash
+./tools/benchmark/runner/run_suite.py \
+  --config tools/benchmark/configs/connection-scale.json
 ```
 
 正式客户端路径测试：
@@ -77,6 +85,8 @@ Firehose 客户端：
 ## 结果
 
 服务端容量测试固定 12 条 TCP 连接、128 字节 Protobuf Echo payload、3 个 Connection I/O 线程和 3 个 Worker 线程。每个工作点预热 3 秒、测量 30 秒并重复 3 次；测试顺序按固定种子在各轮间改变，表中报告中位数和三轮最小值—最大值。
+
+活跃连接规模测试使用相同的 payload 和服务端线程配置，每条连接固定一个在途 RPC，扫描 12 到 8,192 条同时活跃的 TCP 连接。连接数和全局并发请求数会同步增长；它用于观察连接规模压力，不与固定 12 条连接的服务端容量测试混为一谈。
 
 benchmark 将每连接 inflight 上限设为 2,048，避免公开 API 的默认上限先于运行时容量截断测试。该设置仅用于容量测试，不改变 `RpcServerOptions` 的默认值。
 

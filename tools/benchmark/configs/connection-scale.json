@@ -1,0 +1,13 @@
+{
+  "type": "firehose",
+  "io_threads": 3,
+  "connections": [12, 48, 192, 768, 1536, 3072, 6144, 8192],
+  "inflight_per_connection": 1,
+  "warmup_duration": 3,
+  "duration": 30,
+  "repetitions": 3,
+  "payload_size": 128,
+  "server_worker_threads": 3,
+  "server_connection_io_threads": 3,
+  "server_max_inflight_per_connection": 2048
+}
