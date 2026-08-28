@@ -5,6 +5,7 @@
 
 #include "server/rpc_frame_stream.h"
 
+#include <cassert>
 #include <string>
 #include <utility>
 
@@ -18,7 +19,13 @@ void RpcFrameStream::ByteBuffer::Append(std::string_view bytes) {
   if (bytes.empty()) {
     return;
   }
-  Compact();
+
+  // Keep appending after the readable suffix while the string still has tail
+  // capacity. Reclaim the consumed prefix only when that tail space is not
+  // large enough for the new input.
+  if (bytes.size() > buffer_.capacity() - buffer_.size()) {
+    Compact();
+  }
   buffer_.append(bytes.data(), bytes.size());
 }
 
@@ -48,11 +55,10 @@ void RpcFrameStream::ByteBuffer::Compact() {
   if (read_offset_ == 0) {
     return;
   }
-  if (read_offset_ >= buffer_.size()) {
-    buffer_.clear();
-    read_offset_ = 0;
-    return;
-  }
+
+  // Consume() clears a fully consumed buffer, so a non-zero offset here must
+  // always point inside a non-empty readable suffix.
+  assert(read_offset_ < buffer_.size());
 
   // Delay prefix removal until new bytes are appended so repeated frame
   // consumption does not shift the remaining buffer after every decode.

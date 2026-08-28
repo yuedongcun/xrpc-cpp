@@ -3,8 +3,8 @@
  * @brief Declares xRPC's single-threaded io_uring event loop.
  *
  * A `UringContext` owns one io_uring ring and drives asynchronous operations
- * on the thread running `Run()`. `Accept`, `Recv`, `Send`, and `SleepFor`
- * submit work on that thread and return move-only awaitables that resume
+ * on the thread running `Run()`. `Accept`, `Recv`, and `Send` submit work on
+ * that thread and return move-only awaitables that resume
  * the awaiting coroutine with an `IoResult`.
  *
  * `Post()` and `RequestStop()` form the cross-thread control boundary. They wake the
@@ -14,7 +14,6 @@
 
 #pragma once
 
-#include <chrono>
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
@@ -29,7 +28,6 @@ enum class OperationType : std::uint8_t {
   Accept,
   Recv,
   Send,
-  Timeout,
 };
 
 struct IoResult {
@@ -89,8 +87,8 @@ class UringAwaitable final {
  * @brief Single-threaded io_uring execution context with cross-thread control.
  *
  * `Run()` has one owner. `Post()` and `RequestStop()` may be called concurrently
- * from other threads; `Accept()`, `Recv()`, `Send()`, `SleepFor()`, and
- * `CancelFd()` are run-thread-only operations.
+ * from other threads; `Accept()`, `Recv()`, `Send()`, and `CancelFd()` are
+ * run-thread-only operations.
  */
 class UringContext final {
  public:
@@ -125,8 +123,6 @@ class UringContext final {
   [[nodiscard]] auto Recv(int fd, void *buffer, std::size_t len) -> UringAwaitable;
 
   [[nodiscard]] auto Send(int fd, const void *buffer, std::size_t len) -> UringAwaitable;
-
-  [[nodiscard]] auto SleepFor(std::chrono::nanoseconds timeout) -> UringAwaitable;
 
   void CancelFd(int fd);
 

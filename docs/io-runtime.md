@@ -2,7 +2,7 @@
 
 ## 核心模型
 
-`UringContext` 是 xRPC 对 Linux io_uring 的底层运行时封装。它管理一个 io_uring ring 以及围绕该 ring 的事件循环，并向协程提供 `Accept()`、`Recv()`、`Send()` 和 `SleepFor()` 等异步操作。借助 C++20 协程，服务端可以把这套异步完成过程写成顺序代码；读取数据时，核心调用可以简化为：
+`UringContext` 是 xRPC 对 Linux io_uring 的底层运行时封装。它管理一个 io_uring ring 以及围绕该 ring 的事件循环，并向协程提供 `Accept()`、`Recv()` 和 `Send()` 等异步操作。借助 C++20 协程，服务端可以把这套异步完成过程写成顺序代码；读取数据时，核心调用可以简化为：
 
 ```cpp
 const io::IoResult result = co_await context.Recv(fd, buffer, size);
@@ -61,7 +61,7 @@ sequenceDiagram
 
 这里的“单线程”不表示 I/O 串行执行。一个 ring 中可以同时存在多条连接的 pending operation；线程提交操作后继续处理其他连接，内核完成某项 I/O 时再通过 CQE 通知它。
 
-`Accept()`、`Recv()`、`Send()`、`SleepFor()` 和 `CancelFd()` 只能由对应 `UringContext::Run()` 的线程调用。这样，ring 的操作状态以及上层连接的可变 I/O 状态都可以遵守线程封闭，不需要在每次读写周围加锁。
+`Accept()`、`Recv()`、`Send()` 和 `CancelFd()` 只能由对应 `UringContext::Run()` 的线程调用。这样，ring 的操作状态以及上层连接的可变 I/O 状态都可以遵守线程封闭，不需要在每次读写周围加锁。
 
 `Post()` 和 `RequestStop()` 是跨线程控制入口。其他线程不能直接提交 socket I/O，而是通过 `Post()` 把工作交给 context 线程；`RequestStop()` 只负责发出停止请求。跨线程入口负责传递命令，不会改变连接状态仍由所属 I/O 线程维护这一约束。
 
@@ -170,7 +170,6 @@ classDiagram
     +Accept() UringAwaitable
     +Recv() UringAwaitable
     +Send() UringAwaitable
-    +SleepFor() UringAwaitable
   }
 
   class UringAwaitable {
@@ -192,7 +191,6 @@ classDiagram
     +int fd_
     +buffer_
     +size_t length_
-    +timeout_
     +weak_ptr awaitable_state_
   }
 
@@ -204,7 +202,7 @@ classDiagram
 
 `AwaitableState` 是协程侧的完成槽。它保存 CQE 转换得到的 `IoResult`、结果是否就绪，以及等待该结果的 coroutine handle。`UringAwaitable` 通过 `shared_ptr` 保证这份状态在等待期间有效。
 
-`Operation` 是每个 SQE 对应的内核侧提交记录。它保存 operation 类型、completion 类别以及 fd、buffer、长度或 timeout 等提交信息，但只通过 `weak_ptr` 观察 `AwaitableState`，不会延长等待者的生命周期。
+`Operation` 是每个 SQE 对应的内核侧提交记录。它保存 operation 类型、completion 类别以及 fd、buffer 和长度等提交信息，但只通过 `weak_ptr` 观察 `AwaitableState`，不会延长等待者的生命周期。
 
 `Operation` 由 `UringContext` 创建。提交 SQE 时，它的指针被写入 `user_data`；CQE 到达后，`UringContext` 从同一个字段取回 `Operation`，并在处理完成后回收它。
 
@@ -261,17 +259,17 @@ sequenceDiagram
 
 | 类别 | 来源 | CQE 到达后的行为 |
 | --- | --- | --- |
-| Awaitable I/O | `Accept`、`Recv`、`Send`、`SleepFor` | 转换为 `IoResult`，再恢复等待协程 |
-| Cancel | `CancelFd()`、停止时取消 timeout | 确认取消请求，不直接恢复业务协程 |
+| Awaitable I/O | `Accept`、`Recv`、`Send` | 转换为 `IoResult`，再恢复等待协程 |
+| Cancel | `CancelFd()` | 确认取消请求，不直接恢复业务协程 |
 | Wakeup | `eventfd` poll | 排空 eventfd 与 posted callback，或推进停止流程 |
 
 Cancel CQE 只表示“取消请求已经被内核处理”。被取消的 `Accept`、`Recv` 或 `Send` 仍会各自产生 completion；原协程由那一条 I/O completion 恢复，而不是由 Cancel CQE 恢复。
 
-Wakeup CQE 是 `Post()` 与 `RequestStop()` 的共同落点。正常运行时，`UringContext` 排空 eventfd 和 callback queue 后会重新提交 eventfd poll；已经请求停止时则不再重挂该 poll，并开始取消 pending timeout。
+Wakeup CQE 是 `Post()` 与 `RequestStop()` 的共同落点。正常运行时，`UringContext` 排空 eventfd 和 callback queue 后会重新提交 eventfd poll；已经请求停止时则不再重挂该 poll。
 
 ## 跨线程控制与停止
 
-`Accept()`、`Recv()`、`Send()`、`SleepFor()` 与 `CancelFd()` 只能由 `UringContext::Run()` 所在线程调用。其他线程不能直接碰 socket I/O，只能通过 `Post()` 或 `RequestStop()` 发送控制命令。
+`Accept()`、`Recv()`、`Send()` 与 `CancelFd()` 只能由 `UringContext::Run()` 所在线程调用。其他线程不能直接碰 socket I/O，只能通过 `Post()` 或 `RequestStop()` 发送控制命令。
 
 ### Post()
 
@@ -320,6 +318,6 @@ I/O 线程执行 callback
 ## 运行时约束
 
 * 一个 `UringContext` 只由一条 `Run()` 线程驱动；同一个 ring 中可以同时存在多条 pending I/O。
-* `Accept()`、`Recv()`、`Send()` 和 `SleepFor()` 等异步操作通过 `UringAwaitable` 与 `co_await` 挂起调用方；I/O 线程本身不执行阻塞式等待。
+* `Accept()`、`Recv()` 和 `Send()` 等异步操作通过 `UringAwaitable` 与 `co_await` 挂起调用方；I/O 线程本身不执行阻塞式等待。
 * `UringContext` 负责 SQE 提交、CQE 处理、协程恢复和跨线程唤醒；`Task` 负责 coroutine frame。
 * 连接状态、RPC 帧解析、业务调度、服务发现和客户端路由属于上层 runtime，不属于 I/O 层。

@@ -35,44 +35,22 @@
  *              v
  *        destroy Operation
  *
- * Pending timeout operations are tracked separately so they can be cancelled
- * during shutdown instead of delaying event-loop termination.
  */
 
 #include "io/uring_context.h"
 
 #include <cerrno>
-#include <chrono>
 #include <cstddef>
 #include <memory>
 #include <utility>
 
 #include <liburing.h>
-#include <linux/time_types.h>
 #include <sys/socket.h>
 
 #include "common/xrpc_exception.h"
 #include "detail/context_runtime.h"
 
 namespace xrpc::io {
-namespace {
-
-auto MakeKernelTimespec(std::chrono::nanoseconds timeout) -> __kernel_timespec {
-  if (timeout < std::chrono::nanoseconds::zero()) {
-    timeout = std::chrono::nanoseconds::zero();
-  }
-
-  const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(timeout);
-  const auto nanoseconds = timeout - seconds;
-
-  __kernel_timespec timespec{};
-  timespec.tv_sec = static_cast<decltype(timespec.tv_sec)>(seconds.count());
-  timespec.tv_nsec = static_cast<decltype(timespec.tv_nsec)>(nanoseconds.count());
-  return timespec;
-}
-
-}  // namespace
-
 /**
  * @brief Submits an awaitable operation and transfers ownership to the CQE path.
  *
@@ -82,41 +60,30 @@ auto MakeKernelTimespec(std::chrono::nanoseconds timeout) -> __kernel_timespec {
  */
 template <typename Prep>
 void UringContext::Runtime::SubmitAwaitableOperation(std::unique_ptr<Operation> operation, Prep &&prep) {
-  bool tracked_timeout = false;
-  try {
-    AssertRunThread("io_uring submission");
-    if (stop_requested_.load()) {
-      CompleteAwaitableState(*operation, MakeCancelledResult(*operation));
-      return;
-    }
-
-    tracked_timeout = TrackTimeoutOperation(*operation);
-    io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
-    if (sqe == nullptr) {
-      throw InternalException("io_uring_get_sqe failed");
-    }
-
-    prep(sqe);
-
-    Operation *raw_operation = operation.get();
-    io_uring_sqe_set_data(sqe, raw_operation);
-
-    const int ret = io_uring_submit(&ring_);
-    if (ret < 0) {
-      throw InternalException(MakeErrorMessage("io_uring_submit", -ret));
-    }
-
-    ++pending_io_operations_;
-
-    [[maybe_unused]] Operation *released = operation.release();
-  } catch (...) {
-    if (operation) {
-      if (tracked_timeout) {
-        pending_timeout_operations_.erase(operation.get());
-      }
-    }
-    throw;
+  AssertRunThread("io_uring submission");
+  if (stop_requested_.load()) {
+    CompleteAwaitableState(*operation, MakeCancelledResult(*operation));
+    return;
   }
+
+  io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
+  if (sqe == nullptr) {
+    throw InternalException("io_uring_get_sqe failed");
+  }
+
+  prep(sqe);
+
+  Operation *raw_operation = operation.get();
+  io_uring_sqe_set_data(sqe, raw_operation);
+
+  const int ret = io_uring_submit(&ring_);
+  if (ret < 0) {
+    throw InternalException(MakeErrorMessage("io_uring_submit", -ret));
+  }
+
+  ++pending_io_operations_;
+
+  [[maybe_unused]] Operation *released = operation.release();
 }
 
 void UringContext::Runtime::ProcessCqe(io_uring_cqe *cqe) {
@@ -146,17 +113,12 @@ void UringContext::Runtime::ProcessAwaitableCqe(Operation &operation, io_uring_c
     throw InternalException("io_uring completion without a pending operation");
   }
   --pending_io_operations_;
-  UntrackTimeoutOperation(operation);
 
   IoResult result;
   result.type_ = operation.type_;
   result.fd_ = operation.fd_;
   result.result_ = cqe->res;
   result.error_code_ = cqe->res < 0 ? -cqe->res : 0;
-  if (operation.type_ == OperationType::Timeout && result.error_code_ == ETIME) {
-    result.result_ = 0;
-    result.error_code_ = 0;
-  }
   if (operation.type_ == OperationType::Recv || operation.type_ == OperationType::Send) {
     result.bytes_transferred_ = cqe->res > 0 ? static_cast<std::size_t>(cqe->res) : 0;
   }
@@ -237,55 +199,6 @@ void UringContext::Runtime::SubmitCancelFd(int fd) {
   [[maybe_unused]] Operation *released = operation.release();
 }
 
-void UringContext::Runtime::SubmitCancelOperation(Operation *operation_to_cancel) {
-  AssertRunThread("UringContext timeout cancellation");
-
-  auto operation = std::make_unique<Operation>();
-  operation->completion_category_ = Operation::CompletionCategory::Cancel;
-
-  io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
-  if (sqe == nullptr) {
-    throw InternalException("io_uring_get_sqe failed");
-  }
-
-  io_uring_prep_cancel(sqe, operation_to_cancel, 0);
-  Operation *raw_operation = operation.get();
-  io_uring_sqe_set_data(sqe, raw_operation);
-
-  const int ret = io_uring_submit(&ring_);
-  if (ret < 0) {
-    throw InternalException(MakeErrorMessage("io_uring_submit", -ret));
-  }
-
-  ++pending_io_operations_;
-  [[maybe_unused]] Operation *released = operation.release();
-}
-
-auto UringContext::Runtime::TrackTimeoutOperation(Operation &operation) -> bool {
-  if (operation.type_ != OperationType::Timeout) {
-    return false;
-  }
-  pending_timeout_operations_.insert(&operation);
-  return true;
-}
-
-void UringContext::Runtime::UntrackTimeoutOperation(Operation &operation) {
-  if (operation.type_ == OperationType::Timeout) {
-    pending_timeout_operations_.erase(&operation);
-  }
-}
-
-void UringContext::Runtime::SubmitCancelPendingTimeouts() {
-  if (timeout_cancellations_submitted_) {
-    return;
-  }
-
-  timeout_cancellations_submitted_ = true;
-  for (Operation *operation : pending_timeout_operations_) {
-    SubmitCancelOperation(operation);
-  }
-}
-
 auto UringContext::Accept(int listen_fd) -> UringAwaitable {
   auto state = std::make_shared<detail::AwaitableState>();
   UringAwaitable awaitable(state);
@@ -330,22 +243,6 @@ auto UringContext::Send(int fd, const void *buffer, std::size_t len) -> UringAwa
 
   runtime_->SubmitAwaitableOperation(std::move(operation), [fd, buffer, len](io_uring_sqe *sqe) -> void {
     io_uring_prep_send(sqe, fd, buffer, len, MSG_NOSIGNAL);
-  });
-
-  return awaitable;
-}
-
-auto UringContext::SleepFor(std::chrono::nanoseconds timeout) -> UringAwaitable {
-  auto state = std::make_shared<detail::AwaitableState>();
-  UringAwaitable awaitable(state);
-  auto operation = std::make_unique<Operation>();
-  operation->type_ = OperationType::Timeout;
-  operation->timeout_ = MakeKernelTimespec(timeout);
-  Operation *raw_operation = operation.get();
-  operation->awaitable_state_ = state;
-
-  runtime_->SubmitAwaitableOperation(std::move(operation), [raw_operation](io_uring_sqe *sqe) -> void {
-    io_uring_prep_timeout(sqe, &raw_operation->timeout_, 0, 0);
   });
 
   return awaitable;

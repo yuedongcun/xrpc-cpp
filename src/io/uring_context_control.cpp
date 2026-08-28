@@ -131,7 +131,7 @@ void UringContext::Runtime::SubmitWakeupPoll() {
  *
  * The wakeup counter and posted callbacks are drained first. During normal
  * operation, a new wakeup poll is submitted. During shutdown, the poll is not
- * rearmed and pending timeout operations are cancelled instead.
+ * rearmed.
  */
 void UringContext::Runtime::ProcessWakeupCqe(io_uring_cqe *cqe) {
   wakeup_poll_pending_ = false;
@@ -153,7 +153,6 @@ void UringContext::Runtime::ProcessWakeupCqe(io_uring_cqe *cqe) {
   DrainWakeupCounter();
   DrainPosted();
   if (stop_requested_.load()) {
-    SubmitCancelPendingTimeouts();
     return;
   }
   SubmitWakeupPoll();

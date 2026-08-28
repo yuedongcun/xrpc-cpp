@@ -18,7 +18,6 @@
 #include <queue>
 #include <string>
 #include <string_view>
-#include <unordered_set>
 
 #include <liburing.h>
 
@@ -38,7 +37,6 @@ struct Operation {
   int fd_ = -1;
   void *buffer_ = nullptr;
   std::size_t length_ = 0;
-  __kernel_timespec timeout_{};
   std::weak_ptr<detail::AwaitableState> awaitable_state_;
 };
 
@@ -70,14 +68,6 @@ struct UringContext::Runtime final {
 
   void SubmitCancelFd(int fd);
 
-  void SubmitCancelOperation(Operation *operation_to_cancel);
-
-  auto TrackTimeoutOperation(Operation &operation) -> bool;
-
-  void UntrackTimeoutOperation(Operation &operation);
-
-  void SubmitCancelPendingTimeouts();
-
   void EnqueuePosted(std::function<void()> fn);
 
   void RequestStop();
@@ -108,15 +98,12 @@ struct UringContext::Runtime final {
 
   bool wakeup_poll_pending_ = false;
 
-  bool timeout_cancellations_submitted_ = false;
-
   std::mutex post_mutex_;
 
   bool accepting_posts_ = true;
 
   std::queue<std::function<void()>> posted_callbacks_;
 
-  std::unordered_set<Operation *> pending_timeout_operations_;
 };
 
 }  // namespace xrpc::io

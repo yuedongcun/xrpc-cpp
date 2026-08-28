@@ -65,12 +65,6 @@ auto SendOne(xrpc::io::UringContext &context, int fd, const std::shared_ptr<std:
   co_return result;
 }
 
-auto SleepFor(xrpc::io::UringContext &context, std::chrono::nanoseconds timeout)
-    -> xrpc::runtime::Task<xrpc::io::IoResult> {
-  xrpc::io::IoResult result = co_await context.SleepFor(timeout);
-  co_return result;
-}
-
 auto ReadInvalidFd(xrpc::io::UringContext &context) -> xrpc::runtime::Task<xrpc::io::IoResult> {
   auto read_buffer = std::make_shared<std::array<char, 8>>();
   xrpc::io::IoResult result = co_await context.Recv(-1, read_buffer->data(), read_buffer->size());
@@ -78,21 +72,24 @@ auto ReadInvalidFd(xrpc::io::UringContext &context) -> xrpc::runtime::Task<xrpc:
 }
 
 auto MoveAwaitableBeforeSuspend(xrpc::io::UringContext &context) -> xrpc::runtime::Task<xrpc::io::IoResult> {
-  xrpc::io::UringAwaitable awaitable = context.SleepFor(std::chrono::milliseconds(1));
+  auto read_buffer = std::make_shared<std::array<char, 8>>();
+  xrpc::io::UringAwaitable awaitable = context.Recv(-1, read_buffer->data(), read_buffer->size());
   xrpc::io::UringAwaitable moved_awaitable = std::move(awaitable);
   co_return co_await std::move(moved_awaitable);
 }
 
-auto PendingSleep(xrpc::io::UringContext &context, std::atomic<bool> &submitted)
+auto PendingRead(xrpc::io::UringContext &context, int fd, std::atomic<bool> &submitted)
     -> xrpc::runtime::Task<xrpc::io::IoResult> {
-  xrpc::io::UringAwaitable awaitable = context.SleepFor(std::chrono::hours(1));
+  auto read_buffer = std::make_shared<std::array<char, 8>>();
+  xrpc::io::UringAwaitable awaitable = context.Recv(fd, read_buffer->data(), read_buffer->size());
   submitted.store(true);
   co_return co_await std::move(awaitable);
 }
 
 auto SubmitAfterStop(xrpc::io::UringContext &context) -> xrpc::runtime::Task<xrpc::io::IoResult> {
+  auto read_buffer = std::make_shared<std::array<char, 8>>();
   context.RequestStop();
-  co_return co_await context.SleepFor(std::chrono::hours(1));
+  co_return co_await context.Recv(-1, read_buffer->data(), read_buffer->size());
 }
 
 }  // namespace
@@ -101,58 +98,29 @@ TEST(IoUringAwaitableTest, MoveAfterSubmissionPreservesCompletion) {
   xrpc::io::UringContext context;
 
   const xrpc::io::IoResult result = WaitTaskWithContext(MoveAwaitableBeforeSuspend(context), context);
-  EXPECT_EQ(result.type_, xrpc::io::OperationType::Timeout);
-  EXPECT_EQ(result.error_code_, 0);
-  EXPECT_EQ(result.result_, 0);
+  EXPECT_EQ(result.type_, xrpc::io::OperationType::Recv);
+  EXPECT_NE(result.error_code_, 0);
+  EXPECT_LT(result.result_, 0);
 }
 
 TEST(IoUringAwaitableTest, CompletionBeforeAwaitSuspendIsObserved) {
   xrpc::io::UringContext context;
 
   const xrpc::io::IoResult result = WaitTaskWithContext(SubmitAfterStop(context), context);
-  EXPECT_EQ(result.type_, xrpc::io::OperationType::Timeout);
-  EXPECT_EQ(result.error_code_, ECANCELED);
-  EXPECT_LT(result.result_, 0);
-}
-
-TEST(IoUringAwaitableTest, SleepForResumesCoroutine) {
-  xrpc::io::UringContext context;
-
-  const xrpc::io::IoResult result = WaitTaskWithContext(SleepFor(context, std::chrono::milliseconds(5)), context);
-  EXPECT_EQ(result.type_, xrpc::io::OperationType::Timeout);
-  EXPECT_EQ(result.error_code_, 0);
-  EXPECT_EQ(result.result_, 0);
-}
-
-TEST(IoUringAwaitableTest, StopCancelsPendingSleepFor) {
-  xrpc::io::UringContext context;
-  xrpc::runtime::Task<xrpc::io::IoResult> task = SleepFor(context, std::chrono::hours(1));
-  StartTaskOnContext(context, task);
-
-  std::exception_ptr context_error;
-  std::jthread context_thread([&]() {
-    try {
-      context.Run();
-    } catch (...) {
-      context_error = std::current_exception();
-    }
-  });
-
-  EXPECT_FALSE(task.WaitFor(std::chrono::milliseconds(5)));
-  context.RequestStop();
-  context_thread.join();
-  if (context_error) {
-    std::rethrow_exception(context_error);
-  }
-
-  ASSERT_TRUE(task.Done());
-  const xrpc::io::IoResult result = task.Result();
-  EXPECT_EQ(result.type_, xrpc::io::OperationType::Timeout);
+  EXPECT_EQ(result.type_, xrpc::io::OperationType::Recv);
   EXPECT_EQ(result.error_code_, ECANCELED);
   EXPECT_LT(result.result_, 0);
 }
 
 TEST(IoUringAwaitableTest, DestroyingPendingTaskDoesNotLeaveCompletionTarget) {
+  xrpc::io::Socket listen_socket;
+  listen_socket.Bind("127.0.0.1", 0);
+  listen_socket.Listen(1);
+
+  xrpc::io::Socket client_socket;
+  client_socket.Connect("127.0.0.1", listen_socket.LocalPort());
+  xrpc::io::Socket server_socket = listen_socket.Accept();
+
   xrpc::io::UringContext context;
   std::exception_ptr context_error;
   std::atomic<bool> submitted = false;
@@ -166,7 +134,7 @@ TEST(IoUringAwaitableTest, DestroyingPendingTaskDoesNotLeaveCompletionTarget) {
   });
 
   {
-    xrpc::runtime::Task<xrpc::io::IoResult> task = PendingSleep(context, submitted);
+    xrpc::runtime::Task<xrpc::io::IoResult> task = PendingRead(context, server_socket.fd(), submitted);
     StartTaskOnContext(context, task);
 
     for (int attempt = 0; attempt < 100 && !submitted.load(); ++attempt) {
@@ -175,6 +143,7 @@ TEST(IoUringAwaitableTest, DestroyingPendingTaskDoesNotLeaveCompletionTarget) {
     EXPECT_TRUE(submitted.load());
   }
 
+  client_socket.Close();
   context.RequestStop();
   context_thread.join();
 
