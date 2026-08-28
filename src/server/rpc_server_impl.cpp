@@ -149,8 +149,7 @@ void RpcServer::Impl::Stop() {
 
     case State::Running:
       state_ = State::Stopping;
-      worker_pool_.CloseSubmissions();
-      RequestStopAccepting();
+      RequestGracefulStop();
       return;
 
     case State::Stopping:
@@ -191,8 +190,16 @@ auto RpcServer::Impl::AcceptLoop() -> runtime::Task<void> {
   accept_context_.RequestStop();
 }
 
-void RpcServer::Impl::RequestStopAccepting() {
-  accept_context_.Post([this]() -> void { StopAcceptingOnContext(); });
+void RpcServer::Impl::RequestGracefulStop() {
+  accept_context_.Post([this]() -> void {
+    // Withdraw the endpoint before closing local admission. There is currently
+    // no discovery-propagation delay, but this ordering minimizes the window in
+    // which clients can newly discover an instance that has already stopped
+    // accepting work.
+    (void)TryDeregisterService();
+    worker_pool_.CloseSubmissions();
+    StopAcceptingOnContext();
+  });
 }
 
 void RpcServer::Impl::StopAcceptingOnContext() {
@@ -310,10 +317,12 @@ void RpcServer::Impl::ShutdownComponents() {
     }
   };
 
+  // Service discovery withdrawal precedes local admission shutdown. This is
+  // idempotent when the normal Stop() path already deregistered the instance.
+  (void)TryDeregisterService();
   worker_pool_.CloseSubmissions();
   attempt([this]() -> void { StopAcceptingOnContext(); });
   attempt([this]() -> void { BeginConnectionDrain(); });
-  (void)TryDeregisterService();
 
   attempt([this]() -> void { worker_pool_.DrainAndJoin(); });
   attempt([this]() -> void { FinishConnectionDrain(); });

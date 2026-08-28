@@ -213,13 +213,14 @@ sequenceDiagram
     participant C as Connection I/O Loops
     participant D as Consul
 
-    S->>W: 停止接受新任务
-    S->>A: 请求停止 Accept
+    S->>A: 请求开始优雅停机
     S-->>S: Stop() 返回
 
+    A->>D: 注销服务实例
+    A->>W: 停止接受新任务
+    A->>A: 停止 Accept
     A-->>R: Accept Loop 结束
     R->>C: 所有连接进入 Draining
-    R->>D: 注销服务实例
     R->>W: DrainAndJoin()
 
     Note over W,C: 已准入的 Handler 继续执行<br/>响应继续回投原 Connection I/O Loop
@@ -231,7 +232,7 @@ sequenceDiagram
     R-->>S: Run() 返回
 ```
 
-关闭过程最重要的约束是：Worker Pool 排空期间，Connection I/O Loops 和 `DispatchMailbox` 必须继续运行，确保已准入请求能够完成响应编码、回投和发送。
+关闭过程先从 Consul 注销实例，再停止本地 Worker 准入和 Accept。当前尚未在注销和本地截流之间等待服务发现传播，但这个顺序可以避免在本地已拒绝新工作后才主动注销。Worker Pool 排空期间，Connection I/O Loops 和 `DispatchMailbox` 必须继续运行，确保已准入请求能够完成响应编码、回投和发送。
 
 如果 Handler 永远不返回，graceful shutdown 会一直等待；当前没有 shutdown timeout 或强制关闭机制。`Run()` 发生异常时也会执行同一套组件清理，再将失败返回给调用者。
 

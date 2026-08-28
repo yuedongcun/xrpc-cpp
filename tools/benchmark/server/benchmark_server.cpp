@@ -130,7 +130,7 @@ auto main(int argc, char **argv) -> int {
     if (!status.ok()) {
       throw std::runtime_error(status.message());
     }
-    std::jthread server_thread([&server]() { (void)server.Run(); });
+    std::jthread server_thread([&server]() -> void { (void)server.Run(); });
 
     const xrpc::StatusOr<std::uint16_t> port_result = server.port();
     if (!port_result.ok()) {

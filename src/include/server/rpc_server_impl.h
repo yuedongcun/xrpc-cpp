@@ -49,8 +49,9 @@ class RpcServer::Impl final {
   void StartAcceptLoop();
   [[nodiscard]] auto AcceptLoop() -> runtime::Task<void>;
 
-  // Thread-safe request that forwards accept shutdown to the accept context.
-  void RequestStopAccepting();
+  // Thread-safe request that starts shutdown on the accept context. Service
+  // discovery is withdrawn before local admission and accepting are stopped.
+  void RequestGracefulStop();
 
   // Accept-context-thread-only. Closes the listener and cancels pending accept.
   void StopAcceptingOnContext();
