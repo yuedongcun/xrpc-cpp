@@ -103,7 +103,6 @@ struct UringContext::Runtime final {
   bool accepting_posts_ = true;
 
   std::queue<std::function<void()>> posted_callbacks_;
-
 };
 
 }  // namespace xrpc::io
