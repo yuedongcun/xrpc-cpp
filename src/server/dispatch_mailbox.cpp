@@ -5,8 +5,10 @@
 
 #include "server/dispatch_mailbox.h"
 
+#include <algorithm>
 #include <utility>
 
+#include "common/latency_trace.h"
 #include "server/server_connection.h"
 
 namespace xrpc {
@@ -14,6 +16,12 @@ namespace xrpc {
 DispatchMailbox::DispatchMailbox(io::UringContext &context) : context_(&context) {}
 
 void DispatchMailbox::Submit(DispatchCompletion completion) {
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+  for (const std::uint64_t request_id : completion.trace_request_ids_) {
+    diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::MailboxSubmit, request_id,
+                                    static_cast<std::uint32_t>(completion.completed_jobs_));
+  }
+#endif
   std::lock_guard<std::mutex> lock(mutex_);
   if (context_ == nullptr) {
     return;
@@ -71,6 +79,13 @@ void DispatchMailbox::ProcessCompletionsOnContext() {
     }
 
     for (DispatchCompletion &completion : drain_completions_) {
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+      const std::uint32_t drain_size =
+          static_cast<std::uint32_t>(std::min<std::size_t>(drain_completions_.size(), UINT32_MAX));
+      for (const std::uint64_t request_id : completion.trace_request_ids_) {
+        diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::MailboxDrain, request_id, drain_size);
+      }
+#endif
       std::shared_ptr<ServerConnection> connection = completion.target_connection_.lock();
       // The connection may have closed while the worker was processing the RPC.
       if (!connection) {
@@ -79,7 +94,17 @@ void DispatchMailbox::ProcessCompletionsOnContext() {
       if (completion.encode_failed_) {
         connection->OnDispatchEncodeFailure(completion.completed_jobs_);
       } else {
-        connection->OnEncodedDispatchComplete(std::move(completion.response_bytes_), completion.completed_jobs_);
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+        for (const std::uint64_t request_id : completion.trace_request_ids_) {
+          diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::WriteEnqueue, request_id);
+        }
+#endif
+        connection->OnEncodedDispatchComplete(std::move(completion.response_bytes_), completion.completed_jobs_
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+                                              ,
+                                              std::move(completion.trace_request_ids_)
+#endif
+        );
       }
     }
     drain_completions_.clear();

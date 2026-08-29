@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <exception>
 #include <latch>
 #include <memory>
@@ -30,6 +31,7 @@
 #include <unistd.h>
 
 #include "benchmark_stats.h"
+#include "common/latency_trace.h"
 #include "proto/echo.pb.h"
 #include "protocol/frame_header.h"
 
@@ -42,6 +44,7 @@ constexpr std::string_view METHOD_NAME = "Echo";
 constexpr std::size_t SOCKET_BUFFER_SIZE = 64U * 1024U;
 constexpr std::size_t MAX_WRITE_BATCH_BYTES = 64U * 1024U;
 constexpr int MAX_EPOLL_EVENTS = 256;
+constexpr std::uint64_t LOCAL_REQUEST_ID_MASK = (std::uint64_t{1} << 48U) - 1U;
 
 struct FirehoseConfig final {
   std::string host_ = "127.0.0.1";
@@ -285,13 +288,15 @@ auto TryDecodeResponse(std::string_view buffer, std::string_view expected_payloa
 class EpollFirehoseConnection final {
  public:
   EpollFirehoseConnection(std::string host, std::uint16_t port, std::string request_payload,
-                          std::string expected_response_payload, std::size_t target_inflight)
+                          std::string expected_response_payload, std::size_t target_inflight,
+                          std::size_t connection_index)
       : host_(std::move(host)),
         port_(port),
         request_payload_(std::move(request_payload)),
         expected_response_payload_(std::move(expected_response_payload)),
         request_metadata_(BuildRequestMetadataBytes()),
-        slots_(target_inflight) {
+        slots_(target_inflight),
+        connection_id_(static_cast<std::uint64_t>(connection_index) << 48U) {
     if (target_inflight == 0) {
       throw std::invalid_argument("firehose per-connection inflight must be greater than 0");
     }
@@ -361,8 +366,16 @@ class EpollFirehoseConnection final {
     while (!closed_) {
       const ssize_t received = ::recv(fd_, chunk.data(), chunk.size(), 0);
       if (received > 0) {
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+        const std::uint64_t received_at_ns =
+            diagnostics::LatencyTraceEnabled() ? diagnostics::LatencyNowNs() : 0;
+#endif
         read_buffer_.append(chunk.data(), static_cast<std::size_t>(received));
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+        DecodeBufferedResponses(received_at_ns);
+#else
         DecodeBufferedResponses();
+#endif
         continue;
       }
       if (received == 0) {
@@ -425,21 +438,41 @@ class EpollFirehoseConnection final {
       free_slots_.pop_back();
       FirehoseSlot &slot = slots_[slot_index];
       slot.in_flight_ = true;
-      slot.request_id_ = slot.generation_ * slots_.size() + slot_index;
+      const std::uint64_t local_request_id =
+          (slot.generation_ * slots_.size() + slot_index) & LOCAL_REQUEST_ID_MASK;
+      slot.request_id_ = connection_id_ | local_request_id;
       slot.begin_ = now;
       ++inflight_;
 
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+      diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::ClientCreated, slot.request_id_,
+                                      static_cast<std::uint32_t>(
+                                          std::min<std::size_t>(write_buffer_.size() - write_offset_, UINT32_MAX)));
+#endif
       AppendRequestFrame(slot.request_id_, request_metadata_, request_payload_, write_buffer_);
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+      if (diagnostics::LatencyTraceSampled(slot.request_id_)) {
+        pending_send_traces_.push_back(
+            PendingSendTrace{.request_id_ = slot.request_id_, .frame_end_offset_ = write_buffer_.size()});
+      }
+#endif
       submitted_.fetch_add(1, std::memory_order_relaxed);
     }
   }
 
   auto FlushWriteBuffer() -> bool {
     while (write_offset_ < write_buffer_.size()) {
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+      const std::uint64_t send_started_at_ns =
+          diagnostics::LatencyTraceEnabled() ? diagnostics::LatencyNowNs() : 0;
+#endif
       const ssize_t sent =
           ::send(fd_, write_buffer_.data() + write_offset_, write_buffer_.size() - write_offset_, MSG_NOSIGNAL);
       if (sent > 0) {
         write_offset_ += static_cast<std::size_t>(sent);
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+        RecordCompletedSends(send_started_at_ns);
+#endif
         continue;
       }
       if (sent == 0) {
@@ -461,7 +494,11 @@ class EpollFirehoseConnection final {
     return true;
   }
 
-  void DecodeBufferedResponses() {
+  void DecodeBufferedResponses(
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+      std::uint64_t received_at_ns
+#endif
+      ) {
     while (!closed_) {
       const std::string_view readable(read_buffer_.data() + read_offset_, read_buffer_.size() - read_offset_);
       std::optional<DecodedFirehoseResponse> decoded;
@@ -475,15 +512,27 @@ class EpollFirehoseConnection final {
         CompactReadBuffer();
         return;
       }
-      CompleteSlot(decoded->request_id_, decoded->ok_);
+      CompleteSlot(decoded->request_id_, decoded->ok_
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+                   , received_at_ns
+#endif
+                   );
       read_offset_ += decoded->consumed_;
     }
   }
 
-  void CompleteSlot(std::uint64_t request_id, bool ok) {
+  void CompleteSlot(std::uint64_t request_id, bool ok
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+                    , std::uint64_t received_at_ns
+#endif
+                    ) {
     const auto now = std::chrono::steady_clock::now();
-    const auto slot_index = static_cast<std::size_t>(request_id % slots_.size());
+    const auto slot_index = static_cast<std::size_t>((request_id & LOCAL_REQUEST_ID_MASK) % slots_.size());
     FirehoseSlot &slot = slots_[slot_index];
+
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+    diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::ClientRecv, request_id, 0, received_at_ns);
+#endif
 
     bool matched = false;
     std::chrono::nanoseconds latency{0};
@@ -495,6 +544,10 @@ class EpollFirehoseConnection final {
       --inflight_;
       free_slots_.push_back(slot_index);
     }
+
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+    diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::ClientComplete, request_id);
+#endif
 
     RecordCompletion(matched && ok, latency);
     if (!matched) {
@@ -559,13 +612,36 @@ class EpollFirehoseConnection final {
     if (write_offset_ == write_buffer_.size()) {
       write_buffer_.clear();
       write_offset_ = 0;
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+      pending_send_traces_.clear();
+#endif
       return;
     }
     if (write_offset_ >= MAX_WRITE_BATCH_BYTES) {
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+      for (PendingSendTrace &trace : pending_send_traces_) {
+        trace.frame_end_offset_ -= write_offset_;
+      }
+#endif
       write_buffer_.erase(0, write_offset_);
       write_offset_ = 0;
     }
   }
+
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+  struct PendingSendTrace final {
+    std::uint64_t request_id_ = 0;
+    std::size_t frame_end_offset_ = 0;
+  };
+
+  void RecordCompletedSends(std::uint64_t sent_at_ns) {
+    while (!pending_send_traces_.empty() && pending_send_traces_.front().frame_end_offset_ <= write_offset_) {
+      diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::ClientSent,
+                                      pending_send_traces_.front().request_id_, 0, sent_at_ns);
+      pending_send_traces_.pop_front();
+    }
+  }
+#endif
 
   std::string host_;
   std::uint16_t port_ = 0;
@@ -584,6 +660,10 @@ class EpollFirehoseConnection final {
   std::size_t read_offset_ = 0;
   std::string write_buffer_;
   std::size_t write_offset_ = 0;
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+  std::deque<PendingSendTrace> pending_send_traces_;
+#endif
+  std::uint64_t connection_id_ = 0;
 
   std::atomic<std::size_t> submitted_{0};
   std::atomic<std::size_t> completed_{0};
@@ -870,7 +950,7 @@ auto RunEpollFirehoseBenchmark(const FirehoseConfig &config) -> BenchmarkStats {
   for (std::size_t i = 0; i < config.firehose_connections_; ++i) {
     const std::size_t inflight = PerConnectionInflight(config, i);
     auto connection = std::make_unique<EpollFirehoseConnection>(config.host_, config.port_, payload.request_,
-                                                                payload.expected_response_, inflight);
+                                                                payload.expected_response_, inflight, i);
     workers[i % workers.size()]->AddConnection(std::move(connection));
   }
 

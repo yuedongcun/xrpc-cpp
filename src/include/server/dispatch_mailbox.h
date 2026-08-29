@@ -10,6 +10,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -37,6 +38,11 @@ struct DispatchCompletion {
 
   // Indicates that response encoding failed and no response bytes are usable.
   bool encode_failed_ = false;
+
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+  // Sampled request IDs represented by this completion. Local diagnostics only.
+  std::vector<std::uint64_t> trace_request_ids_;
+#endif
 };
 
 /**

@@ -68,6 +68,8 @@ class WorkerPool final {
 
   [[nodiscard]] auto accepting_submissions() const noexcept -> bool;
 
+  [[nodiscard]] auto pending_jobs() const noexcept -> std::size_t { return pending_jobs_.load(); }
+
   /**
    * @brief Drains admitted work and joins all worker threads.
    *

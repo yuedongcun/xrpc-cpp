@@ -151,10 +151,10 @@ def cases(config):
     return result
 
 
-def stop(process):
+def stop(process, initial_signal=signal.SIGTERM):
     if process.poll() is not None:
         return
-    os.killpg(process.pid, signal.SIGTERM)
+    os.killpg(process.pid, initial_signal)
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
@@ -162,7 +162,28 @@ def stop(process):
         process.wait(timeout=5)
 
 
-def start_server(repo_root, server_bin, config):
+def benchmark_env(trace_prefix=None, trace_sample_shift=10):
+    env = os.environ.copy()
+    if trace_prefix is not None:
+        env["XRPC_LATENCY_TRACE_PREFIX"] = str(trace_prefix)
+        env["XRPC_LATENCY_TRACE_SAMPLE_SHIFT"] = str(trace_sample_shift)
+    return env
+
+
+PERF_EVENTS = (
+    "task-clock,cycles,instructions,context-switches,cpu-migrations,"
+    "cache-references,cache-misses,page-faults"
+)
+
+
+def with_perf_stat(command, output_path):
+    if output_path is None:
+        return command
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    return ["perf", "stat", "-x,", "-o", str(output_path), "-e", PERF_EVENTS, "--", *command]
+
+
+def start_server(repo_root, server_bin, config, env=None, cpu_list=None, perf_stat_path=None):
     command = [
         str(server_bin),
         "--port=0",
@@ -171,6 +192,9 @@ def start_server(repo_root, server_bin, config):
     ]
     if config.server_max_inflight_per_connection > 0:
         command.append(f"--max_inflight_per_connection={config.server_max_inflight_per_connection}")
+    if cpu_list is not None:
+        command = ["taskset", "-c", cpu_list, *command]
+    command = with_perf_stat(command, perf_stat_path)
     process = subprocess.Popen(
         command,
         cwd=repo_root,
@@ -178,6 +202,7 @@ def start_server(repo_root, server_bin, config):
         stderr=subprocess.STDOUT,
         text=True,
         preexec_fn=os.setsid,
+        env=env,
     )
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ)
@@ -203,7 +228,7 @@ def start_server(repo_root, server_bin, config):
         selector.close()
 
 
-def client_command(client_bin, config, case, port, duration):
+def client_command(client_bin, config, case, port, duration, cpu_list=None):
     command = [
         str(client_bin),
         f"--host={BENCHMARK_HOST}",
@@ -219,6 +244,8 @@ def client_command(client_bin, config, case, port, duration):
             f"--inflight={case.inflight}",
             f"--io_threads={config.io_threads}",
         ]
+    if cpu_list is not None:
+        command = ["taskset", "-c", cpu_list, *command]
     return command
 
 
@@ -232,37 +259,58 @@ def parse_stats(output):
         "success": int(total.group(2)),
         "failed": int(total.group(3)),
         "qps": float(latency.group(1)),
+        "avg_us": float(latency.group(2)),
+        "p50_us": float(latency.group(3)),
+        "p95_us": float(latency.group(4)),
         "p99_us": float(latency.group(5)),
     }
 
 
-def run_client(command, timeout):
-    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout)
+def run_client(command, timeout, env=None, perf_stat_path=None):
+    command = with_perf_stat(command, perf_stat_path)
+    result = subprocess.run(
+        command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout, env=env
+    )
     print(result.stdout, end="")
     if result.returncode != 0:
         raise RuntimeError(f"benchmark client failed with exit code {result.returncode}")
     return parse_stats(result.stdout)
 
 
-def run_case(repo_root, build_dir, config, case):
+def run_case(
+    repo_root,
+    build_dir,
+    config,
+    case,
+    trace_prefix=None,
+    trace_sample_shift=10,
+    server_cpus=None,
+    client_cpus=None,
+    server_perf_stat=None,
+    client_perf_stat=None,
+):
     server_bin = build_dir / "tools" / "benchmark" / "xrpc_benchmark_server"
     client_bin = build_dir / "tools" / "benchmark" / (
         "xrpc_benchmark_firehose" if config.benchmark_type == "firehose" else "xrpc_benchmark_client"
     )
-    server, port = start_server(repo_root, server_bin, config)
+    env = benchmark_env(trace_prefix, trace_sample_shift)
+    server, port = start_server(repo_root, server_bin, config, env, server_cpus, server_perf_stat)
     try:
         if config.warmup_duration > 0:
             print(f"warmup: {case.name}")
             run_client(
-                client_command(client_bin, config, case, port, config.warmup_duration),
+                client_command(client_bin, config, case, port, config.warmup_duration, client_cpus),
                 config.warmup_duration + PROCESS_TIMEOUT_MARGIN,
+                env,
             )
         return run_client(
-            client_command(client_bin, config, case, port, config.duration),
+            client_command(client_bin, config, case, port, config.duration, client_cpus),
             config.duration + PROCESS_TIMEOUT_MARGIN,
+            env,
+            client_perf_stat,
         )
     finally:
-        stop(server)
+        stop(server, signal.SIGINT if server_perf_stat is not None else signal.SIGTERM)
 
 
 def summarize(rows):
@@ -289,6 +337,13 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Run XRPC benchmark cases.")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--build-dir", type=Path, default=Path("build-release"))
+    parser.add_argument("--output-json", type=Path)
+    parser.add_argument("--trace-dir", type=Path)
+    parser.add_argument("--trace-sample-shift", type=int, default=10)
+    parser.add_argument("--server-cpus")
+    parser.add_argument("--client-cpus")
+    parser.add_argument("--server-perf-stat", type=Path)
+    parser.add_argument("--client-perf-stat", type=Path)
     return parser.parse_args(argv)
 
 
@@ -299,6 +354,11 @@ def main(argv=None):
     config = load_config(args.config)
     case_list = cases(config)
 
+    if args.trace_sample_shift < 0 or args.trace_sample_shift > 20:
+        raise RuntimeError("trace-sample-shift must be between 0 and 20")
+    if args.trace_dir is not None:
+        args.trace_dir.mkdir(parents=True, exist_ok=True)
+
     rows = []
     total = len(case_list) * config.repetitions
     index = 0
@@ -308,10 +368,43 @@ def main(argv=None):
         for case in repetition_cases:
             index += 1
             print(f"\n[{index}/{total}] repetition={repetition} {case.name}")
-            stats = run_case(repo_root, build_dir, config, case)
+            trace_prefix = None
+            if args.trace_dir is not None:
+                safe_case = re.sub(r"[^a-zA-Z0-9_.-]+", "_", case.name)
+                run_trace_dir = args.trace_dir / f"run-{index:03d}-rep-{repetition}-{safe_case}"
+                run_trace_dir.mkdir(parents=True, exist_ok=False)
+                trace_prefix = run_trace_dir / "trace"
+            stats = run_case(
+                repo_root,
+                build_dir,
+                config,
+                case,
+                trace_prefix,
+                args.trace_sample_shift,
+                args.server_cpus,
+                args.client_cpus,
+                args.server_perf_stat,
+                args.client_perf_stat,
+            )
             stats["case"] = case.name
+            stats["repetition"] = repetition
+            if trace_prefix is not None:
+                stats["trace_prefix"] = str(trace_prefix)
             rows.append(stats)
     summarize(rows)
+    if args.output_json is not None:
+        args.output_json.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "config_path": str(args.config),
+            "build_dir": str(build_dir),
+            "trace_sample_shift": args.trace_sample_shift if args.trace_dir is not None else None,
+            "server_cpus": args.server_cpus,
+            "client_cpus": args.client_cpus,
+            "server_perf_stat": str(args.server_perf_stat) if args.server_perf_stat is not None else None,
+            "client_perf_stat": str(args.client_perf_stat) if args.client_perf_stat is not None else None,
+            "rows": rows,
+        }
+        args.output_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return 0
 
 
