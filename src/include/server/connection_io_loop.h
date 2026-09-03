@@ -88,7 +88,7 @@ class ConnectionIoLoop final {
   void OnConnectionClosed();
 
   io::UringContext context_;
-  std::shared_ptr<DispatchMailbox> dispatch_mailbox_;
+  DispatchMailbox dispatch_mailbox_;
   ServiceRegistry *registry_;
   WorkerPool *worker_pool_;
   ConnectionBackpressureLimits limits_;

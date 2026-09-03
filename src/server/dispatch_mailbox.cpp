@@ -46,15 +46,9 @@ void DispatchMailbox::Submit(DispatchCompletion completion) {
   }
 
   completion_processing_pending_ = true;
-  std::weak_ptr<DispatchMailbox> weak_mailbox = weak_from_this();
-  // The posted callback must not extend mailbox lifetime across shutdown.
-  context_->Post([weak_mailbox]() -> void {
-    std::shared_ptr<DispatchMailbox> mailbox = weak_mailbox.lock();
-    if (!mailbox) {
-      return;
-    }
-    mailbox->ProcessCompletionsOnContext();
-  });
+  // The owning ConnectionIoLoop joins its run thread before destroying this
+  // mailbox, so queued callbacks cannot outlive the mailbox.
+  context_->Post([this]() -> void { ProcessCompletionsOnContext(); });
 }
 
 void DispatchMailbox::Disable() {

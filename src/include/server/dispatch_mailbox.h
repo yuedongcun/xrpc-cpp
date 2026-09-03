@@ -57,7 +57,7 @@ struct DispatchCompletion {
  * already pending or running, new completions are queued and consumed by that
  * processing cycle instead of posting another callback.
  */
-class DispatchMailbox final : public std::enable_shared_from_this<DispatchMailbox> {
+class DispatchMailbox final {
  public:
   explicit DispatchMailbox(io::UringContext &context);
 

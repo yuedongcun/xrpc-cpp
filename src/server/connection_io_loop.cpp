@@ -19,7 +19,7 @@ namespace xrpc {
 
 ConnectionIoLoop::ConnectionIoLoop(ServiceRegistry &registry, WorkerPool &worker_pool,
                                    ConnectionBackpressureLimits limits, ProtocolLimits protocol_limits)
-    : dispatch_mailbox_(std::make_shared<DispatchMailbox>(context_)),
+    : dispatch_mailbox_(context_),
       registry_(&registry),
       worker_pool_(&worker_pool),
       limits_(limits),
@@ -71,7 +71,7 @@ void ConnectionIoLoop::StopImmediately() noexcept {
   if (thread_.joinable()) {
     thread_.join();
   }
-  dispatch_mailbox_->Disable();
+  dispatch_mailbox_.Disable();
   {
     std::lock_guard lock(drain_mutex_);
     state_ = State::Stopped;
@@ -109,7 +109,7 @@ void ConnectionIoLoop::FinishDrain() {
     thread_.join();
   }
 
-  dispatch_mailbox_->Disable();
+  dispatch_mailbox_.Disable();
   connections_.clear();
   {
     std::lock_guard lock(drain_mutex_);
@@ -149,7 +149,7 @@ void ConnectionIoLoop::StartConnectionOnContext(io::Socket client_socket) {
   const ServerConnectionConfig config{.limits_ = limits_, .protocol_limits_ = protocol_limits_};
   std::shared_ptr<ServerConnection> connection;
   try {
-    connection = std::make_shared<ServerConnection>(context_, *registry_, *worker_pool_, *dispatch_mailbox_,
+    connection = std::make_shared<ServerConnection>(context_, *registry_, *worker_pool_, dispatch_mailbox_,
                                                     std::move(client_socket), config,
                                                     [this]() -> void { OnConnectionClosed(); });
   } catch (...) {
