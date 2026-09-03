@@ -22,14 +22,11 @@ enum class LatencyStage : std::uint16_t {
   RequestStart = 14,
   DispatchEnd = 15,
   EncodeEnd = 16,
-  MailboxSubmit = 17,
-  MailboxDrain = 18,
+  CompletionPost = 17,
+  CompletionCallback = 18,
   WriteEnqueue = 19,
   ServerSend = 20,
   ServerSendComplete = 21,
-  MailboxLockAcquired = 22,
-  MailboxQueued = 23,
-  MailboxCallbackBegin = 24,
 };
 
 #ifdef XRPC_ENABLE_LATENCY_TRACE

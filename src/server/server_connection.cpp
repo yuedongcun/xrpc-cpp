@@ -12,7 +12,7 @@
 #include <sys/socket.h>
 
 #include "common/latency_trace.h"
-#include "server/dispatch_mailbox.h"
+#include "server/connection_io_loop.h"
 #include "server/service_registry.h"
 
 namespace xrpc {
@@ -31,15 +31,76 @@ void RecordBatchStage(const std::vector<RequestEnvelope> &requests, diagnostics:
 }
 #endif
 
+void ExecuteDispatchBatchOnWorker(ConnectionId connection_id, ConnectionIoLoop &owner_loop, ServiceRegistry &registry,
+                                  ProtocolLimits protocol_limits, std::vector<RequestEnvelope> &requests) {
+  const std::size_t request_count = requests.size();
+  std::string batch_response_bytes;
+  std::size_t successful_jobs = 0;
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+  std::vector<std::uint64_t> trace_request_ids;
+  trace_request_ids.reserve(request_count);
+#endif
+
+  for (std::size_t index = 0; index < request_count; ++index) {
+    RequestEnvelope &request = requests[index];
+    const std::uint64_t request_id = request.request_id_;
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+    const std::uint32_t batch_position =
+        (static_cast<std::uint32_t>(std::min<std::size_t>(request_count, UINT16_MAX)) << 16U) |
+        static_cast<std::uint32_t>(std::min<std::size_t>(index, UINT16_MAX));
+    diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::RequestStart, request_id, batch_position);
+#endif
+    ResponseEnvelope response = registry.Dispatch(std::move(request));
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+    diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::DispatchEnd, request_id);
+#endif
+    try {
+      FrameCodec codec(protocol_limits);
+      batch_response_bytes.append(codec.Encode(response));
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+      diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::EncodeEnd, request_id);
+      if (diagnostics::LatencyTraceSampled(request_id)) {
+        trace_request_ids.push_back(request_id);
+      }
+#endif
+      ++successful_jobs;
+    } catch (...) {
+      break;
+    }
+  }
+
+  if (successful_jobs > 0) {
+    DispatchCompletion completion{.connection_id_ = connection_id,
+                                  .response_bytes_ = std::move(batch_response_bytes),
+                                  .completed_jobs_ = successful_jobs,
+                                  .encode_failed_ = false};
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+    completion.trace_request_ids_ = std::move(trace_request_ids);
+    for (const std::uint64_t request_id : completion.trace_request_ids_) {
+      diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::CompletionPost, request_id,
+                                      static_cast<std::uint32_t>(completion.completed_jobs_));
+    }
+#endif
+    owner_loop.PostDispatchCompletion(std::move(completion));
+  }
+
+  if (successful_jobs < request_count) {
+    DispatchCompletion completion{
+        .connection_id_ = connection_id, .completed_jobs_ = request_count - successful_jobs, .encode_failed_ = true};
+    owner_loop.PostDispatchCompletion(std::move(completion));
+  }
+}
+
 }  // namespace
 
-ServerConnection::ServerConnection(io::UringContext &context, ServiceRegistry &registry, WorkerPool &worker_pool,
-                                   DispatchMailbox &mailbox, io::Socket socket, ServerConnectionConfig config,
-                                   std::function<void()> on_closed)
-    : context_(&context),
-      mailbox_(&mailbox),
-      worker_pool_(&worker_pool),
-      registry_(&registry),
+ServerConnection::ServerConnection(ConnectionId connection_id, ConnectionIoLoop &owner_loop, io::UringContext &context,
+                                   ServiceRegistry &registry, WorkerPool &worker_pool, io::Socket socket,
+                                   ServerConnectionConfig config, std::function<void()> on_closed)
+    : connection_id_(connection_id),
+      owner_loop_(owner_loop),
+      context_(context),
+      worker_pool_(worker_pool),
+      registry_(registry),
       frame_stream_(config.protocol_limits_),
       protocol_limits_(config.protocol_limits_),
       socket_(std::move(socket)),
@@ -67,7 +128,7 @@ void ServerConnection::WriteQueueAwaiter::await_suspend(std::coroutine_handle<> 
 
 auto ServerConnection::ReadLoop() -> runtime::Task<void> {
   while (state_ == State::Active) {
-    const io::IoResult recv_result = co_await context_->Recv(socket_.fd(), read_buffer_.data(), read_buffer_.size());
+    const io::IoResult recv_result = co_await context_.Recv(socket_.fd(), read_buffer_.data(), read_buffer_.size());
 #ifdef XRPC_ENABLE_LATENCY_TRACE
     const std::uint64_t received_at_ns = diagnostics::LatencyTraceEnabled() ? diagnostics::LatencyNowNs() : 0;
 #endif
@@ -155,7 +216,7 @@ void ServerConnection::Close() {
   write_queue_.clear();
   pending_write_bytes_ = 0;
   WakeWriteLoop();
-  context_->CancelFd(socket_.fd());
+  context_.CancelFd(socket_.fd());
   socket_.Close();
   if (on_closed_) {
     on_closed_();
@@ -284,7 +345,7 @@ auto ServerConnection::WriteLoop() -> runtime::Task<void> {
 #endif
       while (state_ != State::Closed && offset < frame.size()) {
         const std::string_view remaining(frame.data() + offset, frame.size() - offset);
-        const io::IoResult send_result = co_await context_->Send(socket_.fd(), remaining.data(), remaining.size());
+        const io::IoResult send_result = co_await context_.Send(socket_.fd(), remaining.data(), remaining.size());
         if (state_ == State::Closed) {
           co_return;
         }
@@ -325,30 +386,29 @@ auto ServerConnection::SubmitDispatchBatch(std::vector<RequestEnvelope> requests
   const std::size_t request_count = requests.size();
   assert(request_count > 0);
 
-  std::weak_ptr<ServerConnection> weak_self = weak_from_this();
   auto request_batch = std::make_shared<std::vector<RequestEnvelope>>(std::move(requests));
 #ifdef XRPC_ENABLE_LATENCY_TRACE
-  const std::size_t pending_after_submission = worker_pool_->pending_jobs() + request_count;
+  const std::size_t pending_after_submission = worker_pool_.pending_jobs() + request_count;
   RecordBatchStage(*request_batch, diagnostics::LatencyStage::WorkerEnqueue,
                    static_cast<std::uint32_t>(std::min<std::size_t>(pending_after_submission, UINT32_MAX)));
 #endif
-  const bool accepted = worker_pool_->TrySubmitBatch(
-      [weak_self, request_batch]() -> void {
-        std::shared_ptr<ServerConnection> self = weak_self.lock();
-        if (!self) {
-          return;
-        }
+  const ConnectionId connection_id = connection_id_;
+  ConnectionIoLoop *owner_loop = &owner_loop_;
+  ServiceRegistry *registry = &registry_;
+  WorkerPool *worker_pool = &worker_pool_;
+  const ProtocolLimits protocol_limits = protocol_limits_;
+  const bool accepted = worker_pool_.TrySubmitBatch(
+      [connection_id, owner_loop, registry, worker_pool, protocol_limits, request_batch]() -> void {
 #ifdef XRPC_ENABLE_LATENCY_TRACE
-        RecordBatchStage(
-            *request_batch, diagnostics::LatencyStage::WorkerStart,
-            static_cast<std::uint32_t>(std::min<std::size_t>(self->worker_pool_->pending_jobs(), UINT32_MAX)));
+        RecordBatchStage(*request_batch, diagnostics::LatencyStage::WorkerStart,
+                         static_cast<std::uint32_t>(std::min<std::size_t>(worker_pool->pending_jobs(), UINT32_MAX)));
 #endif
-        self->ExecuteDispatchBatchOnWorker(weak_self, *request_batch);
+        ExecuteDispatchBatchOnWorker(connection_id, *owner_loop, *registry, protocol_limits, *request_batch);
       },
       request_count);
 
   if (!accepted) {
-    if (!worker_pool_->accepting_submissions()) {
+    if (!worker_pool_.accepting_submissions()) {
       BeginDrain();
       return false;
     }
@@ -364,60 +424,6 @@ auto ServerConnection::SubmitDispatchBatch(std::vector<RequestEnvelope> requests
   return true;
 }
 
-void ServerConnection::ExecuteDispatchBatchOnWorker(const std::weak_ptr<ServerConnection> &target,
-                                                    std::vector<RequestEnvelope> &requests) {
-  const std::size_t request_count = requests.size();
-  std::string batch_response_bytes;
-  std::size_t successful_jobs = 0;
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-  std::vector<std::uint64_t> trace_request_ids;
-  trace_request_ids.reserve(request_count);
-#endif
-
-  for (std::size_t index = 0; index < request_count; ++index) {
-    RequestEnvelope &request = requests[index];
-    const std::uint64_t request_id = request.request_id_;
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-    const std::uint32_t batch_position =
-        (static_cast<std::uint32_t>(std::min<std::size_t>(request_count, UINT16_MAX)) << 16U) |
-        static_cast<std::uint32_t>(std::min<std::size_t>(index, UINT16_MAX));
-    diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::RequestStart, request_id, batch_position);
-#endif
-    ResponseEnvelope response = registry_->Dispatch(std::move(request));
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-    diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::DispatchEnd, request_id);
-#endif
-    try {
-      batch_response_bytes.append(EncodeResponseOnWorker(std::move(response)));
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-      diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::EncodeEnd, request_id);
-      if (diagnostics::LatencyTraceSampled(request_id)) {
-        trace_request_ids.push_back(request_id);
-      }
-#endif
-      ++successful_jobs;
-    } catch (...) {
-      break;
-    }
-  }
-
-  if (successful_jobs > 0) {
-    DispatchCompletion completion{.target_connection_ = target,
-                                  .response_bytes_ = std::move(batch_response_bytes),
-                                  .completed_jobs_ = successful_jobs,
-                                  .encode_failed_ = false};
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-    completion.trace_request_ids_ = std::move(trace_request_ids);
-#endif
-    mailbox_->Submit(std::move(completion));
-  }
-
-  if (successful_jobs < request_count) {
-    mailbox_->Submit(DispatchCompletion{
-        .target_connection_ = target, .completed_jobs_ = request_count - successful_jobs, .encode_failed_ = true});
-  }
-}
-
 auto ServerConnection::RejectForBackpressure(RequestEnvelope &&request, std::string message) -> bool {
   ResponseEnvelope response;
   response.request_id_ = request.request_id_;
@@ -429,11 +435,6 @@ auto ServerConnection::RejectForBackpressure(RequestEnvelope &&request, std::str
     Close();
     return false;
   }
-}
-
-auto ServerConnection::EncodeResponseOnWorker(ResponseEnvelope &&response) const -> std::string {
-  FrameCodec codec(protocol_limits_);
-  return codec.Encode(response);
 }
 
 void ServerConnection::TryFinishDrain() {

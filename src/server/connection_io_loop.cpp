@@ -19,11 +19,7 @@ namespace xrpc {
 
 ConnectionIoLoop::ConnectionIoLoop(ServiceRegistry &registry, WorkerPool &worker_pool,
                                    ConnectionBackpressureLimits limits, ProtocolLimits protocol_limits)
-    : dispatch_mailbox_(context_),
-      registry_(&registry),
-      worker_pool_(&worker_pool),
-      limits_(limits),
-      protocol_limits_(protocol_limits) {}
+    : registry_(registry), worker_pool_(worker_pool), limits_(limits), protocol_limits_(protocol_limits) {}
 
 ConnectionIoLoop::~ConnectionIoLoop() { StopImmediately(); }
 
@@ -71,7 +67,6 @@ void ConnectionIoLoop::StopImmediately() noexcept {
   if (thread_.joinable()) {
     thread_.join();
   }
-  dispatch_mailbox_.Disable();
   {
     std::lock_guard lock(drain_mutex_);
     state_ = State::Stopped;
@@ -109,7 +104,6 @@ void ConnectionIoLoop::FinishDrain() {
     thread_.join();
   }
 
-  dispatch_mailbox_.Disable();
   connections_.clear();
   {
     std::lock_guard lock(drain_mutex_);
@@ -147,27 +141,32 @@ void ConnectionIoLoop::StartConnectionOnContext(io::Socket client_socket) {
   }
 
   const ServerConnectionConfig config{.limits_ = limits_, .protocol_limits_ = protocol_limits_};
-  std::shared_ptr<ServerConnection> connection;
+  const ConnectionId connection_id = next_connection_id_++;
+  ServerConnection *connection = nullptr;
   try {
-    connection = std::make_shared<ServerConnection>(context_, *registry_, *worker_pool_, dispatch_mailbox_,
-                                                    std::move(client_socket), config,
-                                                    [this]() -> void { OnConnectionClosed(); });
+    // The constructor is private so only the owning loop can create a connection.
+    auto owned_connection = std::unique_ptr<ServerConnection>(
+        new ServerConnection(connection_id, *this, context_, registry_, worker_pool_, std::move(client_socket), config,
+                             [this]() -> void { OnConnectionClosed(); }));
+    auto [position, inserted] = connections_.emplace(connection_id, std::move(owned_connection));
+    if (!inserted) {
+      throw LifecycleException("connection ID space exhausted");
+    }
+    connection = position->second.get();
   } catch (...) {
     OnConnectionClosed();
     throw;
   }
-  connections_.push_back(connection);
   connection->Start();
 }
 
 void ConnectionIoLoop::CollectClosedConnections() {
-  std::erase_if(connections_, [](const std::shared_ptr<ServerConnection> &connection) -> bool {
-    return connection->CanBeCollected();
-  });
+  std::erase_if(connections_, [](const auto &entry) -> bool { return entry.second->CanBeCollected(); });
 }
 
 void ConnectionIoLoop::CloseConnectionsOnContext() {
-  for (const auto &connection : connections_) {
+  for (const auto &entry : connections_) {
+    const auto &connection = entry.second;
     if (!connection->IsClosed()) {
       connection->Close();
     }
@@ -176,9 +175,46 @@ void ConnectionIoLoop::CloseConnectionsOnContext() {
 }
 
 void ConnectionIoLoop::BeginDrainOnContext() {
-  for (const auto &connection : connections_) {
+  for (const auto &entry : connections_) {
+    const auto &connection = entry.second;
     connection->BeginDrain();
   }
+}
+
+void ConnectionIoLoop::PostDispatchCompletion(DispatchCompletion completion) {
+  context_.Post([this, completion = std::move(completion)]() mutable -> void {
+    HandleDispatchCompletion(std::move(completion));
+  });
+}
+
+void ConnectionIoLoop::HandleDispatchCompletion(DispatchCompletion completion) {
+  auto connection = connections_.find(completion.connection_id_);
+  if (connection == connections_.end()) {
+    return;
+  }
+
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+  for (const std::uint64_t request_id : completion.trace_request_ids_) {
+    diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::CompletionCallback, request_id,
+                                    static_cast<std::uint32_t>(completion.completed_jobs_));
+  }
+#endif
+  if (completion.encode_failed_) {
+    connection->second->OnDispatchEncodeFailure(completion.completed_jobs_);
+  } else {
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+    for (const std::uint64_t request_id : completion.trace_request_ids_) {
+      diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::WriteEnqueue, request_id);
+    }
+#endif
+    connection->second->OnEncodedDispatchComplete(std::move(completion.response_bytes_), completion.completed_jobs_
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+                                                  ,
+                                                  std::move(completion.trace_request_ids_)
+#endif
+    );
+  }
+  CollectClosedConnections();
 }
 
 void ConnectionIoLoop::OnConnectionClosed() {

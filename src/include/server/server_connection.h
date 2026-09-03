@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
-#include <memory>
 #include <string>
 #include <vector>
 
@@ -22,9 +21,10 @@
 
 namespace xrpc {
 
-class DispatchMailbox;
 class ConnectionIoLoop;
 class ServiceRegistry;
+
+using ConnectionId = std::uint64_t;
 
 struct ServerConnectionConfig final {
   ConnectionBackpressureLimits limits_;
@@ -37,15 +37,11 @@ struct ServerConnectionConfig final {
  *
  * All mutable connection state is confined to its `UringContext` thread.
  * Worker threads never access it directly: they return encoded completions
- * through `DispatchMailbox`, which invokes the completion methods on this
- * connection's I/O thread.
+ * through `ConnectionIoLoop::PostDispatchCompletion()`, which routes them by
+ * connection ID on this connection's I/O thread.
  */
-class ServerConnection final : public std::enable_shared_from_this<ServerConnection> {
+class ServerConnection final {
  public:
-  ServerConnection(io::UringContext &context, ServiceRegistry &registry, WorkerPool &worker_pool,
-                   DispatchMailbox &mailbox, io::Socket socket, ServerConnectionConfig config,
-                   std::function<void()> on_closed);
-
   ~ServerConnection();
 
   ServerConnection(const ServerConnection &) = delete;
@@ -53,6 +49,13 @@ class ServerConnection final : public std::enable_shared_from_this<ServerConnect
 
   ServerConnection(ServerConnection &&) noexcept = delete;
   auto operator=(ServerConnection &&) noexcept -> ServerConnection & = delete;
+
+ private:
+  friend class ConnectionIoLoop;
+
+  ServerConnection(ConnectionId connection_id, ConnectionIoLoop &owner_loop, io::UringContext &context,
+                   ServiceRegistry &registry, WorkerPool &worker_pool, io::Socket socket, ServerConnectionConfig config,
+                   std::function<void()> on_closed);
 
   /**
    * @brief Starts the connection's read and write coroutines.
@@ -68,10 +71,6 @@ class ServerConnection final : public std::enable_shared_from_this<ServerConnect
   void BeginDrain();
 
   [[nodiscard]] auto IsClosed() const -> bool { return state_ == State::Closed; }
-
- private:
-  friend class ConnectionIoLoop;
-  friend class DispatchMailbox;
 
   enum class State : std::uint8_t {
     Active,
@@ -140,22 +139,19 @@ class ServerConnection final : public std::enable_shared_from_this<ServerConnect
 
   [[nodiscard]] auto SubmitDispatchBatch(std::vector<RequestEnvelope> requests) -> bool;
 
-  void ExecuteDispatchBatchOnWorker(const std::weak_ptr<ServerConnection> &target,
-                                    std::vector<RequestEnvelope> &requests);
-
   [[nodiscard]] auto RejectForBackpressure(RequestEnvelope &&request, std::string message) -> bool;
-
-  [[nodiscard]] auto EncodeResponseOnWorker(ResponseEnvelope &&response) const -> std::string;
 
   void TryFinishDrain();
 
-  io::UringContext *context_;
+  ConnectionId connection_id_;
 
-  DispatchMailbox *mailbox_ = nullptr;
+  ConnectionIoLoop &owner_loop_;
 
-  WorkerPool *worker_pool_ = nullptr;
+  io::UringContext &context_;
 
-  ServiceRegistry *registry_ = nullptr;
+  WorkerPool &worker_pool_;
+
+  ServiceRegistry &registry_;
 
   RpcFrameStream frame_stream_;
 

@@ -25,14 +25,11 @@ STAGES = {
     14: "request_start",
     15: "dispatch_end",
     16: "encode_end",
-    17: "mailbox_submit",
-    18: "mailbox_drain",
+    17: "completion_post",
+    18: "completion_callback",
     19: "write_enqueue",
     20: "server_send",
     21: "server_send_complete",
-    22: "mailbox_lock_acquired",
-    23: "mailbox_queued",
-    24: "mailbox_callback_begin",
 }
 
 INTERVALS = [
@@ -45,7 +42,7 @@ INTERVALS = [
     ("handler_dispatch", 14, 15),
     ("response_frame_encode", 15, 16),
     ("batch_completion_hold", 16, 17),
-    ("mailbox_return", 17, 18),
+    ("completion_return", 17, 18),
     ("write_enqueue", 18, 19),
     ("server_write_queue", 19, 20),
     ("response_transport_client_wakeup", 20, 3),
@@ -54,15 +51,11 @@ INTERVALS = [
 
 REQUIRED_STAGES = {1, 2, 3, 4, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
 
-DETAILED_REQUIRED_STAGES = REQUIRED_STAGES | {5, 6, 21, 22, 23, 24}
+DETAILED_REQUIRED_STAGES = REQUIRED_STAGES | {5, 6, 21}
 
 DETAILED_INTERVALS = [
     ("client_send_syscall", 2, 5),
     ("request_after_send_return", 5, 10),
-    ("mailbox_mutex_wait", 17, 22),
-    ("mailbox_enqueue", 22, 23),
-    ("mailbox_callback_wait", 23, 24),
-    ("mailbox_drain_hol", 24, 18),
     ("server_send_completion", 20, 21),
     ("response_to_client_epoll", 20, 6),
     ("client_epoll_to_recv", 6, 3),
@@ -186,7 +179,6 @@ def analyze(prefix):
     total_e2e = []
     batch_sizes = []
     worker_depths = []
-    mailbox_drain_sizes = []
     for request_id in ordered_ids:
         packed = values[request_id][14]
         batch_size = packed >> 16
@@ -196,7 +188,6 @@ def analyze(prefix):
         batch_hol.append(durations[request_id]["batch_hol_before_request"] / 1000.0)
         total_e2e.append(durations[request_id]["e2e"] / 1000.0)
         worker_depths.append(values[request_id][12])
-        mailbox_drain_sizes.append(values[request_id][18])
 
     detailed_ids = [request_id for request_id in ordered_ids if DETAILED_REQUIRED_STAGES <= set(traces[request_id])]
     detailed_durations = {}
@@ -266,7 +257,6 @@ def analyze(prefix):
         },
         "queues": {
             "worker_pending_jobs": value_distribution(worker_depths),
-            "mailbox_drain_completions": value_distribution(mailbox_drain_sizes),
         },
         "detailed": {
             "available": bool(detailed_valid_ids),

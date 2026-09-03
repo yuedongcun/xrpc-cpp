@@ -19,8 +19,7 @@ RpcServer
    └─ ConnectionIoLoop[]
       ├─ connection UringContext
       ├─ I/O thread
-      ├─ DispatchMailbox
-      └─ ServerConnection[]
+      └─ ConnectionId → unique_ptr<ServerConnection>
          ├─ ReadLoop Task
          └─ WriteLoop Task
 ```
@@ -106,7 +105,6 @@ sequenceDiagram
   participant Pool as WorkerPool
   participant Worker as Worker 线程
   participant Handler as ServiceRegistry / Handler
-  participant Mailbox as DispatchMailbox
 
   IO->>IO: ReadLoop co_await Recv()
   IO->>IO: RpcFrameStream::FeedBytes()
@@ -122,9 +120,8 @@ sequenceDiagram
   Handler-->>Worker: ResponseEnvelope
 
   Worker->>Worker: FrameCodec::Encode()
-  Worker->>Mailbox: Submit(DispatchCompletion)
-
-  Mailbox-->>IO: Post completion 到原 I/O 线程
+  Worker-->>IO: UringContext::Post(DispatchCompletion)
+  IO->>IO: 根据 ConnectionId 查找连接
   IO->>IO: 释放 inflight 计数
   IO->>IO: 加入 response write queue
   IO->>IO: 唤醒 WriteLoop
@@ -134,9 +131,9 @@ sequenceDiagram
 这里有两个关键线程边界：
 
 - `WorkerPool::TrySubmitBatch()` 把 CPU 和业务工作从 I/O 线程交给 Worker；
-- `DispatchMailbox` 把编码后的响应交回产生请求的 Connection I/O 线程。
+- `UringContext::Post()` 把编码后的响应直接交回产生请求的 Connection I/O 线程。
 
-Worker 不直接访问 socket，也不修改连接状态。每个 `ConnectionIoLoop` 拥有自己的 mailbox，因此 completion 会回到正确的 I/O 域。
+Worker 不持有 `ServerConnection`，也不直接访问 socket 或修改连接状态。任务只携带 `ConnectionId`；completion 回到原 `ConnectionIoLoop` 后，由该 loop 查找自己唯一拥有的连接。连接已经释放时，completion 直接丢弃。
 
 一次 `FeedBytes()` 解出的 request batch 采用 all-or-nothing 准入：整批满足单连接 inflight 上限时才提交给 WorkerPool，否则整批返回 `ResourceExhausted`。WorkerPool 再以 batch 中的逻辑 RPC 数检查全局容量。
 
@@ -186,7 +183,7 @@ state == Closed
 → ConnectionIoLoop 可以释放 ServerConnection
 ```
 
-两条协程及连接的全部可变状态都限制在所属 Connection I/O 线程中。Worker 只能通过 `DispatchMailbox` 返回 completion，因此连接字段不需要跨 Worker 加锁。
+两条协程及连接的全部可变状态都限制在所属 Connection I/O 线程中。Worker 只能通过 `UringContext::Post()` 返回带 `ConnectionId` 的 completion，因此连接字段不需要跨 Worker 加锁。
 
 ## 资源边界
 
@@ -232,7 +229,7 @@ sequenceDiagram
     R-->>S: Run() 返回
 ```
 
-关闭过程先从 Consul 注销实例，再停止本地 Worker 准入和 Accept。当前尚未在注销和本地截流之间等待服务发现传播，但这个顺序可以避免在本地已拒绝新工作后才主动注销。Worker Pool 排空期间，Connection I/O Loops 和 `DispatchMailbox` 必须继续运行，确保已准入请求能够完成响应编码、回投和发送。
+关闭过程先从 Consul 注销实例，再停止本地 Worker 准入和 Accept。当前尚未在注销和本地截流之间等待服务发现传播，但这个顺序可以避免在本地已拒绝新工作后才主动注销。Worker Pool 排空期间，Connection I/O Loops 必须继续运行，确保已准入请求能够通过 `Post()` 完成响应回投和发送。
 
 如果 Handler 永远不返回，graceful shutdown 会一直等待；当前没有 shutdown timeout 或强制关闭机制。`Run()` 发生异常时也会执行同一套组件清理，再将失败返回给调用者。
 

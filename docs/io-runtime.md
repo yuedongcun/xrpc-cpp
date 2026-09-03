@@ -287,7 +287,7 @@ Wakeup CQE
 I/O 线程执行 callback
 ```
 
-服务端通过这条路径把已接受 socket 交给 Connection I/O Loop，也把 Worker 经 `DispatchMailbox` 返回的 completion 交给原连接的 I/O 线程。交接的是工作，不是连接所有权；连接的可变状态仍只由所属 I/O 线程修改。
+服务端通过这条路径把已接受 socket 交给 Connection I/O Loop，也把 Worker 产生的 completion 直接交回原连接的 I/O 线程。completion 只携带 `ConnectionId`；连接仍由所属 I/O loop 唯一拥有，其可变状态也只由该线程修改。
 
 ### 停止请求、I/O 取消与资源释放
 

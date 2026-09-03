@@ -28,7 +28,7 @@ STAGE_LABELS = {
     "handler_dispatch": "registry + handler dispatch",
     "response_frame_encode": "响应组帧编码",
     "batch_completion_hold": "等待 batch 后续请求完成",
-    "mailbox_return": "Worker completion 回 I/O 线程",
+    "completion_return": "Worker completion Post 回 I/O 线程",
     "write_enqueue": "写队列入队",
     "server_write_queue": "服务端写队列/等待 send",
     "response_transport_client_wakeup": "响应入内核 → 客户端 epoll 唤醒",
@@ -45,7 +45,7 @@ STAGE_COLORS = {
     "handler_dispatch": "#16a34a",
     "response_frame_encode": "#22c55e",
     "batch_completion_hold": "#c026d3",
-    "mailbox_return": "#2563eb",
+    "completion_return": "#2563eb",
     "write_enqueue": "#0891b2",
     "server_write_queue": "#0e7490",
     "response_transport_client_wakeup": "#ea580c",
@@ -162,12 +162,6 @@ def analyze_trace_suite(suite):
                 ),
                 "worker_pending_p99": median(
                     [run["queues"]["worker_pending_jobs"]["p99"] for run in group]
-                ),
-                "mailbox_drain_mean": median(
-                    [run["queues"]["mailbox_drain_completions"]["mean"] for run in group]
-                ),
-                "mailbox_drain_p99": median(
-                    [run["queues"]["mailbox_drain_completions"]["p99"] for run in group]
                 ),
             },
         }
@@ -400,7 +394,7 @@ def line_chart(points, y_key, title, color, y_formatter=lambda value: f"{value:,
 
 def stage_bar_chart(trace_aggregates):
     selected = ["request_transport_server_wakeup", "worker_queue", "batch_hol_before_request",
-                "handler_dispatch", "batch_completion_hold", "mailbox_return", "server_write_queue",
+                "handler_dispatch", "batch_completion_hold", "completion_return", "server_write_queue",
                 "response_transport_client_wakeup"]
     rows = []
     max_total = max(sum(data["stages"][stage]["mean_us"] for stage in selected) for data in trace_aggregates.values())
@@ -547,7 +541,7 @@ def build_report(repo_root, raw_dir, output_path, trace_analysis, bottleneck_ana
     request_share = stages_1536["request_transport_server_wakeup"]["slow_share_pct"]
     response_share = stages_1536["response_transport_client_wakeup"]["slow_share_pct"]
     worker_share = stages_1536["worker_queue"]["slow_share_pct"]
-    mailbox_share = stages_1536["mailbox_return"]["slow_share_pct"]
+    completion_share = stages_1536["completion_return"]["slow_share_pct"]
     dispatch_mean = stages_1536["handler_dispatch"]["mean_us"]
     codec_upper_stages = [
         "client_prepare_send",
@@ -624,8 +618,6 @@ def build_report(repo_root, raw_dir, output_path, trace_analysis, bottleneck_ana
                 duration(point["benchmark"]["p99_us"]),
                 duration(stages["client_send_syscall"]["mean_us"]),
                 duration(stages["request_after_send_return"]["mean_us"]),
-                duration(stages["mailbox_mutex_wait"]["mean_us"]),
-                duration(stages["mailbox_callback_wait"]["mean_us"]),
                 duration(stages["server_send_completion"]["mean_us"]),
                 duration(stages["response_to_client_epoll"]["mean_us"]),
                 duration(stages["client_epoll_to_recv"]["mean_us"]),
@@ -659,8 +651,6 @@ def build_report(repo_root, raw_dir, output_path, trace_analysis, bottleneck_ana
             "p99",
             "client send syscall",
             "send 返回→server recv",
-            "mailbox mutex",
-            "mailbox callback wait",
             "server send completion",
             "send submit→client epoll",
             "epoll ready→recv",
@@ -689,9 +679,9 @@ def build_report(repo_root, raw_dir, output_path, trace_analysis, bottleneck_ana
                 "排除 runqueue 饿死为主体",
             ],
             [
-                "mailbox 回投慢，但原因未知",
-                f"mutex={duration(detailed_1536['detailed_stages']['mailbox_mutex_wait']['mean_us'])}；callback wait={duration(detailed_1536['detailed_stages']['mailbox_callback_wait']['mean_us'])}",
-                "确认不是锁；是 callback 等 I/O 事件循环",
+                "completion 回投慢，但原因未知",
+                f"Post→callback={duration(stages_1536['completion_return']['mean_us'])}",
+                "确认等待发生在 callback 被 I/O 事件循环执行之前",
             ],
             [
                 "响应大桶可能在客户端",
@@ -736,13 +726,13 @@ def build_report(repo_root, raw_dir, output_path, trace_analysis, bottleneck_ana
 <div class="cards">
   <div class="card"><strong>{io_1536['max_thread_cpu_pct']:.1f}%</strong><span>1536 点最忙服务端 I/O 线程</span></div>
   <div class="card"><strong>{io_1536['wait_to_runtime_pct']:.1f}%</strong><span>服务端 I/O runqueue wait/runtime</span></div>
-  <div class="card"><strong>{duration(detailed_1536['detailed_stages']['mailbox_callback_wait']['mean_us'])}</strong><span>mailbox 入队后等待 I/O callback</span></div>
+  <div class="card"><strong>{duration(stages_1536['completion_return']['mean_us'])}</strong><span>completion Post 后等待 I/O callback</span></div>
   <div class="card"><strong>{duration(detailed_1536['detailed_stages']['request_after_send_return']['mean_us'] + detailed_1536['detailed_stages']['response_to_client_epoll']['mean_us'])}</strong><span>双向事件被消费前的主要等待</span></div>
 </div>
 
 <h2 id="summary">第二轮最终结论</h2>
-<div class="verdict high"><span class="rank">1</span><strong>主瓶颈：服务端 I/O 事件循环的服务节奏，以及它共享的 recv/send/callback 等待队列。</strong>1536 在途时，请求侧阶段均值 {duration(stages_1536['request_transport_server_wakeup']['mean_us'])}，响应侧 {duration(stages_1536['response_transport_client_wakeup']['mean_us'])}，合计 {duration(transport_mean)}；在最慢 1% 请求中两者占 {request_share + response_share:.1f}%（{request_share:.1f}% + {response_share:.1f}%）。二次拆分显示 client send syscall 和 epoll-ready→recv 都很短，而等待随并发在 send 返回→server recv、server send completion、mailbox callback 和 send→client epoll 区间同步放大。</div>
-<div class="verdict medium"><span class="rank">2</span><strong>次瓶颈：Worker 排队与 completion 回投。</strong>Worker queue 均值 {duration(stages_1536['worker_queue']['mean_us'])}，mailbox return 均值 {duration(stages_1536['mailbox_return']['mean_us'])}；最慢 1% 中分别占 {worker_share:.1f}% 和 {mailbox_share:.1f}%。batch 内前序 HOL 和 batch 完成等待也真实存在，但量级更小。</div>
+<div class="verdict high"><span class="rank">1</span><strong>主瓶颈：服务端 I/O 事件循环的服务节奏，以及它共享的 recv/send/callback 等待队列。</strong>1536 在途时，请求侧阶段均值 {duration(stages_1536['request_transport_server_wakeup']['mean_us'])}，响应侧 {duration(stages_1536['response_transport_client_wakeup']['mean_us'])}，合计 {duration(transport_mean)}；在最慢 1% 请求中两者占 {request_share + response_share:.1f}%（{request_share:.1f}% + {response_share:.1f}%）。二次拆分显示 client send syscall 和 epoll-ready→recv 都很短，而等待随并发在 send 返回→server recv、server send completion、completion callback 和 send→client epoll 区间同步放大。</div>
+<div class="verdict medium"><span class="rank">2</span><strong>次瓶颈：Worker 排队与 completion 回投。</strong>Worker queue 均值 {duration(stages_1536['worker_queue']['mean_us'])}，completion return 均值 {duration(stages_1536['completion_return']['mean_us'])}；最慢 1% 中分别占 {worker_share:.1f}% 和 {completion_share:.1f}%。batch 内前序 HOL 和 batch 完成等待也真实存在，但量级更小。</div>
 <div class="verdict low"><span class="rank">3</span><strong>Protobuf 不是当前 128B 场景的主要解释。</strong>本次没有把 Protobuf 单独打点；采用更保守的上界：将所有可能包含协议编解码的客户端组帧、服务端整批解帧、响应编码、客户端解帧，再加 handler dispatch 全部相加，均值也只有 {duration(codec_upper_mean)}，约占阶段均值总和 {codec_upper_share:.1f}%。这还是“整桶归给 Protobuf”的高估，而不是 Protobuf 的纯成本。</div>
 <p>因此，更准确的表述是：<strong>128B 只说明单次业务计算和字节搬运的“有效工作量”较小，不代表闭环并发系统没有排队与唤醒。</strong>在 1536 个持续在途请求下，Little’s Law 给出的平均停留时间为 <code>L/λ ≈ 1536 / {fnum(release_1536['qps'],0)} = {duration(1536/release_1536['qps']*1_000_000)}</code>，与实测 {duration(release_1536['avg_us'])} 一致。</p>
 
@@ -751,16 +741,16 @@ def build_report(repo_root, raw_dir, output_path, trace_analysis, bottleneck_ana
 {revision_table}
 
 <h3>证据强度</h3>
-<p><strong>高置信：</strong>主耗时位于服务端 I/O/内核收发流水线；mailbox callback 与 socket 事件共享 I/O 线程造成局部排队；Protobuf、客户端 epoll 后处理和全局 CPU 饱和都不是主因。<strong>中置信：</strong>大桶内部 TCP loopback、io_uring recv/send completion 与 I/O 线程事件公平性各自的精确比例。<strong>低置信/未证明：</strong>某一个内核锁或单一 syscall 是唯一根因。</p>
+<p><strong>高置信：</strong>主耗时位于服务端 I/O/内核收发流水线；completion callback 与 socket 事件共享 I/O 线程造成局部排队；Protobuf、客户端 epoll 后处理和全局 CPU 饱和都不是主因。<strong>中置信：</strong>大桶内部 TCP loopback、io_uring recv/send completion 与 I/O 线程事件公平性各自的精确比例。<strong>低置信/未证明：</strong>某一个内核锁或单一 syscall 是唯一根因。</p>
 
 <h2 id="confirmation">二次瓶颈确认：CPU、runqueue 与细分事件边界</h2>
-<p>为了区分“CPU 跑满”“线程等调度”和“事件流水线排队”，新增了每线程 <code>/proc/&lt;pid&gt;/task/&lt;tid&gt;/schedstat</code> 采样，并将 mailbox、客户端 send/epoll、服务端 send completion 进一步打点。正式细分实验覆盖 384、1536、6144 在途，各 3 次；共 {fnum(detailed_sample_count,0)} 条完整请求。细分区间中有 {negative_count} 个跨进程并发边界出现负值（不足 {negative_count/detailed_sample_count*100:.3f}%），已从对应区间分布过滤，不影响其他阶段。</p>
+<p>为了区分“CPU 跑满”“线程等调度”和“事件流水线排队”，新增了每线程 <code>/proc/&lt;pid&gt;/task/&lt;tid&gt;/schedstat</code> 采样，并将 completion Post、客户端 send/epoll、服务端 send completion 进一步打点。正式细分实验覆盖 384、1536、6144 在途，各 3 次；共 {fnum(detailed_sample_count,0)} 条完整请求。细分区间中有 {negative_count} 个跨进程并发边界出现负值（不足 {negative_count/detailed_sample_count*100:.3f}%），已从对应区间分布过滤，不影响其他阶段。</p>
 <div class="verdict high"><strong>确认结果：</strong>1536 点不开 trace 写盘时，3 个服务端 I/O 线程合计使用 {io_1536['average_cpu_cores']:.2f} 核，最忙线程 {io_1536['max_thread_cpu_pct']:.1f}%；3 个 Worker 合计 {worker_1536['average_cpu_cores']:.2f} 核，最忙 {worker_1536['max_thread_cpu_pct']:.1f}%；客户端 I/O 合计 {client_1536['average_cpu_cores']:.2f} 核，最忙 {client_1536['max_thread_cpu_pct']:.1f}%。服务端 I/O 是最忙的局部资源，但没有单核 100%，整机也未打满。</div>
 <div class="verdict low"><strong>排除“主要是 OS 调度饿死”：</strong>1536 点服务端 I/O 的 runqueue wait/runtime 仅 {io_1536['wait_to_runtime_pct']:.1f}%，Worker 为 {worker_1536['wait_to_runtime_pct']:.1f}%。说明线程一旦 runnable，通常能及时拿到 CPU；毫秒延迟主要不是在操作系统 runqueue 中等待。</div>
-<div class="verdict medium"><strong>定位 mailbox：</strong>1536 点 mailbox 总回投中的 mutex wait 只有 {duration(detailed_1536['detailed_stages']['mailbox_mutex_wait']['mean_us'])}，真正的大头是 completion 入队后等待 I/O callback，约 {duration(detailed_1536['detailed_stages']['mailbox_callback_wait']['mean_us'])}。所以不是 mailbox 锁竞争，而是 callback 要与 recv/send CQE 一起等待同一个 I/O 事件循环处理。</div>
+<div class="verdict medium"><strong>定位 completion 回投：</strong>1536 点从 Worker 调用 <code>Post()</code> 到 I/O callback 执行约 {duration(stages_1536['completion_return']['mean_us'])}。这段时间是 callback 与 recv/send CQE 一起等待同一个 I/O 事件循环处理。</div>
 <h3>细分等待随负载变化</h3>
 {detailed_timing_table}
-<p>最关键的形状是：384→1536→6144 时，send 返回→server recv 从约 0.68→1.62→4.66 ms，send submit→client epoll 从约 0.59→1.26→3.38 ms，mailbox callback wait 从约 126→240→451 μs。与之相对，客户端 send syscall 只有约 16→23→27 μs，epoll ready→recv 只有约 17→35→68 μs。等待发生在事件被流水线消费之前，而不是客户端拿到事件之后。</p>
+<p>最关键的形状是：负载加深时，send 返回→server recv、completion Post→callback 和 send submit→client epoll 同步放大。与之相对，客户端 send syscall 和 epoll ready→recv 很短。等待发生在事件被流水线消费之前，而不是客户端拿到事件之后。</p>
 <h3>每线程 CPU 与 runnable 等待（不开 trace 写盘）</h3>
 {thread_table}
 <p>服务端 I/O 线程是最接近容量上限的一组，但其 CPU 从 384 到 6144 只小幅变化，等待时间却成倍增长；这是典型的局部服务队列接近容量、突发 batch 加深排队，而不是整个进程算力耗尽。Worker pending 均值随负载约 62→200→645，Worker CPU 仍明显低于 I/O 线程，因此 Worker/batch 排队是次级连锁拥堵。</p>
@@ -774,11 +764,11 @@ def build_report(repo_root, raw_dir, output_path, trace_analysis, bottleneck_ana
 
 <h2 id="model">为什么 128B 仍有毫秒延迟</h2>
 <p>一次 RPC 的端到端时间不是 payload 长度除以内存带宽。它是多个“服务时间 + 等待时间”的串联：客户端组批并获得可写机会、内核 TCP loopback、服务端 io_uring 完成与事件循环调度、Worker 入队、batch 内串行、completion 跨线程回投、服务端写队列、客户端 epoll 唤醒和解析完成。payload 很小，只能压低其中少数服务时间；当闭环维持固定在途量时，其余等待仍然存在。</p>
-<div class="flow"><div>客户端组帧<br><b>send syscall 很短</b></div><div class="arrow">→</div><div class="hot">socket / recv<br><b>等待服务端 I/O 消费</b></div><div class="arrow">→</div><div class="warm">Worker queue<br><b>batch 串行（次级）</b></div><div class="arrow">→</div><div>dispatch<br><b>约 2 μs</b></div><div class="arrow">→</div><div class="hot">mailbox callback<br><b>等同一 I/O 循环</b></div><div class="arrow">→</div><div class="hot">send completion<br><b>等待客户端 epoll ready</b></div></div>
+<div class="flow"><div>客户端组帧<br><b>send syscall 很短</b></div><div class="arrow">→</div><div class="hot">socket / recv<br><b>等待服务端 I/O 消费</b></div><div class="arrow">→</div><div class="warm">Worker queue<br><b>batch 串行（次级）</b></div><div class="arrow">→</div><div>dispatch<br><b>约 2 μs</b></div><div class="arrow">→</div><div class="hot">Post callback<br><b>等同一 I/O 循环</b></div><div class="arrow">→</div><div class="hot">send completion<br><b>等待客户端 epoll ready</b></div></div>
 
 <h2 id="method">方法与时间戳</h2>
 <p>基准使用 Release 构建测负载曲线；另用编译期 <code>XRPC_ENABLE_LATENCY_TRACE=ON</code> 的 Release 构建，在请求 ID 上做确定性 1/512 采样。每线程写固定 24 字节二进制记录并批量刷盘，避免全局 trace 锁。正式 trace 覆盖在途 48、384、1536、6144，各 3 次、每次 10 秒。</p>
-<p>端到端被切成 14 个不重叠区间：client-created → send 尝试、send → server recv 完成、server decode、提交 Worker、Worker queue、batch 前序 HOL、dispatch、响应编码、等待 batch 余项、mailbox 回投、写入连接队列、写队列 → send、send → client recv、客户端解析完成。1536 点共 {fnum(at_1536['complete_samples'],0)} 条完整采样，incomplete={at_1536['incomplete_samples']}，非法时间线={at_1536['invalid_timelines']}。</p>
+<p>端到端被切成 14 个不重叠区间：client-created → send 尝试、send → server recv 完成、server decode、提交 Worker、Worker queue、batch 前序 HOL、dispatch、响应编码、等待 batch 余项、completion Post 回投、写入连接队列、写队列 → send、send → client recv、客户端解析完成。1536 点共 {fnum(at_1536['complete_samples'],0)} 条完整采样，incomplete={at_1536['incomplete_samples']}，非法时间线={at_1536['invalid_timelines']}。</p>
 <div class="note warning"><strong>观测开销：</strong>1536 点 trace 构建的 QPS 中位数为 {fnum(traced_1536['qps'],0)}，无 trace Release 为 {fnum(release_1536['qps'],0)}，差约 {trace_qps_overhead:.1f}%。因此报告把 trace 用于阶段比例和量级判断，把无 trace Release 用于最终吞吐/延迟数值。</div>
 {rows_table(["在途","重复","完整样本","基准 avg","基准 p99","采样 avg","采样 p99","batch 均值","Worker pending 均值","position↔HOL r","position↔E2E r"], trace_rows)}
 
@@ -796,7 +786,7 @@ def build_report(repo_root, raw_dir, output_path, trace_analysis, bottleneck_ana
 
 <h2 id="batch">batch、HOL 与队列</h2>
 <p>1536 点的 batch size 均值 {at_1536['batch']['size_mean']:.1f}，p50 {at_1536['batch']['size_p50']:.0f}，p95 {at_1536['batch']['size_p95']:.0f}；Worker pending logical jobs 均值 {at_1536['queues']['worker_pending_mean']:.1f}、p95 {at_1536['queues']['worker_pending_p95']:.0f}、p99 {at_1536['queues']['worker_pending_p99']:.0f}。batch position 与 batch HOL 的 Pearson r={at_1536['batch']['position_hol_r']:.3f}，说明越靠后越要等前序请求；但 position 与完整 E2E 的 r={at_1536['batch']['position_e2e_r']:.3f}，相关性弱，说明总延迟仍由更大的 I/O/调度阶段盖过。</p>
-<p>这里存在两种 HOL：一是 Worker 在一个 job 内顺序 dispatch 请求，后面的请求在 <code>worker_start → request_start</code> 等待；二是已经编码完成的前序响应要等 batch 全部处理后才统一 <code>mailbox Submit</code>。在 1536 点，两者均值分别为 {duration(stages_1536['batch_hol_before_request']['mean_us'])} 与 {duration(stages_1536['batch_completion_hold']['mean_us'])}。它们是可证实的次要延迟，而不是最大桶。</p>
+<p>这里存在两种 HOL：一是 Worker 在一个 job 内顺序 dispatch 请求，后面的请求在 <code>worker_start → request_start</code> 等待；二是已经编码完成的前序响应要等 batch 全部处理后才统一 <code>Post()</code>。在 1536 点，两者均值分别为 {duration(stages_1536['batch_hol_before_request']['mean_us'])} 与 {duration(stages_1536['batch_completion_hold']['mean_us'])}。它们是可证实的次要延迟，而不是最大桶。</p>
 
 <h2 id="controls">对照实验</h2>
 <p>除连接数扫描外，下列实验均固定 12 连接、1536 在途、128B，并各跑 3 次；payload 扫描只改变 payload。由于 WSL2 同机压测存在明显时间漂移，判断依据是趋势是否单调、差异是否超过三次范围，而不是挑选最好的一次。</p>
@@ -828,7 +818,7 @@ def build_report(repo_root, raw_dir, output_path, trace_analysis, bottleneck_ana
 <li><strong>保守反事实上界：</strong>把上述所有混合桶连同 handler 全部假设成可消除的“协议/业务成本”，均值总计 {duration(codec_upper_mean)}，占阶段和 {codec_upper_share:.1f}%；在同一最慢 1% cohort 中占比总计 {codec_upper_slow_share:.1f}%。实际 Protobuf 纯成本只会更小。</li>
 <li><strong>payload 对照不构成单独归因：</strong>payload 扫描只能说明“字节相关路径”重要，范围包括 frame encode/decode、字符串增长与复制、socket/TCP、cache 与内存访问；不能将全部差异归给 Protobuf。</li>
 </ol>
-<p>因此建议在对外解释时使用：<q>128B 证明业务计算轻，不证明端到端等待轻。固定 1536 在途时，Little’s Law 要求平均停留约数毫秒；二次分段确认主要时间在服务端 I/O/内核收发流水线消费 recv、send 和 mailbox callback 之前。OS runqueue、客户端 epoll 后处理和 Worker 计算不是主体；协议编解码连同 handler 的保守上界也只占均值约 {codec_upper_share:.1f}%。</q></p>
+<p>因此建议在对外解释时使用：<q>128B 证明业务计算轻，不证明端到端等待轻。固定 1536 在途时，Little’s Law 要求平均停留约数毫秒；二次分段确认主要时间在服务端 I/O/内核收发流水线消费 recv、send 和 Post callback 之前。OS runqueue、客户端 epoll 后处理和 Worker 计算不是主体；协议编解码连同 handler 的保守上界也只占均值约 {codec_upper_share:.1f}%。</q></p>
 
 <h2 id="limits">限制与下一步观测</h2>
 <ul>
