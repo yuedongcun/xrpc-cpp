@@ -296,6 +296,11 @@ auto ServerConnection::WriteLoop() -> runtime::Task<void> {
 
         offset += send_result.bytes_transferred_;
       }
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+      for (const std::uint64_t request_id : trace_request_ids) {
+        diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::ServerSendComplete, request_id);
+      }
+#endif
       ReleaseWriteBytes(frame_size);
     }
 

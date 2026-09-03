@@ -361,7 +361,11 @@ class EpollFirehoseConnection final {
     }
   }
 
-  void ReadAvailable() {
+  void ReadAvailable(
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+      std::uint64_t epoll_ready_at_ns = 0
+#endif
+  ) {
     std::array<char, SOCKET_BUFFER_SIZE> chunk{};
     while (!closed_) {
       const ssize_t received = ::recv(fd_, chunk.data(), chunk.size(), 0);
@@ -372,7 +376,7 @@ class EpollFirehoseConnection final {
 #endif
         read_buffer_.append(chunk.data(), static_cast<std::size_t>(received));
 #ifdef XRPC_ENABLE_LATENCY_TRACE
-        DecodeBufferedResponses(received_at_ns);
+        DecodeBufferedResponses(received_at_ns, epoll_ready_at_ns);
 #else
         DecodeBufferedResponses();
 #endif
@@ -395,7 +399,11 @@ class EpollFirehoseConnection final {
 
   void HandlePeerClosed() {
     if (!IsDrained()) {
-      ReadAvailable();
+      ReadAvailable(
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+          diagnostics::LatencyTraceEnabled() ? diagnostics::LatencyNowNs() : 0
+#endif
+      );
     }
     if (!IsDrained()) {
       FailOutstanding();
@@ -468,10 +476,14 @@ class EpollFirehoseConnection final {
 #endif
       const ssize_t sent =
           ::send(fd_, write_buffer_.data() + write_offset_, write_buffer_.size() - write_offset_, MSG_NOSIGNAL);
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+      const std::uint64_t send_completed_at_ns =
+          diagnostics::LatencyTraceEnabled() ? diagnostics::LatencyNowNs() : 0;
+#endif
       if (sent > 0) {
         write_offset_ += static_cast<std::size_t>(sent);
 #ifdef XRPC_ENABLE_LATENCY_TRACE
-        RecordCompletedSends(send_started_at_ns);
+        RecordCompletedSends(send_started_at_ns, send_completed_at_ns);
 #endif
         continue;
       }
@@ -496,7 +508,7 @@ class EpollFirehoseConnection final {
 
   void DecodeBufferedResponses(
 #ifdef XRPC_ENABLE_LATENCY_TRACE
-      std::uint64_t received_at_ns
+      std::uint64_t received_at_ns, std::uint64_t epoll_ready_at_ns
 #endif
       ) {
     while (!closed_) {
@@ -514,7 +526,7 @@ class EpollFirehoseConnection final {
       }
       CompleteSlot(decoded->request_id_, decoded->ok_
 #ifdef XRPC_ENABLE_LATENCY_TRACE
-                   , received_at_ns
+                   , received_at_ns, epoll_ready_at_ns
 #endif
                    );
       read_offset_ += decoded->consumed_;
@@ -523,7 +535,7 @@ class EpollFirehoseConnection final {
 
   void CompleteSlot(std::uint64_t request_id, bool ok
 #ifdef XRPC_ENABLE_LATENCY_TRACE
-                    , std::uint64_t received_at_ns
+                    , std::uint64_t received_at_ns, std::uint64_t epoll_ready_at_ns
 #endif
                     ) {
     const auto now = std::chrono::steady_clock::now();
@@ -531,6 +543,7 @@ class EpollFirehoseConnection final {
     FirehoseSlot &slot = slots_[slot_index];
 
 #ifdef XRPC_ENABLE_LATENCY_TRACE
+    diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::ClientEpollReady, request_id, 0, epoll_ready_at_ns);
     diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::ClientRecv, request_id, 0, received_at_ns);
 #endif
 
@@ -634,10 +647,12 @@ class EpollFirehoseConnection final {
     std::size_t frame_end_offset_ = 0;
   };
 
-  void RecordCompletedSends(std::uint64_t sent_at_ns) {
+  void RecordCompletedSends(std::uint64_t send_started_at_ns, std::uint64_t send_completed_at_ns) {
     while (!pending_send_traces_.empty() && pending_send_traces_.front().frame_end_offset_ <= write_offset_) {
       diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::ClientSent,
-                                      pending_send_traces_.front().request_id_, 0, sent_at_ns);
+                                      pending_send_traces_.front().request_id_, 0, send_started_at_ns);
+      diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::ClientSendComplete,
+                                      pending_send_traces_.front().request_id_, 0, send_completed_at_ns);
       pending_send_traces_.pop_front();
     }
   }
@@ -696,6 +711,7 @@ class EpollFirehoseWorker final {
   void Start(std::latch &start_latch, std::chrono::steady_clock::time_point deadline) {
     thread_ = std::jthread([this, &start_latch, deadline] {
       try {
+        diagnostics::SetLatencyTraceThreadName("xrpc-client-io");
         start_latch.wait();
         Run(deadline);
       } catch (...) {
@@ -798,13 +814,21 @@ class EpollFirehoseWorker final {
         }
 
         const std::uint32_t event_mask = events[static_cast<std::size_t>(i)].events;
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+        const std::uint64_t epoll_ready_at_ns =
+            diagnostics::LatencyTraceEnabled() ? diagnostics::LatencyNowNs() : 0;
+#endif
         now = std::chrono::steady_clock::now();
         connection.MarkDeadline(now, deadline);
         if ((event_mask & EPOLLOUT) != 0) {
           connection.PumpWrites(now, deadline);
         }
         if ((event_mask & EPOLLIN) != 0) {
-          connection.ReadAvailable();
+          connection.ReadAvailable(
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+              epoll_ready_at_ns
+#endif
+          );
           now = std::chrono::steady_clock::now();
           connection.MarkDeadline(now, deadline);
           connection.PumpWrites(now, deadline);

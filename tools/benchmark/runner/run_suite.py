@@ -14,6 +14,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from schedstat_sampler import SchedstatSampler
+
 
 TOTAL_PATTERN = re.compile(r"total_calls=(\d+) success=(\d+) failed=(\d+)")
 LATENCY_PATTERN = re.compile(
@@ -266,15 +268,23 @@ def parse_stats(output):
     }
 
 
-def run_client(command, timeout, env=None, perf_stat_path=None):
+def run_client(command, timeout, env=None, perf_stat_path=None, schedstat_sampler=None, role="client"):
     command = with_perf_stat(command, perf_stat_path)
-    result = subprocess.run(
-        command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout, env=env
+    process = subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env
     )
-    print(result.stdout, end="")
-    if result.returncode != 0:
-        raise RuntimeError(f"benchmark client failed with exit code {result.returncode}")
-    return parse_stats(result.stdout)
+    if schedstat_sampler is not None:
+        schedstat_sampler.add_process(role, process.pid)
+    try:
+        output, _ = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        raise
+    print(output, end="")
+    if process.returncode != 0:
+        raise RuntimeError(f"benchmark client failed with exit code {process.returncode}")
+    return parse_stats(output)
 
 
 def run_case(
@@ -288,6 +298,8 @@ def run_case(
     client_cpus=None,
     server_perf_stat=None,
     client_perf_stat=None,
+    schedstat_path=None,
+    schedstat_interval_ms=50,
 ):
     server_bin = build_dir / "tools" / "benchmark" / "xrpc_benchmark_server"
     client_bin = build_dir / "tools" / "benchmark" / (
@@ -295,6 +307,10 @@ def run_case(
     )
     env = benchmark_env(trace_prefix, trace_sample_shift)
     server, port = start_server(repo_root, server_bin, config, env, server_cpus, server_perf_stat)
+    schedstat_sampler = None
+    if schedstat_path is not None:
+        schedstat_sampler = SchedstatSampler(schedstat_path, schedstat_interval_ms)
+        schedstat_sampler.add_process("server", server.pid)
     try:
         if config.warmup_duration > 0:
             print(f"warmup: {case.name}")
@@ -302,14 +318,19 @@ def run_case(
                 client_command(client_bin, config, case, port, config.warmup_duration, client_cpus),
                 config.warmup_duration + PROCESS_TIMEOUT_MARGIN,
                 env,
+                schedstat_sampler=schedstat_sampler,
+                role="client-warmup",
             )
         return run_client(
             client_command(client_bin, config, case, port, config.duration, client_cpus),
             config.duration + PROCESS_TIMEOUT_MARGIN,
             env,
             client_perf_stat,
+            schedstat_sampler,
         )
     finally:
+        if schedstat_sampler is not None:
+            schedstat_sampler.stop()
         stop(server, signal.SIGINT if server_perf_stat is not None else signal.SIGTERM)
 
 
@@ -344,6 +365,8 @@ def parse_args(argv=None):
     parser.add_argument("--client-cpus")
     parser.add_argument("--server-perf-stat", type=Path)
     parser.add_argument("--client-perf-stat", type=Path)
+    parser.add_argument("--schedstat-dir", type=Path)
+    parser.add_argument("--schedstat-interval-ms", type=int, default=50)
     return parser.parse_args(argv)
 
 
@@ -358,6 +381,12 @@ def main(argv=None):
         raise RuntimeError("trace-sample-shift must be between 0 and 20")
     if args.trace_dir is not None:
         args.trace_dir.mkdir(parents=True, exist_ok=True)
+    if args.schedstat_dir is not None:
+        args.schedstat_dir.mkdir(parents=True, exist_ok=True)
+    if args.schedstat_interval_ms < 10:
+        raise RuntimeError("schedstat-interval-ms must be at least 10")
+    if args.schedstat_dir is not None and (args.server_perf_stat is not None or args.client_perf_stat is not None):
+        raise RuntimeError("schedstat sampling cannot be combined with perf wrappers")
 
     rows = []
     total = len(case_list) * config.repetitions
@@ -369,11 +398,16 @@ def main(argv=None):
             index += 1
             print(f"\n[{index}/{total}] repetition={repetition} {case.name}")
             trace_prefix = None
+            safe_case = re.sub(r"[^a-zA-Z0-9_.-]+", "_", case.name)
             if args.trace_dir is not None:
-                safe_case = re.sub(r"[^a-zA-Z0-9_.-]+", "_", case.name)
                 run_trace_dir = args.trace_dir / f"run-{index:03d}-rep-{repetition}-{safe_case}"
                 run_trace_dir.mkdir(parents=True, exist_ok=False)
                 trace_prefix = run_trace_dir / "trace"
+            schedstat_path = None
+            if args.schedstat_dir is not None:
+                schedstat_path = (
+                    args.schedstat_dir / f"run-{index:03d}-rep-{repetition}-{safe_case}-schedstat.csv"
+                )
             stats = run_case(
                 repo_root,
                 build_dir,
@@ -385,11 +419,15 @@ def main(argv=None):
                 args.client_cpus,
                 args.server_perf_stat,
                 args.client_perf_stat,
+                schedstat_path,
+                args.schedstat_interval_ms,
             )
             stats["case"] = case.name
             stats["repetition"] = repetition
             if trace_prefix is not None:
                 stats["trace_prefix"] = str(trace_prefix)
+            if schedstat_path is not None:
+                stats["schedstat_path"] = str(schedstat_path)
             rows.append(stats)
     summarize(rows)
     if args.output_json is not None:
@@ -402,6 +440,7 @@ def main(argv=None):
             "client_cpus": args.client_cpus,
             "server_perf_stat": str(args.server_perf_stat) if args.server_perf_stat is not None else None,
             "client_perf_stat": str(args.client_perf_stat) if args.client_perf_stat is not None else None,
+            "schedstat_interval_ms": args.schedstat_interval_ms if args.schedstat_dir is not None else None,
             "rows": rows,
         }
         args.output_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

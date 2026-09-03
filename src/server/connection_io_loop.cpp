@@ -12,6 +12,7 @@
 
 #include <utility>
 
+#include "common/latency_trace.h"
 #include "server/service_registry.h"
 
 namespace xrpc {
@@ -35,6 +36,7 @@ void ConnectionIoLoop::Start() {
   try {
     thread_ = std::jthread([this]() -> void {
       try {
+        diagnostics::SetLatencyTraceThreadName("xrpc-io");
         context_.Run();
       } catch (...) {
         error_ = std::current_exception();

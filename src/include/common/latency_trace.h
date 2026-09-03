@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string_view>
 
 namespace xrpc::diagnostics {
 
@@ -11,6 +12,8 @@ enum class LatencyStage : std::uint16_t {
   ClientSent = 2,
   ClientRecv = 3,
   ClientComplete = 4,
+  ClientSendComplete = 5,
+  ClientEpollReady = 6,
 
   ServerRecv = 10,
   ServerDecoded = 11,
@@ -23,6 +26,10 @@ enum class LatencyStage : std::uint16_t {
   MailboxDrain = 18,
   WriteEnqueue = 19,
   ServerSend = 20,
+  ServerSendComplete = 21,
+  MailboxLockAcquired = 22,
+  MailboxQueued = 23,
+  MailboxCallbackBegin = 24,
 };
 
 #ifdef XRPC_ENABLE_LATENCY_TRACE
@@ -36,6 +43,8 @@ enum class LatencyStage : std::uint16_t {
 void RecordLatencyTrace(LatencyStage stage, std::uint64_t request_id, std::uint32_t value = 0,
                         std::uint64_t timestamp_ns = 0) noexcept;
 
+void SetLatencyTraceThreadName(std::string_view name) noexcept;
+
 #else
 
 [[nodiscard]] inline auto LatencyTraceEnabled() noexcept -> bool { return false; }
@@ -45,6 +54,8 @@ void RecordLatencyTrace(LatencyStage stage, std::uint64_t request_id, std::uint3
 [[nodiscard]] inline auto LatencyNowNs() noexcept -> std::uint64_t { return 0; }
 
 inline void RecordLatencyTrace(LatencyStage, std::uint64_t, std::uint32_t = 0, std::uint64_t = 0) noexcept {}
+
+inline void SetLatencyTraceThreadName(std::string_view) noexcept {}
 
 #endif
 

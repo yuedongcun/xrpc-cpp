@@ -4,6 +4,7 @@
 
 #ifdef XRPC_ENABLE_LATENCY_TRACE
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstdio>
@@ -12,6 +13,7 @@
 #include <string>
 #include <string_view>
 
+#include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -149,6 +151,14 @@ void RecordLatencyTrace(LatencyStage stage, std::uint64_t request_id, std::uint3
                                          .timestamp_ns_ = timestamp_ns,
                                          .value_ = value,
                                          .stage_ = static_cast<std::uint16_t>(stage)});
+}
+
+void SetLatencyTraceThreadName(std::string_view name) noexcept {
+  constexpr std::size_t MAX_THREAD_NAME_BYTES = 15;
+  char buffer[MAX_THREAD_NAME_BYTES + 1]{};
+  const std::size_t size = std::min(name.size(), MAX_THREAD_NAME_BYTES);
+  std::memcpy(buffer, name.data(), size);
+  (void)::prctl(PR_SET_NAME, buffer, 0, 0, 0);
 }
 
 }  // namespace xrpc::diagnostics

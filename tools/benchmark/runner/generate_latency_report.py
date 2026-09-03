@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from analyze_latency_trace import INTERVALS, analyze
+from analyze_schedstat import analyze as analyze_schedstat
 
 
 STAGE_LABELS = {
@@ -173,6 +174,131 @@ def analyze_trace_suite(suite):
     return {"runs": runs, "aggregates": aggregates}
 
 
+def analyze_bottleneck_suite(suite):
+    runs = []
+    for row in suite["rows"]:
+        trace = analyze(Path(row["trace_prefix"]))
+        schedstat = analyze_schedstat(Path(row["schedstat_path"]))
+        runs.append(
+            {
+                "inflight": extract_number(row["case"], "inflight"),
+                "repetition": row["repetition"],
+                "benchmark": {key: row[key] for key in ("qps", "avg_us", "p50_us", "p95_us", "p99_us")},
+                "trace": trace,
+                "schedstat": schedstat,
+            }
+        )
+
+    by_inflight = defaultdict(list)
+    for run in runs:
+        by_inflight[run["inflight"]].append(run)
+
+    aggregates = {}
+    for inflight, group in sorted(by_inflight.items()):
+        detailed_stages = {}
+        for stage in group[0]["trace"]["detailed"]["all_requests"]:
+            detailed_stages[stage] = {
+                metric: median(
+                    [run["trace"]["detailed"]["all_requests"][stage][metric] for run in group]
+                )
+                for metric in ("mean_us", "p50_us", "p95_us", "p99_us")
+            }
+
+        sched_groups = defaultdict(list)
+        for run in group:
+            for sched_group in run["schedstat"]["groups"]:
+                sched_groups[f"{sched_group['role']}/{sched_group['comm']}"] .append(sched_group)
+        sched_aggregate = {}
+        for name, values in sched_groups.items():
+            if len(values) != len(group):
+                continue
+            sched_aggregate[name] = {
+                metric: median([value[metric] for value in values])
+                for metric in (
+                    "thread_count",
+                    "average_cpu_cores",
+                    "average_runnable_wait_cores",
+                    "wait_to_runtime_pct",
+                    "max_thread_cpu_pct",
+                    "max_thread_runqueue_wait_pct",
+                    "voluntary_context_switches",
+                    "nonvoluntary_context_switches",
+                )
+            }
+
+        aggregates[str(inflight)] = {
+            "runs": len(group),
+            "samples": sum(run["trace"]["detailed"]["complete_request_count"] for run in group),
+            "negative_intervals": {
+                stage: sum(
+                    run["trace"]["detailed"]["negative_interval_counts"].get(stage, 0) for run in group
+                )
+                for stage in detailed_stages
+            },
+            "benchmark": {
+                metric: median([run["benchmark"][metric] for run in group])
+                for metric in ("qps", "avg_us", "p50_us", "p95_us", "p99_us")
+            },
+            "detailed_stages": detailed_stages,
+            "batch_size_mean": median([run["trace"]["batch"]["size"]["mean"] for run in group]),
+            "worker_pending_mean": median(
+                [run["trace"]["queues"]["worker_pending_jobs"]["mean"] for run in group]
+            ),
+            "worker_pending_p95": median(
+                [run["trace"]["queues"]["worker_pending_jobs"]["p95"] for run in group]
+            ),
+            "schedstat": sched_aggregate,
+        }
+    return {"runs": runs, "aggregates": aggregates}
+
+
+def analyze_schedstat_suite(suite):
+    runs = []
+    for row in suite["rows"]:
+        runs.append(
+            {
+                "inflight": extract_number(row["case"], "inflight"),
+                "repetition": row["repetition"],
+                "benchmark": {key: row[key] for key in ("qps", "avg_us", "p50_us", "p95_us", "p99_us")},
+                "schedstat": analyze_schedstat(Path(row["schedstat_path"])),
+            }
+        )
+    by_inflight = defaultdict(list)
+    for run in runs:
+        by_inflight[run["inflight"]].append(run)
+    aggregates = {}
+    for inflight, group in sorted(by_inflight.items()):
+        sched_groups = defaultdict(list)
+        for run in group:
+            for sched_group in run["schedstat"]["groups"]:
+                sched_groups[f"{sched_group['role']}/{sched_group['comm']}"].append(sched_group)
+        aggregates[str(inflight)] = {
+            "runs": len(group),
+            "benchmark": {
+                metric: median([run["benchmark"][metric] for run in group])
+                for metric in ("qps", "avg_us", "p50_us", "p95_us", "p99_us")
+            },
+            "schedstat": {
+                name: {
+                    metric: median([value[metric] for value in values])
+                    for metric in (
+                        "thread_count",
+                        "average_cpu_cores",
+                        "average_runnable_wait_cores",
+                        "wait_to_runtime_pct",
+                        "max_thread_cpu_pct",
+                        "max_thread_runqueue_wait_pct",
+                        "voluntary_context_switches",
+                        "nonvoluntary_context_switches",
+                    )
+                }
+                for name, values in sched_groups.items()
+                if len(values) == len(group)
+            },
+        }
+    return {"runs": runs, "aggregates": aggregates}
+
+
 def command_output(command):
     try:
         result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10)
@@ -325,7 +451,7 @@ def manifest(raw_dir):
     return result
 
 
-def build_report(repo_root, raw_dir, output_path, trace_analysis, env):
+def build_report(repo_root, raw_dir, output_path, trace_analysis, bottleneck_analysis, schedstat_analysis, env):
     load_curve = summarize_rows(
         load_json(raw_dir / "formal-load-curve.json")["rows"],
         lambda row: extract_number(row["case"], "inflight"),
@@ -479,6 +605,77 @@ def build_report(repo_root, raw_dir, output_path, trace_analysis, env):
         ],
     )
 
+    detailed = bottleneck_analysis["aggregates"]
+    sched_only = schedstat_analysis["aggregates"]
+    detailed_1536 = detailed["1536"]
+    sched_1536 = sched_only["1536"]["schedstat"]
+    io_1536 = sched_1536["server/xrpc-io"]
+    worker_1536 = sched_1536["server/xrpc-worker"]
+    client_1536 = sched_1536["client/xrpc-client-io"]
+    detailed_timing_rows = []
+    thread_rows = []
+    for inflight in ("384", "1536", "6144"):
+        point = detailed[inflight]
+        stages = point["detailed_stages"]
+        detailed_timing_rows.append(
+            [
+                inflight,
+                fnum(point["benchmark"]["qps"], 0),
+                duration(point["benchmark"]["p99_us"]),
+                duration(stages["client_send_syscall"]["mean_us"]),
+                duration(stages["request_after_send_return"]["mean_us"]),
+                duration(stages["mailbox_mutex_wait"]["mean_us"]),
+                duration(stages["mailbox_callback_wait"]["mean_us"]),
+                duration(stages["server_send_completion"]["mean_us"]),
+                duration(stages["response_to_client_epoll"]["mean_us"]),
+                duration(stages["client_epoll_to_recv"]["mean_us"]),
+                fnum(point["worker_pending_mean"], 1),
+                fnum(point["batch_size_mean"], 1),
+            ]
+        )
+        sched_point = sched_only[inflight]["schedstat"]
+        for role, label in (
+            ("server/xrpc-io", "服务端 I/O"),
+            ("server/xrpc-worker", "Worker"),
+            ("client/xrpc-client-io", "客户端 I/O"),
+        ):
+            group = sched_point[role]
+            thread_rows.append(
+                [
+                    inflight,
+                    label,
+                    fnum(group["thread_count"], 0),
+                    f"{group['average_cpu_cores']:.2f}",
+                    f"{group['max_thread_cpu_pct']:.1f}%",
+                    f"{group['average_runnable_wait_cores']:.3f}",
+                    f"{group['wait_to_runtime_pct']:.1f}%",
+                    fnum(group["nonvoluntary_context_switches"], 0),
+                ]
+            )
+    detailed_timing_table = rows_table(
+        [
+            "在途",
+            "QPS",
+            "p99",
+            "client send syscall",
+            "send 返回→server recv",
+            "mailbox mutex",
+            "mailbox callback wait",
+            "server send completion",
+            "send submit→client epoll",
+            "epoll ready→recv",
+            "Worker pending",
+            "batch size",
+        ],
+        detailed_timing_rows,
+    )
+    thread_table = rows_table(
+        ["在途", "线程组", "线程", "平均占用核数", "最忙线程 CPU", "平均 runqueue 核数", "wait/runtime", "非自愿切换"],
+        thread_rows,
+    )
+    negative_count = sum(sum(point["negative_intervals"].values()) for point in detailed.values())
+    detailed_sample_count = sum(point["samples"] for point in detailed.values())
+
     css = """
     :root{--ink:#14213d;--muted:#64748b;--line:#dbe4ee;--panel:#f8fafc;--accent:#2563eb;--good:#15803d;--warn:#b45309;--bad:#b91c1c}
     *{box-sizing:border-box}body{margin:0;background:#eef3f8;color:var(--ink);font-family:Inter,"Noto Sans SC","Microsoft YaHei",system-ui,sans-serif;line-height:1.58}
@@ -514,16 +711,28 @@ def build_report(repo_root, raw_dir, output_path, trace_analysis, env):
 </div>
 
 <h2 id="summary">结论摘要</h2>
-<div class="verdict high"><span class="rank">1</span><strong>主瓶颈：双向内核传输、I/O 事件唤醒与同机调度。</strong>1536 在途时，请求侧阶段均值 {duration(stages_1536['request_transport_server_wakeup']['mean_us'])}，响应侧 {duration(stages_1536['response_transport_client_wakeup']['mean_us'])}，合计 {duration(transport_mean)}；在最慢 1% 请求中两者占 {request_share + response_share:.1f}%（{request_share:.1f}% + {response_share:.1f}%）。这些阶段不是“网线上传输 128B 的时间”，而是包含 socket/TCP loopback、io_uring CQE 或 epoll 就绪、线程得到 CPU 以及事件循环处理到该连接的等待时间。</div>
+<div class="verdict high"><span class="rank">1</span><strong>主瓶颈：服务端 I/O 事件循环的服务节奏，以及它共享的 recv/send/callback 等待队列。</strong>1536 在途时，请求侧阶段均值 {duration(stages_1536['request_transport_server_wakeup']['mean_us'])}，响应侧 {duration(stages_1536['response_transport_client_wakeup']['mean_us'])}，合计 {duration(transport_mean)}；在最慢 1% 请求中两者占 {request_share + response_share:.1f}%（{request_share:.1f}% + {response_share:.1f}%）。二次拆分显示 client send syscall 和 epoll-ready→recv 都很短，而等待随并发在 send 返回→server recv、server send completion、mailbox callback 和 send→client epoll 区间同步放大。</div>
 <div class="verdict medium"><span class="rank">2</span><strong>次瓶颈：Worker 排队与 completion 回投。</strong>Worker queue 均值 {duration(stages_1536['worker_queue']['mean_us'])}，mailbox return 均值 {duration(stages_1536['mailbox_return']['mean_us'])}；最慢 1% 中分别占 {worker_share:.1f}% 和 {mailbox_share:.1f}%。batch 内前序 HOL 和 batch 完成等待也真实存在，但量级更小。</div>
 <div class="verdict low"><span class="rank">3</span><strong>Protobuf 不是当前 128B 场景的主要解释。</strong>本次没有把 Protobuf 单独打点；采用更保守的上界：将所有可能包含协议编解码的客户端组帧、服务端整批解帧、响应编码、客户端解帧，再加 handler dispatch 全部相加，均值也只有 {duration(codec_upper_mean)}，约占阶段均值总和 {codec_upper_share:.1f}%。这还是“整桶归给 Protobuf”的高估，而不是 Protobuf 的纯成本。</div>
 <p>因此，更准确的表述是：<strong>128B 只说明单次业务计算和字节搬运的“有效工作量”较小，不代表闭环并发系统没有排队与唤醒。</strong>在 1536 个持续在途请求下，Little’s Law 给出的平均停留时间为 <code>L/λ ≈ 1536 / {fnum(release_1536['qps'],0)} = {duration(1536/release_1536['qps']*1_000_000)}</code>，与实测 {duration(release_1536['avg_us'])} 一致。</p>
 
 <h3>证据强度</h3>
-<p><strong>高置信：</strong>主耗时位于双向 I/O/唤醒大桶；把全部协议编解码桶连同 handler 计算的保守上界仍不是主因；并发加深使排队型尾延迟上升。<strong>中置信：</strong>这些大桶内部由 TCP loopback、io_uring/epoll 唤醒、事件循环公平性和 WSL2 调度分别贡献多少。当前时间戳能定位到用户态边界，不能继续拆开内核内部。<strong>低置信/未证明：</strong>某一个 syscall、某个内核锁或特定 CPU migration 是唯一根因。</p>
+<p><strong>高置信：</strong>主耗时位于服务端 I/O/内核收发流水线；mailbox callback 与 socket 事件共享 I/O 线程造成局部排队；Protobuf、客户端 epoll 后处理和全局 CPU 饱和都不是主因。<strong>中置信：</strong>大桶内部 TCP loopback、io_uring recv/send completion 与 I/O 线程事件公平性各自的精确比例。<strong>低置信/未证明：</strong>某一个内核锁或单一 syscall 是唯一根因。</p>
+
+<h2 id="confirmation">二次瓶颈确认：CPU、runqueue 与细分事件边界</h2>
+<p>为了区分“CPU 跑满”“线程等调度”和“事件流水线排队”，新增了每线程 <code>/proc/&lt;pid&gt;/task/&lt;tid&gt;/schedstat</code> 采样，并将 mailbox、客户端 send/epoll、服务端 send completion 进一步打点。正式细分实验覆盖 384、1536、6144 在途，各 3 次；共 {fnum(detailed_sample_count,0)} 条完整请求。细分区间中有 {negative_count} 个跨进程并发边界出现负值（不足 {negative_count/detailed_sample_count*100:.3f}%），已从对应区间分布过滤，不影响其他阶段。</p>
+<div class="verdict high"><strong>确认结果：</strong>1536 点不开 trace 写盘时，3 个服务端 I/O 线程合计使用 {io_1536['average_cpu_cores']:.2f} 核，最忙线程 {io_1536['max_thread_cpu_pct']:.1f}%；3 个 Worker 合计 {worker_1536['average_cpu_cores']:.2f} 核，最忙 {worker_1536['max_thread_cpu_pct']:.1f}%；客户端 I/O 合计 {client_1536['average_cpu_cores']:.2f} 核，最忙 {client_1536['max_thread_cpu_pct']:.1f}%。服务端 I/O 是最忙的局部资源，但没有单核 100%，整机也未打满。</div>
+<div class="verdict low"><strong>排除“主要是 OS 调度饿死”：</strong>1536 点服务端 I/O 的 runqueue wait/runtime 仅 {io_1536['wait_to_runtime_pct']:.1f}%，Worker 为 {worker_1536['wait_to_runtime_pct']:.1f}%。说明线程一旦 runnable，通常能及时拿到 CPU；毫秒延迟主要不是在操作系统 runqueue 中等待。</div>
+<div class="verdict medium"><strong>定位 mailbox：</strong>1536 点 mailbox 总回投中的 mutex wait 只有 {duration(detailed_1536['detailed_stages']['mailbox_mutex_wait']['mean_us'])}，真正的大头是 completion 入队后等待 I/O callback，约 {duration(detailed_1536['detailed_stages']['mailbox_callback_wait']['mean_us'])}。所以不是 mailbox 锁竞争，而是 callback 要与 recv/send CQE 一起等待同一个 I/O 事件循环处理。</div>
+<h3>细分等待随负载变化</h3>
+{detailed_timing_table}
+<p>最关键的形状是：384→1536→6144 时，send 返回→server recv 从约 0.68→1.62→4.66 ms，send submit→client epoll 从约 0.59→1.26→3.38 ms，mailbox callback wait 从约 126→240→451 μs。与之相对，客户端 send syscall 只有约 16→23→27 μs，epoll ready→recv 只有约 17→35→68 μs。等待发生在事件被流水线消费之前，而不是客户端拿到事件之后。</p>
+<h3>每线程 CPU 与 runnable 等待（不开 trace 写盘）</h3>
+{thread_table}
+<p>服务端 I/O 线程是最接近容量上限的一组，但其 CPU 从 384 到 6144 只小幅变化，等待时间却成倍增长；这是典型的局部服务队列接近容量、突发 batch 加深排队，而不是整个进程算力耗尽。Worker pending 均值随负载约 62→200→645，Worker CPU 仍明显低于 I/O 线程，因此 Worker/batch 排队是次级连锁拥堵。</p>
 
 <h2 id="toc">目录</h2><ol class="toc">
-<li><a href="#model">为什么 128B 仍有毫秒延迟</a></li><li><a href="#method">方法与时间戳</a></li>
+<li><a href="#confirmation">二次瓶颈确认</a></li><li><a href="#model">为什么 128B 仍有毫秒延迟</a></li><li><a href="#method">方法与时间戳</a></li>
 <li><a href="#load">负载曲线与 Little’s Law</a></li><li><a href="#stages">阶段归因</a></li>
 <li><a href="#batch">batch / HOL / 队列</a></li><li><a href="#controls">对照实验</a></li>
 <li><a href="#cpu">CPU 与调度证据</a></li><li><a href="#protobuf">为何不能归因于 Protobuf</a></li>
@@ -595,7 +804,7 @@ def build_report(repo_root, raw_dir, output_path, trace_analysis, env):
 <li><strong>运行波动：</strong>若三次范围很宽，报告只给趋势性结论，不把某次最好值当因果证据。</li>
 <li><strong>不做优化：</strong>本轮没有更改 batching、线程模型、write 策略或 protobuf 实现；诊断代码仅在显式编译选项开启时生效。</li>
 </ul>
-<p>如果将来只想继续“观测而不优化”，最有价值的下一步是裸机或隔离物理核复测，并用 eBPF/perf sched（需要合适权限）把两个 transport/wakeup 大桶进一步拆成 runqueue delay、TCP/softirq、io_uring CQE 到用户回调、epoll ready 到连接处理。应先拆大桶，再讨论代码优化。</p>
+<p>本轮已经用 schedstat 排除了 runqueue delay 是主体。若继续只做观测，剩余最高价值是用 eBPF/内核 tracepoint（需要合适权限）拆分 TCP loopback、socket queue、io_uring recv/send 提交到 CQE 的时间，并用固定 offered-rate 而非纯固定 inflight 复测容量拐点。当前权限不足以把内核大桶安全拆到 syscall/softirq 级别，因此报告停在可由现有证据支持的 I/O 流水线层级。</p>
 
 <h2 id="reproduce">本地复现与文件清单</h2>
 <p>诊断代码位于本地分支；报告和所有运行产物位于 Git 本地 exclude 目录。核心复现命令：</p>
@@ -605,6 +814,8 @@ cmake --build build-release --parallel
 cmake --build build-latency --parallel
 ./tools/benchmark/runner/run_suite.py --config .local-perf/configs/formal-load-curve.json --build-dir build-release
 ./tools/benchmark/runner/run_suite.py --config .local-perf/configs/formal-trace-keypoints.json --build-dir build-latency --trace-dir .local-perf/raw/formal-trace-keypoints --trace-sample-shift 9
+./tools/benchmark/runner/run_suite.py --config .local-perf/configs/detailed-bottleneck.json --build-dir build-latency --trace-dir .local-perf/raw/detailed-bottleneck --trace-sample-shift 9 --schedstat-dir .local-perf/schedstat/detailed-bottleneck
+./tools/benchmark/runner/run_suite.py --config .local-perf/configs/schedstat-only-bottleneck.json --build-dir build-latency --schedstat-dir .local-perf/schedstat/schedstat-only-bottleneck
 ./tools/benchmark/runner/generate_latency_report.py</pre>
 <h3>环境</h3>
 {rows_table(['字段','值'], [[key, '<pre>'+html.escape(value)+'</pre>' if key=='cpu' else html.escape(value)] for key,value in env.items()])}
@@ -623,6 +834,16 @@ def parse_args():
     parser.add_argument(
         "--trace-analysis-output", type=Path, default=Path(".local-perf/raw/formal-trace-analysis.json")
     )
+    parser.add_argument(
+        "--bottleneck-analysis-output",
+        type=Path,
+        default=Path(".local-perf/raw/detailed-bottleneck-analysis.json"),
+    )
+    parser.add_argument(
+        "--schedstat-analysis-output",
+        type=Path,
+        default=Path(".local-perf/raw/schedstat-only-bottleneck-analysis.json"),
+    )
     return parser.parse_args()
 
 
@@ -636,15 +857,33 @@ def main():
         if args.trace_analysis_output.is_absolute()
         else repo_root / args.trace_analysis_output
     )
+    bottleneck_output = (
+        args.bottleneck_analysis_output
+        if args.bottleneck_analysis_output.is_absolute()
+        else repo_root / args.bottleneck_analysis_output
+    )
+    schedstat_output = (
+        args.schedstat_analysis_output
+        if args.schedstat_analysis_output.is_absolute()
+        else repo_root / args.schedstat_analysis_output
+    )
     trace_suite = load_json(raw_dir / "formal-trace-keypoints.json")
     trace_analysis = analyze_trace_suite(trace_suite)
     trace_output.parent.mkdir(parents=True, exist_ok=True)
     trace_output.write_text(json.dumps(trace_analysis, indent=2) + "\n", encoding="utf-8")
+    bottleneck_analysis = analyze_bottleneck_suite(load_json(raw_dir / "detailed-bottleneck-results.json"))
+    bottleneck_output.write_text(json.dumps(bottleneck_analysis, indent=2) + "\n", encoding="utf-8")
+    schedstat_analysis = analyze_schedstat_suite(
+        load_json(raw_dir / "schedstat-only-bottleneck-results.json")
+    )
+    schedstat_output.write_text(json.dumps(schedstat_analysis, indent=2) + "\n", encoding="utf-8")
     env = environment_info(repo_root)
     (raw_dir / "environment.json").write_text(json.dumps(env, indent=2) + "\n", encoding="utf-8")
-    build_report(repo_root, raw_dir, output, trace_analysis, env)
+    build_report(repo_root, raw_dir, output, trace_analysis, bottleneck_analysis, schedstat_analysis, env)
     print(f"report={output}")
     print(f"trace_analysis={trace_output}")
+    print(f"bottleneck_analysis={bottleneck_output}")
+    print(f"schedstat_analysis={schedstat_output}")
 
 
 if __name__ == "__main__":

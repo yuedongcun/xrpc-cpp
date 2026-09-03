@@ -16,6 +16,8 @@ STAGES = {
     2: "client_sent",
     3: "client_recv",
     4: "client_complete",
+    5: "client_send_complete",
+    6: "client_epoll_ready",
     10: "server_recv",
     11: "server_decoded",
     12: "worker_enqueue",
@@ -27,6 +29,10 @@ STAGES = {
     18: "mailbox_drain",
     19: "write_enqueue",
     20: "server_send",
+    21: "server_send_complete",
+    22: "mailbox_lock_acquired",
+    23: "mailbox_queued",
+    24: "mailbox_callback_begin",
 }
 
 INTERVALS = [
@@ -47,6 +53,20 @@ INTERVALS = [
 ]
 
 REQUIRED_STAGES = {1, 2, 3, 4, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
+
+DETAILED_REQUIRED_STAGES = REQUIRED_STAGES | {5, 6, 21, 22, 23, 24}
+
+DETAILED_INTERVALS = [
+    ("client_send_syscall", 2, 5),
+    ("request_after_send_return", 5, 10),
+    ("mailbox_mutex_wait", 17, 22),
+    ("mailbox_enqueue", 22, 23),
+    ("mailbox_callback_wait", 23, 24),
+    ("mailbox_drain_hol", 24, 18),
+    ("server_send_completion", 20, 21),
+    ("response_to_client_epoll", 20, 6),
+    ("client_epoll_to_recv", 6, 3),
+]
 
 
 def percentile(values, fraction):
@@ -178,6 +198,49 @@ def analyze(prefix):
         worker_depths.append(values[request_id][12])
         mailbox_drain_sizes.append(values[request_id][18])
 
+    detailed_ids = [request_id for request_id in ordered_ids if DETAILED_REQUIRED_STAGES <= set(traces[request_id])]
+    detailed_durations = {}
+    detailed_invalid_ids = set()
+    detailed_negative_counts = Counter()
+    for request_id in detailed_ids:
+        request_durations = {}
+        for name, begin, end in DETAILED_INTERVALS:
+            elapsed = traces[request_id][end] - traces[request_id][begin]
+            if elapsed < 0:
+                detailed_invalid_ids.add(request_id)
+                detailed_negative_counts[name] += 1
+                continue
+            request_durations[name] = elapsed
+        detailed_durations[request_id] = request_durations
+
+    detailed_valid_ids = [request_id for request_id in ordered_ids if request_id in detailed_durations]
+    detailed_slow_count = max(1, math.ceil(len(detailed_valid_ids) * 0.01)) if detailed_valid_ids else 0
+    detailed_slow_ids = detailed_valid_ids[-detailed_slow_count:] if detailed_slow_count else []
+    detailed_all = {}
+    detailed_slow = {}
+    detailed_slow_e2e = (
+        statistics.fmean(e2e_ns[request_id] for request_id in detailed_slow_ids) if detailed_slow_ids else 0.0
+    )
+    for name, _, _ in DETAILED_INTERVALS:
+        all_values = [
+            detailed_durations[request_id][name]
+            for request_id in detailed_valid_ids
+            if name in detailed_durations[request_id]
+        ]
+        slow_values = [
+            detailed_durations[request_id][name]
+            for request_id in detailed_slow_ids
+            if name in detailed_durations[request_id]
+        ]
+        detailed_all[name] = distribution(all_values)
+        slow_distribution = distribution(slow_values)
+        slow_distribution["share_of_slow_e2e_pct"] = (
+            statistics.fmean(slow_values) / detailed_slow_e2e * 100.0
+            if slow_values and detailed_slow_e2e
+            else 0.0
+        )
+        detailed_slow[name] = slow_distribution
+
     return {
         "trace_prefix": str(prefix),
         "trace_files": [str(path) for path in paths],
@@ -204,6 +267,17 @@ def analyze(prefix):
         "queues": {
             "worker_pending_jobs": value_distribution(worker_depths),
             "mailbox_drain_completions": value_distribution(mailbox_drain_sizes),
+        },
+        "detailed": {
+            "available": bool(detailed_valid_ids),
+            "complete_request_count": len(detailed_valid_ids),
+            "invalid_timeline_count": len(detailed_invalid_ids),
+            "negative_interval_counts": dict(detailed_negative_counts),
+            "all_requests": detailed_all,
+            "slowest_1pct": {
+                "request_count": len(detailed_slow_ids),
+                "stages": detailed_slow,
+            },
         },
     }
 

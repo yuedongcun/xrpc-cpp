@@ -17,17 +17,28 @@ DispatchMailbox::DispatchMailbox(io::UringContext &context) : context_(&context)
 
 void DispatchMailbox::Submit(DispatchCompletion completion) {
 #ifdef XRPC_ENABLE_LATENCY_TRACE
+  const std::vector<std::uint64_t> trace_request_ids = completion.trace_request_ids_;
   for (const std::uint64_t request_id : completion.trace_request_ids_) {
     diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::MailboxSubmit, request_id,
                                     static_cast<std::uint32_t>(completion.completed_jobs_));
   }
 #endif
   std::lock_guard<std::mutex> lock(mutex_);
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+  for (const std::uint64_t request_id : trace_request_ids) {
+    diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::MailboxLockAcquired, request_id);
+  }
+#endif
   if (context_ == nullptr) {
     return;
   }
 
   pending_completions_.push_back(std::move(completion));
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+  for (const std::uint64_t request_id : trace_request_ids) {
+    diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::MailboxQueued, request_id);
+  }
+#endif
   // One outstanding processing callback owns responsibility for both the
   // current batch and completions that arrive before it finishes.
   if (completion_processing_pending_) {
@@ -78,6 +89,15 @@ void DispatchMailbox::ProcessCompletionsOnContext() {
       drain_completions_.swap(pending_completions_);
     }
 
+#ifdef XRPC_ENABLE_LATENCY_TRACE
+    const std::uint64_t callback_begin_at_ns = diagnostics::LatencyTraceEnabled() ? diagnostics::LatencyNowNs() : 0;
+    for (const DispatchCompletion &completion : drain_completions_) {
+      for (const std::uint64_t request_id : completion.trace_request_ids_) {
+        diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::MailboxCallbackBegin, request_id, 0,
+                                        callback_begin_at_ns);
+      }
+    }
+#endif
     for (DispatchCompletion &completion : drain_completions_) {
 #ifdef XRPC_ENABLE_LATENCY_TRACE
       const std::uint32_t drain_size =
