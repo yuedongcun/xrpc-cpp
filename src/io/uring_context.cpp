@@ -35,6 +35,7 @@
 #include "io/uring_context.h"
 
 #include <sys/eventfd.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -85,30 +86,27 @@ UringContext::Runtime::~Runtime() {
   io_uring_queue_exit(&ring_);
 }
 
+auto UringContext::Runtime::CurrentThreadId() -> pid_t {
+  static thread_local const pid_t thread_id = static_cast<pid_t>(::syscall(SYS_gettid));
+  return thread_id;
+}
+
 void UringContext::Runtime::BeginRun() {
-  std::lock_guard<std::mutex> lock(run_mutex_);
-  if (run_thread_id_ != std::thread::id{}) {
+  pid_t expected = 0;
+  if (!run_thread_id_.compare_exchange_strong(expected, CurrentThreadId())) {
     throw LifecycleException("UringContext::Run is not reentrant");
   }
-  run_thread_id_ = std::this_thread::get_id();
 }
 
-void UringContext::Runtime::EndRun() {
-  std::lock_guard<std::mutex> lock(run_mutex_);
-  run_thread_id_ = std::thread::id{};
-}
+void UringContext::Runtime::EndRun() { run_thread_id_.store(0); }
 
 void UringContext::Runtime::AssertRunThread(std::string_view action) const {
-  std::lock_guard<std::mutex> lock(run_mutex_);
-  if (run_thread_id_ != std::this_thread::get_id()) {
+  if (run_thread_id_.load() != CurrentThreadId()) {
     throw LifecycleException(std::string(action) + " must run on the UringContext thread");
   }
 }
 
-auto UringContext::Runtime::IsRunning() const -> bool {
-  std::lock_guard<std::mutex> lock(run_mutex_);
-  return run_thread_id_ != std::thread::id{};
-}
+auto UringContext::Runtime::IsRunning() const -> bool { return run_thread_id_.load() != 0; }
 
 UringContext::UringContext(std::uint32_t entries) : runtime_(std::make_unique<Runtime>(entries)) {}
 
