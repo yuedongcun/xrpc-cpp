@@ -675,6 +675,36 @@ def build_report(repo_root, raw_dir, output_path, trace_analysis, bottleneck_ana
     )
     negative_count = sum(sum(point["negative_intervals"].values()) for point in detailed.values())
     detailed_sample_count = sum(point["samples"] for point in detailed.values())
+    revision_table = rows_table(
+        ["第一轮待确认项", "第二轮直接证据", "现在的判断"],
+        [
+            [
+                "可能是整机 CPU 饱和",
+                f"1536 点 server I/O {io_1536['average_cpu_cores']:.2f} 核、Worker {worker_1536['average_cpu_cores']:.2f} 核；最忙线程 {io_1536['max_thread_cpu_pct']:.1f}%",
+                "排除全局 CPU 饱和；I/O 是最忙的局部资源",
+            ],
+            [
+                "可能是 OS 调度/唤醒抖动",
+                f"server I/O runqueue wait/runtime={io_1536['wait_to_runtime_pct']:.1f}%",
+                "排除 runqueue 饿死为主体",
+            ],
+            [
+                "mailbox 回投慢，但原因未知",
+                f"mutex={duration(detailed_1536['detailed_stages']['mailbox_mutex_wait']['mean_us'])}；callback wait={duration(detailed_1536['detailed_stages']['mailbox_callback_wait']['mean_us'])}",
+                "确认不是锁；是 callback 等 I/O 事件循环",
+            ],
+            [
+                "响应大桶可能在客户端",
+                f"client epoll-ready→recv={duration(detailed_1536['detailed_stages']['client_epoll_to_recv']['mean_us'])}；最忙 client I/O={client_1536['max_thread_cpu_pct']:.1f}%",
+                "排除客户端 epoll 后处理为主因",
+            ],
+            [
+                "Worker queue 可能是主瓶颈",
+                f"最忙 Worker={worker_1536['max_thread_cpu_pct']:.1f}%，低于 I/O；增加 Worker 无单调收益",
+                "降为次级批次/突发排队",
+            ],
+        ],
+    )
 
     css = """
     :root{--ink:#14213d;--muted:#64748b;--line:#dbe4ee;--panel:#f8fafc;--accent:#2563eb;--good:#15803d;--warn:#b45309;--bad:#b91c1c}
@@ -698,23 +728,27 @@ def build_report(repo_root, raw_dir, output_path, trace_analysis, bottleneck_ana
 
     report = f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>xRPC 128B 端到端延迟瓶颈诊断报告</title><style>{css}</style></head><body><main>
-<h1>xRPC 128B 端到端延迟瓶颈诊断</h1>
-<p class="subtitle">诊断范围：本机 loopback Firehose，12 连接，128B payload；结论面向“延迟在哪里”，不包含优化实施。</p>
+<title>xRPC 单实例 I/O 排队瓶颈确认报告（第二版）</title><style>{css}</style></head><body><main>
+<h1>xRPC 单实例 I/O 排队瓶颈确认报告</h1>
+<p class="subtitle"><strong>第二版 · 结论替代第一轮泛化判断</strong>｜本机 loopback Firehose，12 连接，128B payload；只定位单实例瓶颈，不讨论扩容或实施优化。</p>
 <div class="banner"><strong>本地隔离状态：</strong>报告、原始 trace 与 perf 数据均位于 <code>.local-perf/</code>，由 <code>.git/info/exclude</code> 排除；当前分支 <code>{html.escape(env['git_branch'])}</code>，origin push URL 为 <code>{html.escape(env['push_url'])}</code>，<code>push.default={html.escape(env['push_default'])}</code>。本报告没有执行任何 push。</div>
 
 <div class="cards">
-  <div class="card"><strong>{fnum(release_1536['qps'],0)} QPS</strong><span>1536 在途，Release 三次中位</span></div>
-  <div class="card"><strong>{duration(release_1536['avg_us'])}</strong><span>平均端到端延迟</span></div>
-  <div class="card"><strong>{duration(release_1536['p99_us'])}</strong><span>p99 端到端延迟</span></div>
-  <div class="card"><strong>{duration(codec_upper_mean)}</strong><span>所有可能含编解码的桶 + handler 保守上界</span></div>
+  <div class="card"><strong>{io_1536['max_thread_cpu_pct']:.1f}%</strong><span>1536 点最忙服务端 I/O 线程</span></div>
+  <div class="card"><strong>{io_1536['wait_to_runtime_pct']:.1f}%</strong><span>服务端 I/O runqueue wait/runtime</span></div>
+  <div class="card"><strong>{duration(detailed_1536['detailed_stages']['mailbox_callback_wait']['mean_us'])}</strong><span>mailbox 入队后等待 I/O callback</span></div>
+  <div class="card"><strong>{duration(detailed_1536['detailed_stages']['request_after_send_return']['mean_us'] + detailed_1536['detailed_stages']['response_to_client_epoll']['mean_us'])}</strong><span>双向事件被消费前的主要等待</span></div>
 </div>
 
-<h2 id="summary">结论摘要</h2>
+<h2 id="summary">第二轮最终结论</h2>
 <div class="verdict high"><span class="rank">1</span><strong>主瓶颈：服务端 I/O 事件循环的服务节奏，以及它共享的 recv/send/callback 等待队列。</strong>1536 在途时，请求侧阶段均值 {duration(stages_1536['request_transport_server_wakeup']['mean_us'])}，响应侧 {duration(stages_1536['response_transport_client_wakeup']['mean_us'])}，合计 {duration(transport_mean)}；在最慢 1% 请求中两者占 {request_share + response_share:.1f}%（{request_share:.1f}% + {response_share:.1f}%）。二次拆分显示 client send syscall 和 epoll-ready→recv 都很短，而等待随并发在 send 返回→server recv、server send completion、mailbox callback 和 send→client epoll 区间同步放大。</div>
 <div class="verdict medium"><span class="rank">2</span><strong>次瓶颈：Worker 排队与 completion 回投。</strong>Worker queue 均值 {duration(stages_1536['worker_queue']['mean_us'])}，mailbox return 均值 {duration(stages_1536['mailbox_return']['mean_us'])}；最慢 1% 中分别占 {worker_share:.1f}% 和 {mailbox_share:.1f}%。batch 内前序 HOL 和 batch 完成等待也真实存在，但量级更小。</div>
 <div class="verdict low"><span class="rank">3</span><strong>Protobuf 不是当前 128B 场景的主要解释。</strong>本次没有把 Protobuf 单独打点；采用更保守的上界：将所有可能包含协议编解码的客户端组帧、服务端整批解帧、响应编码、客户端解帧，再加 handler dispatch 全部相加，均值也只有 {duration(codec_upper_mean)}，约占阶段均值总和 {codec_upper_share:.1f}%。这还是“整桶归给 Protobuf”的高估，而不是 Protobuf 的纯成本。</div>
 <p>因此，更准确的表述是：<strong>128B 只说明单次业务计算和字节搬运的“有效工作量”较小，不代表闭环并发系统没有排队与唤醒。</strong>在 1536 个持续在途请求下，Little’s Law 给出的平均停留时间为 <code>L/λ ≈ 1536 / {fnum(release_1536['qps'],0)} = {duration(1536/release_1536['qps']*1_000_000)}</code>，与实测 {duration(release_1536['avg_us'])} 一致。</p>
+
+<h2 id="revision">第一轮判断经过二次实验后发生了什么变化</h2>
+<p>第一轮只能看到“send 到 peer recv”的大桶，因此把内核传输、唤醒、调度和事件循环放在一起。第二轮增加 per-thread schedstat 和细分时间戳后，以下结论不再保持模糊：</p>
+{revision_table}
 
 <h3>证据强度</h3>
 <p><strong>高置信：</strong>主耗时位于服务端 I/O/内核收发流水线；mailbox callback 与 socket 事件共享 I/O 线程造成局部排队；Protobuf、客户端 epoll 后处理和全局 CPU 饱和都不是主因。<strong>中置信：</strong>大桶内部 TCP loopback、io_uring recv/send completion 与 I/O 线程事件公平性各自的精确比例。<strong>低置信/未证明：</strong>某一个内核锁或单一 syscall 是唯一根因。</p>
@@ -732,7 +766,7 @@ def build_report(repo_root, raw_dir, output_path, trace_analysis, bottleneck_ana
 <p>服务端 I/O 线程是最接近容量上限的一组，但其 CPU 从 384 到 6144 只小幅变化，等待时间却成倍增长；这是典型的局部服务队列接近容量、突发 batch 加深排队，而不是整个进程算力耗尽。Worker pending 均值随负载约 62→200→645，Worker CPU 仍明显低于 I/O 线程，因此 Worker/batch 排队是次级连锁拥堵。</p>
 
 <h2 id="toc">目录</h2><ol class="toc">
-<li><a href="#confirmation">二次瓶颈确认</a></li><li><a href="#model">为什么 128B 仍有毫秒延迟</a></li><li><a href="#method">方法与时间戳</a></li>
+<li><a href="#summary">第二轮最终结论</a></li><li><a href="#revision">第一轮到第二轮的变化</a></li><li><a href="#confirmation">二次瓶颈确认</a></li><li><a href="#model">为什么 128B 仍有毫秒延迟</a></li><li><a href="#method">方法与时间戳</a></li>
 <li><a href="#load">负载曲线与 Little’s Law</a></li><li><a href="#stages">阶段归因</a></li>
 <li><a href="#batch">batch / HOL / 队列</a></li><li><a href="#controls">对照实验</a></li>
 <li><a href="#cpu">CPU 与调度证据</a></li><li><a href="#protobuf">为何不能归因于 Protobuf</a></li>
@@ -740,7 +774,7 @@ def build_report(repo_root, raw_dir, output_path, trace_analysis, bottleneck_ana
 
 <h2 id="model">为什么 128B 仍有毫秒延迟</h2>
 <p>一次 RPC 的端到端时间不是 payload 长度除以内存带宽。它是多个“服务时间 + 等待时间”的串联：客户端组批并获得可写机会、内核 TCP loopback、服务端 io_uring 完成与事件循环调度、Worker 入队、batch 内串行、completion 跨线程回投、服务端写队列、客户端 epoll 唤醒和解析完成。payload 很小，只能压低其中少数服务时间；当闭环维持固定在途量时，其余等待仍然存在。</p>
-<div class="flow"><div>客户端组帧<br><b>send</b></div><div class="arrow">→</div><div class="hot">TCP / 调度<br><b>服务端 I/O 唤醒</b></div><div class="arrow">→</div><div class="warm">Worker queue<br><b>batch 串行</b></div><div class="arrow">→</div><div>dispatch<br><b>约 2 μs</b></div><div class="arrow">→</div><div class="warm">mailbox / 写队列<br><b>回 I/O 线程</b></div><div class="arrow">→</div><div class="hot">TCP / 调度<br><b>客户端 epoll 唤醒</b></div></div>
+<div class="flow"><div>客户端组帧<br><b>send syscall 很短</b></div><div class="arrow">→</div><div class="hot">socket / recv<br><b>等待服务端 I/O 消费</b></div><div class="arrow">→</div><div class="warm">Worker queue<br><b>batch 串行（次级）</b></div><div class="arrow">→</div><div>dispatch<br><b>约 2 μs</b></div><div class="arrow">→</div><div class="hot">mailbox callback<br><b>等同一 I/O 循环</b></div><div class="arrow">→</div><div class="hot">send completion<br><b>等待客户端 epoll ready</b></div></div>
 
 <h2 id="method">方法与时间戳</h2>
 <p>基准使用 Release 构建测负载曲线；另用编译期 <code>XRPC_ENABLE_LATENCY_TRACE=ON</code> 的 Release 构建，在请求 ID 上做确定性 1/512 采样。每线程写固定 24 字节二进制记录并批量刷盘，避免全局 trace 锁。正式 trace 覆盖在途 48、384、1536、6144，各 3 次、每次 10 秒。</p>
@@ -767,11 +801,11 @@ def build_report(repo_root, raw_dir, output_path, trace_analysis, bottleneck_ana
 <h2 id="controls">对照实验</h2>
 <p>除连接数扫描外，下列实验均固定 12 连接、1536 在途、128B，并各跑 3 次；payload 扫描只改变 payload。由于 WSL2 同机压测存在明显时间漂移，判断依据是趋势是否单调、差异是否超过三次范围，而不是挑选最好的一次。</p>
 <h3>Worker 线程数</h3>{control_table(worker, 'Worker')}
-<p>1 → 3 → 6 没有稳定单调的 QPS 或 p99 改善，故不能把“Worker 数量不足”列为首要容量瓶颈。Worker queue 本身仍是次级尾延迟来源；这两句话并不矛盾：队列等待可来自整机调度、批次到达突发和跨线程回投节奏，而不一定能靠增加 Worker 消除。</p>
+<p>1 → 3 → 6 没有稳定单调的 QPS 或 p99 改善，故不能把“Worker 数量不足”列为首要容量瓶颈。结合第二轮 Worker 最忙线程仅约 49.5%，Worker queue 更符合批次到达突发和流水线上游/下游节奏造成的次级排队，而不是 Worker 算力耗尽。</p>
 <h3>服务端 I/O 线程数</h3>{control_table(server_io, '服务端 I/O')}
-<p>单 I/O 线程降低吞吐但 p99 较平滑；从 3 增到 6 没有稳定收益，反而扩大波动。它支持“事件循环与调度参与瓶颈”，但不支持简单的“线程越多越快”。</p>
+<p>单 I/O 线程降低吞吐但 p99 较平滑；从 3 增到 6 没有稳定收益，反而扩大波动。第二轮确认的是既有 I/O 循环上的 recv/send/callback 服务队列，而不是“线程数量越少”；增加线程还会改变连接分片、batch 和跨线程竞争，因此不能作为单变量修复。</p>
 <h3>客户端 I/O 线程数</h3>{control_table(client_io, '客户端 I/O')}
-<p>3 线程附近表现最好，但 6/12 没有继续改善；客户端 epoll 大桶不能简单解释为客户端线程数量不足，更可能是 loopback 事件到达、每线程连接/批次处理和与服务端争抢 CPU 的组合。</p>
+<p>3 线程附近表现最好，但 6/12 没有继续改善。第二轮测得客户端 epoll ready→recv 仅约 35 μs、最忙线程约 40.6%，因此已排除“客户端拿到 epoll 事件后处理不及时”是 1536 点的主体。</p>
 <h3>固定 1536 在途，改变连接数</h3>{control_connections_table}
 <p>连接数效果非单调，12 连接在本轮最好，48 连接出现明显退化。连接数同时改变每连接 inflight、收发 batch、epoll 就绪集合和服务端连接分片，因此它是调度形态变量，而不是纯粹“并行度旋钮”。</p>
 <h3>payload 大小</h3>{control_table(payloads, 'payload')}
@@ -781,10 +815,10 @@ def build_report(repo_root, raw_dir, output_path, trace_analysis, bottleneck_ana
 <p>将服务端固定在 CPU 0–5、客户端固定在 6–11 后，QPS/p99 未相对邻近的 unpinned 实验形成稳健改善。由于 i7-9750H 的逻辑 CPU 是超线程兄弟，编号区间并不等价于物理核隔离；本结果只能说明这一简单 pinning 方案没有解决抖动，不能证明调度无关。</p>
 
 <h2 id="cpu">CPU 与调度证据</h2>
-<p>单次无 trace、1536 在途 perf stat：QPS {fnum(perf_run['qps'],0)}，avg {duration(perf_run['avg_us'])}，p99 {duration(perf_run['p99_us'])}。计数器如下；task-clock 与逻辑 CPU 利用来自 perf 的实际进程墙钟，不用固定 10 秒反推。</p>
+<p>第一轮单次无 trace、1536 在途 perf stat：QPS {fnum(perf_run['qps'],0)}，avg {duration(perf_run['avg_us'])}，p99 {duration(perf_run['p99_us'])}。它用于补充 IPC/cache 画像；线程级 CPU 与调度结论以本报告前面的三次 schedstat 对照为准。</p>
 {perf_table}
 <p>服务端 IPC {server_instructions/server_cycles:.2f}，客户端 IPC {client_instructions/client_cycles:.2f}。这表明执行的是大量协议、事件循环、队列和内核边界工作，而不是 128B handler 独占 CPU。cache miss/ref 只作为本机画像，不据此做单一根因归因。</p>
-<div class="note warning"><strong>调度计数器限制：</strong>本机 <code>perf_event_paranoid={html.escape(env['perf_event_paranoid'])}</code>，perf 自动将事件标记为 user-only；因此 context-switches 和 cpu-migrations 输出为 0，属于不可观测，不代表真的没有切换/迁核。本报告没有修改 sysctl，也没有用这些 0 支撑结论。</div>
+<div class="note warning"><strong>为什么第二轮改用 schedstat：</strong>本机 <code>perf_event_paranoid={html.escape(env['perf_event_paranoid'])}</code>，perf 的 context-switches/cpu-migrations 被限制为 user-only 而输出 0，不能解释调度。第二轮直接读取每线程内核 schedstat 累计量，得到 runtime 与 runqueue wait 的真实增量，因此可以排除 runqueue 饿死是主体。</div>
 
 <h2 id="protobuf">为什么不能简单归因于 Protobuf</h2>
 <ol>
@@ -794,7 +828,7 @@ def build_report(repo_root, raw_dir, output_path, trace_analysis, bottleneck_ana
 <li><strong>保守反事实上界：</strong>把上述所有混合桶连同 handler 全部假设成可消除的“协议/业务成本”，均值总计 {duration(codec_upper_mean)}，占阶段和 {codec_upper_share:.1f}%；在同一最慢 1% cohort 中占比总计 {codec_upper_slow_share:.1f}%。实际 Protobuf 纯成本只会更小。</li>
 <li><strong>payload 对照不构成单独归因：</strong>payload 扫描只能说明“字节相关路径”重要，范围包括 frame encode/decode、字符串增长与复制、socket/TCP、cache 与内存访问；不能将全部差异归给 Protobuf。</li>
 </ol>
-<p>因此建议在对外解释时使用：<q>128B 证明业务计算轻，不证明端到端等待轻。固定 1536 在途时，Little’s Law 要求平均停留约数毫秒；分阶段采样显示主要时间在双向 I/O 唤醒/调度，其次是 Worker queue 和 completion 回投。即使把所有可能含协议编解码的混合桶连同 handler 全算进去，保守上界也只占均值约 {codec_upper_share:.1f}%，不能解释主体延迟。</q></p>
+<p>因此建议在对外解释时使用：<q>128B 证明业务计算轻，不证明端到端等待轻。固定 1536 在途时，Little’s Law 要求平均停留约数毫秒；二次分段确认主要时间在服务端 I/O/内核收发流水线消费 recv、send 和 mailbox callback 之前。OS runqueue、客户端 epoll 后处理和 Worker 计算不是主体；协议编解码连同 handler 的保守上界也只占均值约 {codec_upper_share:.1f}%。</q></p>
 
 <h2 id="limits">限制与下一步观测</h2>
 <ul>
@@ -832,6 +866,11 @@ def parse_args():
     parser.add_argument("--raw-dir", type=Path, default=Path(".local-perf/raw"))
     parser.add_argument("--output", type=Path, default=Path(".local-perf/report/xrpc-latency-report.html"))
     parser.add_argument(
+        "--confirmation-output",
+        type=Path,
+        default=Path(".local-perf/report/xrpc-single-instance-bottleneck-v2.html"),
+    )
+    parser.add_argument(
         "--trace-analysis-output", type=Path, default=Path(".local-perf/raw/formal-trace-analysis.json")
     )
     parser.add_argument(
@@ -852,6 +891,9 @@ def main():
     repo_root = Path(__file__).resolve().parents[3]
     raw_dir = args.raw_dir if args.raw_dir.is_absolute() else repo_root / args.raw_dir
     output = args.output if args.output.is_absolute() else repo_root / args.output
+    confirmation_output = (
+        args.confirmation_output if args.confirmation_output.is_absolute() else repo_root / args.confirmation_output
+    )
     trace_output = (
         args.trace_analysis_output
         if args.trace_analysis_output.is_absolute()
@@ -880,7 +922,10 @@ def main():
     env = environment_info(repo_root)
     (raw_dir / "environment.json").write_text(json.dumps(env, indent=2) + "\n", encoding="utf-8")
     build_report(repo_root, raw_dir, output, trace_analysis, bottleneck_analysis, schedstat_analysis, env)
+    confirmation_output.parent.mkdir(parents=True, exist_ok=True)
+    confirmation_output.write_text(output.read_text(encoding="utf-8"), encoding="utf-8")
     print(f"report={output}")
+    print(f"confirmation_report={confirmation_output}")
     print(f"trace_analysis={trace_output}")
     print(f"bottleneck_analysis={bottleneck_output}")
     print(f"schedstat_analysis={schedstat_output}")
