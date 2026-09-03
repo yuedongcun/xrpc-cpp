@@ -62,11 +62,6 @@ auto UringContext::Runtime::MakeErrorMessage(std::string_view action, int error_
   return message;
 }
 
-auto UringContext::Runtime::CurrentThreadToken() -> const void * {
-  static thread_local const char token = 0;
-  return &token;
-}
-
 UringContext::Runtime::Runtime(std::uint32_t entries) {
   staged_operations_.reserve(entries);
 
@@ -91,21 +86,29 @@ UringContext::Runtime::~Runtime() {
 }
 
 void UringContext::Runtime::BeginRun() {
-  const void *expected = nullptr;
-  if (!run_thread_token_.compare_exchange_strong(expected, CurrentThreadToken())) {
+  std::lock_guard<std::mutex> lock(run_mutex_);
+  if (run_thread_id_ != std::thread::id{}) {
     throw LifecycleException("UringContext::Run is not reentrant");
   }
+  run_thread_id_ = std::this_thread::get_id();
 }
 
-void UringContext::Runtime::EndRun() { run_thread_token_.store(nullptr); }
+void UringContext::Runtime::EndRun() {
+  std::lock_guard<std::mutex> lock(run_mutex_);
+  run_thread_id_ = std::thread::id{};
+}
 
 void UringContext::Runtime::AssertRunThread(std::string_view action) const {
-  if (run_thread_token_.load() != CurrentThreadToken()) {
+  std::lock_guard<std::mutex> lock(run_mutex_);
+  if (run_thread_id_ != std::this_thread::get_id()) {
     throw LifecycleException(std::string(action) + " must run on the UringContext thread");
   }
 }
 
-auto UringContext::Runtime::IsRunning() const -> bool { return run_thread_token_.load() != nullptr; }
+auto UringContext::Runtime::IsRunning() const -> bool {
+  std::lock_guard<std::mutex> lock(run_mutex_);
+  return run_thread_id_ != std::thread::id{};
+}
 
 UringContext::UringContext(std::uint32_t entries) : runtime_(std::make_unique<Runtime>(entries)) {}
 

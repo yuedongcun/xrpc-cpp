@@ -18,6 +18,7 @@
 #include <queue>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <liburing.h>
@@ -95,13 +96,14 @@ struct UringContext::Runtime final {
 
   [[nodiscard]] static auto MakeErrorMessage(std::string_view action, int error_code) -> std::string;
 
-  [[nodiscard]] static auto CurrentThreadToken() -> const void *;
-
   io_uring ring_{};
 
   int wakeup_fd_ = -1;
 
-  std::atomic<const void *> run_thread_token_{nullptr};
+  // Access is protected because IsRunning() may be called by a non-run thread.
+  mutable std::mutex run_mutex_;
+
+  std::thread::id run_thread_id_{};
 
   std::atomic<bool> stop_requested_{false};
 
