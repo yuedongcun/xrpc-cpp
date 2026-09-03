@@ -68,6 +68,8 @@ auto UringContext::Runtime::CurrentThreadToken() -> const void * {
 }
 
 UringContext::Runtime::Runtime(std::uint32_t entries) {
+  staged_operations_.reserve(entries);
+
   const int ret = io_uring_queue_init(entries, &ring_, 0);
   if (ret < 0) {
     throw InternalException(MakeErrorMessage("io_uring_queue_init", -ret));

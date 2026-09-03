@@ -18,6 +18,7 @@
 #include <queue>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <liburing.h>
 
@@ -55,6 +56,16 @@ struct UringContext::Runtime final {
 
   template <typename Prep>
   void SubmitAwaitableOperation(std::unique_ptr<Operation> operation, Prep &&prep);
+
+  [[nodiscard]] auto AcquireSqe() -> io_uring_sqe *;
+
+  void SubmitPreparedOperation(std::unique_ptr<Operation> operation, bool counts_as_pending_io);
+
+  void BeginSubmissionBatch();
+
+  void EndSubmissionBatch();
+
+  void FlushSubmissionBatch();
 
   void ProcessCqe(io_uring_cqe *cqe);
 
@@ -95,6 +106,12 @@ struct UringContext::Runtime final {
   std::atomic<bool> stop_requested_{false};
 
   std::size_t pending_io_operations_ = 0;
+
+  std::size_t submission_batch_depth_ = 0;
+
+  bool submission_batch_started_ = false;
+
+  std::vector<std::unique_ptr<Operation>> staged_operations_;
 
   bool wakeup_poll_pending_ = false;
 

@@ -108,22 +108,14 @@ void UringContext::Runtime::SubmitWakeupPoll() {
   operation->completion_category_ = Operation::CompletionCategory::Wakeup;
   operation->fd_ = wakeup_fd_;
 
-  io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
-  if (sqe == nullptr) {
-    throw InternalException("io_uring_get_sqe failed");
-  }
+  io_uring_sqe *sqe = AcquireSqe();
 
   io_uring_prep_poll_add(sqe, wakeup_fd_, POLLIN);
   Operation *raw_operation = operation.get();
   io_uring_sqe_set_data(sqe, raw_operation);
 
-  const int ret = io_uring_submit(&ring_);
-  if (ret < 0) {
-    throw InternalException(MakeErrorMessage("io_uring_submit", -ret));
-  }
-
+  SubmitPreparedOperation(std::move(operation), false);
   wakeup_poll_pending_ = true;
-  [[maybe_unused]] Operation *released = operation.release();
 }
 
 /**
@@ -151,11 +143,17 @@ void UringContext::Runtime::ProcessWakeupCqe(io_uring_cqe *cqe) {
   }
 
   DrainWakeupCounter();
-  DrainPosted();
-  if (stop_requested_.load()) {
-    return;
+  BeginSubmissionBatch();
+  try {
+    DrainPosted();
+    if (!stop_requested_.load()) {
+      SubmitWakeupPoll();
+    }
+  } catch (...) {
+    EndSubmissionBatch();
+    throw;
   }
-  SubmitWakeupPoll();
+  EndSubmissionBatch();
 }
 
 void UringContext::Runtime::SignalWakeup() const {

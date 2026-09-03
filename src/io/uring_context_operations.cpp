@@ -51,6 +51,95 @@
 #include "detail/context_runtime.h"
 
 namespace xrpc::io {
+
+auto UringContext::Runtime::AcquireSqe() -> io_uring_sqe * {
+  io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
+  if (sqe == nullptr && !staged_operations_.empty()) {
+    FlushSubmissionBatch();
+    sqe = io_uring_get_sqe(&ring_);
+  }
+  if (sqe == nullptr) {
+    throw InternalException("io_uring_get_sqe failed");
+  }
+  return sqe;
+}
+
+/**
+ * @brief Transfers a prepared SQE to either the current batch or the kernel.
+ *
+ * Outside an explicit submission batch this retains the original immediate
+ * submission path. The first operation in a batch is also submitted eagerly
+ * so kernel work starts without waiting for a long callback drain. Later
+ * operations remain in `staged_operations_` and share one submission.
+ */
+void UringContext::Runtime::SubmitPreparedOperation(std::unique_ptr<Operation> operation, bool counts_as_pending_io) {
+  if (counts_as_pending_io) {
+    ++pending_io_operations_;
+  }
+
+  if (submission_batch_depth_ > 0 && submission_batch_started_) {
+    staged_operations_.push_back(std::move(operation));
+    return;
+  }
+
+  const int ret = io_uring_submit(&ring_);
+  if (ret < 0) {
+    if (counts_as_pending_io) {
+      --pending_io_operations_;
+    }
+    throw InternalException(MakeErrorMessage("io_uring_submit", -ret));
+  }
+
+  if (submission_batch_depth_ > 0) {
+    submission_batch_started_ = true;
+  }
+
+  [[maybe_unused]] Operation *released = operation.release();
+}
+
+void UringContext::Runtime::BeginSubmissionBatch() {
+  if (submission_batch_depth_ == 0) {
+    submission_batch_started_ = false;
+  }
+  ++submission_batch_depth_;
+}
+
+void UringContext::Runtime::EndSubmissionBatch() {
+  if (submission_batch_depth_ == 0) {
+    throw InternalException("io_uring submission batch is not active");
+  }
+  --submission_batch_depth_;
+  if (submission_batch_depth_ == 0) {
+    FlushSubmissionBatch();
+    submission_batch_started_ = false;
+  }
+}
+
+void UringContext::Runtime::FlushSubmissionBatch() {
+  while (!staged_operations_.empty()) {
+    int ret = 0;
+    do {
+      ret = io_uring_submit(&ring_);
+    } while (ret == -EINTR);
+
+    if (ret < 0) {
+      throw InternalException(MakeErrorMessage("io_uring_submit", -ret));
+    }
+    if (ret == 0) {
+      throw InternalException("io_uring_submit made no progress");
+    }
+
+    const auto submitted = static_cast<std::size_t>(ret);
+    if (submitted > staged_operations_.size()) {
+      throw InternalException("io_uring_submit returned an invalid submission count");
+    }
+    for (std::size_t index = 0; index < submitted; ++index) {
+      [[maybe_unused]] Operation *released = staged_operations_[index].release();
+    }
+    staged_operations_.erase(staged_operations_.begin(), staged_operations_.begin() + ret);
+  }
+}
+
 /**
  * @brief Submits an awaitable operation and transfers ownership to the CQE path.
  *
@@ -66,24 +155,14 @@ void UringContext::Runtime::SubmitAwaitableOperation(std::unique_ptr<Operation> 
     return;
   }
 
-  io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
-  if (sqe == nullptr) {
-    throw InternalException("io_uring_get_sqe failed");
-  }
+  io_uring_sqe *sqe = AcquireSqe();
 
   prep(sqe);
 
   Operation *raw_operation = operation.get();
   io_uring_sqe_set_data(sqe, raw_operation);
 
-  const int ret = io_uring_submit(&ring_);
-  if (ret < 0) {
-    throw InternalException(MakeErrorMessage("io_uring_submit", -ret));
-  }
-
-  ++pending_io_operations_;
-
-  [[maybe_unused]] Operation *released = operation.release();
+  SubmitPreparedOperation(std::move(operation), true);
 }
 
 void UringContext::Runtime::ProcessCqe(io_uring_cqe *cqe) {
@@ -181,22 +260,17 @@ void UringContext::Runtime::SubmitCancelFd(int fd) {
   operation->completion_category_ = Operation::CompletionCategory::Cancel;
   operation->fd_ = fd;
 
-  io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
-  if (sqe == nullptr) {
-    throw InternalException("io_uring_get_sqe failed");
-  }
+  io_uring_sqe *sqe = AcquireSqe();
 
   io_uring_prep_cancel_fd(sqe, fd, IORING_ASYNC_CANCEL_ALL);
   Operation *raw_operation = operation.get();
   io_uring_sqe_set_data(sqe, raw_operation);
 
-  const int ret = io_uring_submit(&ring_);
-  if (ret < 0) {
-    throw InternalException(MakeErrorMessage("io_uring_submit", -ret));
-  }
+  SubmitPreparedOperation(std::move(operation), true);
 
-  ++pending_io_operations_;
-  [[maybe_unused]] Operation *released = operation.release();
+  // Callers close the descriptor immediately after CancelFd() returns. Even
+  // inside a callback batch, publish the cancellation before that close.
+  FlushSubmissionBatch();
 }
 
 auto UringContext::Accept(int listen_fd) -> UringAwaitable {
