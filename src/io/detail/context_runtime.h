@@ -109,9 +109,7 @@ struct UringContext::Runtime final {
 
   std::size_t pending_io_operations_ = 0;
 
-  std::size_t submission_batch_depth_ = 0;
-
-  bool submission_batch_started_ = false;
+  bool submission_batch_active_ = false;
 
   std::vector<std::unique_ptr<Operation>> staged_operations_;
 

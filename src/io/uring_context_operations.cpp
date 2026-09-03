@@ -68,16 +68,15 @@ auto UringContext::Runtime::AcquireSqe() -> io_uring_sqe * {
  * @brief Transfers a prepared SQE to either the current batch or the kernel.
  *
  * Outside an explicit submission batch this retains the original immediate
- * submission path. The first operation in a batch is also submitted eagerly
- * so kernel work starts without waiting for a long callback drain. Later
- * operations remain in `staged_operations_` and share one submission.
+ * submission path. Inside a batch, operations remain in
+ * `staged_operations_` and share one submission when the batch ends.
  */
 void UringContext::Runtime::SubmitPreparedOperation(std::unique_ptr<Operation> operation, bool counts_as_pending_io) {
   if (counts_as_pending_io) {
     ++pending_io_operations_;
   }
 
-  if (submission_batch_depth_ > 0 && submission_batch_started_) {
+  if (submission_batch_active_) {
     staged_operations_.push_back(std::move(operation));
     return;
   }
@@ -90,29 +89,22 @@ void UringContext::Runtime::SubmitPreparedOperation(std::unique_ptr<Operation> o
     throw InternalException(MakeErrorMessage("io_uring_submit", -ret));
   }
 
-  if (submission_batch_depth_ > 0) {
-    submission_batch_started_ = true;
-  }
-
   [[maybe_unused]] Operation *released = operation.release();
 }
 
 void UringContext::Runtime::BeginSubmissionBatch() {
-  if (submission_batch_depth_ == 0) {
-    submission_batch_started_ = false;
+  if (submission_batch_active_) {
+    throw InternalException("io_uring submission batch is already active");
   }
-  ++submission_batch_depth_;
+  submission_batch_active_ = true;
 }
 
 void UringContext::Runtime::EndSubmissionBatch() {
-  if (submission_batch_depth_ == 0) {
+  if (!submission_batch_active_) {
     throw InternalException("io_uring submission batch is not active");
   }
-  --submission_batch_depth_;
-  if (submission_batch_depth_ == 0) {
-    FlushSubmissionBatch();
-    submission_batch_started_ = false;
-  }
+  submission_batch_active_ = false;
+  FlushSubmissionBatch();
 }
 
 void UringContext::Runtime::FlushSubmissionBatch() {
