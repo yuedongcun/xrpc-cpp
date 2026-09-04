@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <future>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -64,6 +65,10 @@ auto MakeConnectionConfig(xrpc::ConnectionBackpressureLimits limits = {.max_infl
                                                                        .max_write_queue_bytes_ = 8U * 1024U * 1024U})
     -> xrpc::ServerConnectionConfig {
   return {.limits_ = limits, .protocol_limits_ = {}};
+}
+
+auto MakeWorkerConfig(std::size_t threads) -> xrpc::WorkerPoolConfig {
+  return {.threads_ = threads, .max_pending_jobs_ = std::numeric_limits<std::size_t>::max()};
 }
 
 auto MakeRequestFrame(std::string message, std::uint64_t request_id) -> std::string {
@@ -148,10 +153,10 @@ auto MakeConnectedPair() -> ConnectedPair {
 
 TEST(ServerConnectionTest, EchoesSingleFrameAndClosesAfterPeerShutdown) {
   ConnectedPair pair = MakeConnectedPair();
-  xrpc::WorkerPool worker_pool(1);
+  xrpc::WorkerPool worker_pool(MakeWorkerConfig(1));
   xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
   const auto config = MakeConnectionConfig();
-  xrpc::ConnectionIoLoop loop(registry, worker_pool, config.limits_, config.protocol_limits_);
+  xrpc::ConnectionIoLoop loop(registry, worker_pool, config);
   loop.Start();
   loop.PostStartConnection(std::move(pair.server_socket_));
 
@@ -168,10 +173,10 @@ TEST(ServerConnectionTest, EchoesSingleFrameAndClosesAfterPeerShutdown) {
 
 TEST(ServerConnectionTest, ServerDrainClosesConnection) {
   ConnectedPair pair = MakeConnectedPair();
-  xrpc::WorkerPool worker_pool(1);
+  xrpc::WorkerPool worker_pool(MakeWorkerConfig(1));
   xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
   const auto config = MakeConnectionConfig();
-  xrpc::ConnectionIoLoop loop(registry, worker_pool, config.limits_, config.protocol_limits_);
+  xrpc::ConnectionIoLoop loop(registry, worker_pool, config);
   loop.Start();
   loop.PostStartConnection(std::move(pair.server_socket_));
 
@@ -190,10 +195,10 @@ TEST(ServerConnectionTest, ServerDrainClosesConnection) {
 
 TEST(ServerConnectionTest, HandlesHalfPacketsAndStickyPackets) {
   ConnectedPair pair = MakeConnectedPair();
-  xrpc::WorkerPool worker_pool(1);
+  xrpc::WorkerPool worker_pool(MakeWorkerConfig(1));
   xrpc::ServiceRegistry registry = MakeRegistry(MakeSlowEchoHandler());
   const auto config = MakeConnectionConfig();
-  xrpc::ConnectionIoLoop loop(registry, worker_pool, config.limits_, config.protocol_limits_);
+  xrpc::ConnectionIoLoop loop(registry, worker_pool, config);
   loop.Start();
   loop.PostStartConnection(std::move(pair.server_socket_));
 
@@ -219,10 +224,10 @@ TEST(ServerConnectionTest, HandlesHalfPacketsAndStickyPackets) {
 
 TEST(ServerConnectionTest, HandlesPipelinedRequestsOnOneConnection) {
   ConnectedPair pair = MakeConnectedPair();
-  xrpc::WorkerPool worker_pool(1);
+  xrpc::WorkerPool worker_pool(MakeWorkerConfig(1));
   xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
   const auto config = MakeConnectionConfig();
-  xrpc::ConnectionIoLoop loop(registry, worker_pool, config.limits_, config.protocol_limits_);
+  xrpc::ConnectionIoLoop loop(registry, worker_pool, config);
   loop.Start();
   loop.PostStartConnection(std::move(pair.server_socket_));
 
@@ -244,10 +249,10 @@ TEST(ServerConnectionTest, HandlesPipelinedRequestsOnOneConnection) {
 
 TEST(ServerConnectionTest, WakesIdleWriteLoopForLaterResponse) {
   ConnectedPair pair = MakeConnectedPair();
-  xrpc::WorkerPool worker_pool(1);
+  xrpc::WorkerPool worker_pool(MakeWorkerConfig(1));
   xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
   const auto config = MakeConnectionConfig();
-  xrpc::ConnectionIoLoop loop(registry, worker_pool, config.limits_, config.protocol_limits_);
+  xrpc::ConnectionIoLoop loop(registry, worker_pool, config);
   loop.Start();
   loop.PostStartConnection(std::move(pair.server_socket_));
 
@@ -268,10 +273,10 @@ TEST(ServerConnectionTest, WakesIdleWriteLoopForLaterResponse) {
 
 TEST(ServerConnectionTest, ClosesOnInvalidFrame) {
   ConnectedPair pair = MakeConnectedPair();
-  xrpc::WorkerPool worker_pool(1);
+  xrpc::WorkerPool worker_pool(MakeWorkerConfig(1));
   xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
   const auto config = MakeConnectionConfig();
-  xrpc::ConnectionIoLoop loop(registry, worker_pool, config.limits_, config.protocol_limits_);
+  xrpc::ConnectionIoLoop loop(registry, worker_pool, config);
   loop.Start();
   loop.PostStartConnection(std::move(pair.server_socket_));
 
@@ -286,10 +291,10 @@ TEST(ServerConnectionTest, ClosesOnInvalidFrame) {
 
 TEST(ServerConnectionTest, HandlesConcurrentResponsesWithWorkerPool) {
   ConnectedPair pair = MakeConnectedPair();
-  xrpc::WorkerPool worker_pool(2);
+  xrpc::WorkerPool worker_pool(MakeWorkerConfig(2));
   xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
   const auto config = MakeConnectionConfig();
-  xrpc::ConnectionIoLoop loop(registry, worker_pool, config.limits_, config.protocol_limits_);
+  xrpc::ConnectionIoLoop loop(registry, worker_pool, config);
   loop.Start();
   loop.PostStartConnection(std::move(pair.server_socket_));
 
@@ -355,11 +360,11 @@ TEST(ServerConnectionTest, KeepsReadingWhileWorkerHandlerIsPending) {
   };
 
   ConnectedPair pair = MakeConnectedPair();
-  xrpc::WorkerPool worker_pool(1);
+  xrpc::WorkerPool worker_pool(MakeWorkerConfig(1));
   xrpc::ServiceRegistry registry = MakeRegistry(std::move(blocking_handler));
   const auto config =
       MakeConnectionConfig(xrpc::ConnectionBackpressureLimits{.max_inflight_ = 1, .max_write_queue_bytes_ = 1024});
-  xrpc::ConnectionIoLoop loop(registry, worker_pool, config.limits_, config.protocol_limits_);
+  xrpc::ConnectionIoLoop loop(registry, worker_pool, config);
   loop.Start();
   loop.PostStartConnection(std::move(pair.server_socket_));
 
@@ -384,7 +389,7 @@ TEST(ServerConnectionTest, KeepsReadingWhileWorkerHandlerIsPending) {
 
 TEST(ServerConnectionTest, RejectsEntireReadBatchWhenInflightLimitWouldBeExceeded) {
   ConnectedPair pair = MakeConnectedPair();
-  xrpc::WorkerPool worker_pool(1);
+  xrpc::WorkerPool worker_pool(MakeWorkerConfig(1));
   std::atomic<std::size_t> handler_calls = 0;
   xrpc::ServiceRegistry registry = MakeRegistry([&handler_calls](const xrpc::RequestEnvelope &request) {
     ++handler_calls;
@@ -392,7 +397,7 @@ TEST(ServerConnectionTest, RejectsEntireReadBatchWhenInflightLimitWouldBeExceede
   });
   const auto config =
       MakeConnectionConfig(xrpc::ConnectionBackpressureLimits{.max_inflight_ = 1, .max_write_queue_bytes_ = 1024});
-  xrpc::ConnectionIoLoop loop(registry, worker_pool, config.limits_, config.protocol_limits_);
+  xrpc::ConnectionIoLoop loop(registry, worker_pool, config);
   loop.Start();
   loop.PostStartConnection(std::move(pair.server_socket_));
 
@@ -426,11 +431,11 @@ TEST(ServerConnectionTest, RejectsEntireReadBatchWhenInflightLimitWouldBeExceede
 
 TEST(ServerConnectionTest, ClosesWhenWriteQueueByteLimitIsReached) {
   ConnectedPair pair = MakeConnectedPair();
-  xrpc::WorkerPool worker_pool(1);
+  xrpc::WorkerPool worker_pool(MakeWorkerConfig(1));
   xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
   const auto config =
       MakeConnectionConfig(xrpc::ConnectionBackpressureLimits{.max_inflight_ = 8, .max_write_queue_bytes_ = 1});
-  xrpc::ConnectionIoLoop loop(registry, worker_pool, config.limits_, config.protocol_limits_);
+  xrpc::ConnectionIoLoop loop(registry, worker_pool, config);
   loop.Start();
   loop.PostStartConnection(std::move(pair.server_socket_));
 

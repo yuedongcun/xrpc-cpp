@@ -38,6 +38,8 @@ set(XRPC_SOURCES
     naming/consul/consul_discovery.cpp
     naming/consul/consul_registrar.cpp
     server/service_registry.cpp
+    server/connection_backpressure.cpp
+    server/connection_config.cpp
     server/server_config.cpp
     server/rpc_frame_stream.cpp
     server/rpc_server.cpp

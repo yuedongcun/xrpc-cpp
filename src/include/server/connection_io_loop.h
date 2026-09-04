@@ -20,8 +20,7 @@
 
 #include "io/socket.h"
 #include "io/uring_context.h"
-#include "protocol/frame_codec.h"
-#include "server/connection_backpressure.h"
+#include "server/connection_config.h"
 #include "server/server_connection.h"
 #include "server/worker_pool.h"
 
@@ -54,8 +53,7 @@ struct DispatchCompletion final {
  */
 class ConnectionIoLoop final {
  public:
-  ConnectionIoLoop(ServiceRegistry &registry, WorkerPool &worker_pool, ConnectionBackpressureLimits limits,
-                   ProtocolLimits protocol_limits);
+  ConnectionIoLoop(ServiceRegistry &registry, WorkerPool &worker_pool, ServerConnectionConfig config);
 
   ~ConnectionIoLoop();
 
@@ -111,8 +109,7 @@ class ConnectionIoLoop final {
   io::UringContext context_;
   ServiceRegistry &registry_;
   WorkerPool &worker_pool_;
-  ConnectionBackpressureLimits limits_;
-  ProtocolLimits protocol_limits_;
+  ServerConnectionConfig config_;
   std::unordered_map<ConnectionId, std::unique_ptr<ServerConnection>> connections_;
   ConnectionId next_connection_id_ = 1;
   std::jthread thread_;

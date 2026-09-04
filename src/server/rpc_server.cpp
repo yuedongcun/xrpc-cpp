@@ -21,7 +21,7 @@ RpcServer::RpcServer(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 
 auto RpcServer::Create(const RpcServerOptions &options) -> StatusOr<RpcServer> {
   try {
-    StatusOr<ServerConfig> config = NormalizeServerOptions(options);
+    StatusOr<ServerConfig> config = ServerConfig::Create(options);
     if (!config.ok()) {
       return StatusOr<RpcServer>(config.status());
     }

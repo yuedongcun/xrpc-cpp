@@ -33,12 +33,11 @@
 
 namespace xrpc {
 
-RpcServer::Impl::Impl(ServerConfig config)
-    : config_(std::move(config)), worker_pool_(config_.worker_threads_, config_.max_pending_jobs_) {
-  connection_io_loops_.reserve(config_.io_threads_);
-  for (std::size_t index = 0; index < config_.io_threads_; ++index) {
-    connection_io_loops_.push_back(std::make_unique<ConnectionIoLoop>(
-        registry_, worker_pool_, config_.connection_limits_, config_.protocol_limits_));
+RpcServer::Impl::Impl(ServerConfig config) : config_(std::move(config)), worker_pool_(config_.worker_pool_) {
+  connection_io_loops_.reserve(config_.connection_io_.threads_);
+  for (std::size_t index = 0; index < config_.connection_io_.threads_; ++index) {
+    connection_io_loops_.push_back(
+        std::make_unique<ConnectionIoLoop>(registry_, worker_pool_, config_.connection_io_.connection_));
   }
 }
 
@@ -78,7 +77,7 @@ auto RpcServer::Impl::Listen(std::string_view host, std::uint16_t port) -> Statu
     state_ = State::Stopped;
     return status;
   }
-  status = socket.Listen(config_.backlog_);
+  status = socket.Listen(config_.listen_.backlog_);
   if (!status.ok()) {
     state_ = State::Stopped;
     return status;

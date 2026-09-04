@@ -13,9 +13,8 @@
 #include "common/task.h"
 #include "io/socket.h"
 #include "io/uring_context.h"
-#include "protocol/frame_codec.h"
 #include "protocol/rpc_envelope.h"
-#include "server/connection_backpressure.h"
+#include "server/connection_config.h"
 #include "server/rpc_frame_stream.h"
 #include "server/worker_pool.h"
 
@@ -25,12 +24,6 @@ class ConnectionIoLoop;
 class ServiceRegistry;
 
 using ConnectionId = std::uint64_t;
-
-struct ServerConnectionConfig final {
-  ConnectionBackpressureLimits limits_;
-
-  ProtocolLimits protocol_limits_;
-};
 
 /**
  * @brief Owns the state machine for one server-side RPC connection.

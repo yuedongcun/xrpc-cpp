@@ -20,9 +20,8 @@
 
 namespace xrpc {
 
-ConnectionIoLoop::ConnectionIoLoop(ServiceRegistry &registry, WorkerPool &worker_pool,
-                                   ConnectionBackpressureLimits limits, ProtocolLimits protocol_limits)
-    : registry_(registry), worker_pool_(worker_pool), limits_(limits), protocol_limits_(protocol_limits) {}
+ConnectionIoLoop::ConnectionIoLoop(ServiceRegistry &registry, WorkerPool &worker_pool, ServerConnectionConfig config)
+    : registry_(registry), worker_pool_(worker_pool), config_(config) {}
 
 ConnectionIoLoop::~ConnectionIoLoop() { StopImmediately(); }
 
@@ -135,10 +134,9 @@ void ConnectionIoLoop::StartConnectionOnContext(io::Socket client_socket) {
     }
 
     const ConnectionId connection_id = AllocateConnectionId();
-    const ServerConnectionConfig config{.limits_ = limits_, .protocol_limits_ = protocol_limits_};
     // The constructor is private so only the owning loop can create a connection.
     auto owned_connection = std::unique_ptr<ServerConnection>(
-        new ServerConnection(connection_id, *this, context_, registry_, worker_pool_, std::move(client_socket), config,
+        new ServerConnection(connection_id, *this, context_, registry_, worker_pool_, std::move(client_socket), config_,
                              [this]() -> void { OnConnectionClosed(); }));
     auto [position, inserted] = connections_.emplace(connection_id, std::move(owned_connection));
     if (!inserted) {

@@ -13,7 +13,6 @@
 #include <condition_variable>
 #include <cstddef>
 #include <functional>
-#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -21,7 +20,17 @@
 #include <thread>
 #include <vector>
 
+#include <xrpc/status.h>
+
 namespace xrpc {
+
+struct WorkerPoolConfig final {
+  std::size_t threads_;
+  std::size_t max_pending_jobs_;
+};
+
+[[nodiscard]] auto MakeWorkerPoolConfig(std::size_t requested_threads, std::size_t max_pending_jobs)
+    -> StatusOr<WorkerPoolConfig>;
 
 /**
  * @brief Worker pool for server RPC dispatch processing.
@@ -36,7 +45,7 @@ namespace xrpc {
  */
 class WorkerPool final {
  public:
-  explicit WorkerPool(std::size_t worker_count, std::size_t max_pending_jobs = std::numeric_limits<std::size_t>::max());
+  explicit WorkerPool(WorkerPoolConfig config);
 
   ~WorkerPool();
 

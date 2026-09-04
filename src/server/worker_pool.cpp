@@ -5,19 +5,28 @@
 #include "server/worker_pool.h"
 
 #include <exception>
+#include <thread>
 #include <utility>
 
 #include "common/abort.h"
 
 namespace xrpc {
 
-WorkerPool::WorkerPool(std::size_t worker_count, std::size_t max_pending_jobs) : max_pending_jobs_(max_pending_jobs) {
-  if (worker_count == 0) {
-    Abort("WorkerPool requires at least one worker");
+auto MakeWorkerPoolConfig(std::size_t requested_threads, std::size_t max_pending_jobs) -> StatusOr<WorkerPoolConfig> {
+  if (max_pending_jobs == 0) {
+    return StatusOr<WorkerPoolConfig>(
+        Status{StatusCode::InvalidArgument, "RpcServer max_pending_jobs_global must be greater than 0"});
   }
-  if (max_pending_jobs_ == 0) {
-    Abort("WorkerPool requires positive pending-job capacity");
+  std::size_t threads = requested_threads;
+  if (threads == 0) {
+    const unsigned int hardware_threads = std::thread::hardware_concurrency();
+    threads = hardware_threads == 0 ? 1 : static_cast<std::size_t>(hardware_threads);
   }
+  return StatusOr<WorkerPoolConfig>(WorkerPoolConfig{.threads_ = threads, .max_pending_jobs_ = max_pending_jobs});
+}
+
+WorkerPool::WorkerPool(WorkerPoolConfig config) : max_pending_jobs_(config.max_pending_jobs_) {
+  const std::size_t worker_count = config.threads_;
 
   worker_queues_.reserve(worker_count);
   workers_.reserve(worker_count);
