@@ -1,12 +1,12 @@
 #include <gtest/gtest.h>
 
 #include <array>
-#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -17,7 +17,6 @@
 
 namespace {
 
-constexpr auto PollInterval = std::chrono::milliseconds(1);
 constexpr auto WaitTimeout = std::chrono::milliseconds(1000);
 
 template <typename T>
@@ -71,19 +70,16 @@ auto ReadInvalidFd(xrpc::io::UringContext &context) -> xrpc::runtime::Task<xrpc:
   co_return result;
 }
 
-auto MoveAwaitableBeforeSuspend(xrpc::io::UringContext &context) -> xrpc::runtime::Task<xrpc::io::IoResult> {
+auto MoveAwaitableBeforeAwait(xrpc::io::UringContext &context) -> xrpc::runtime::Task<xrpc::io::IoResult> {
   auto read_buffer = std::make_shared<std::array<char, 8>>();
   xrpc::io::UringAwaitable awaitable = context.Recv(-1, read_buffer->data(), read_buffer->size());
   xrpc::io::UringAwaitable moved_awaitable = std::move(awaitable);
   co_return co_await std::move(moved_awaitable);
 }
 
-auto PendingRead(xrpc::io::UringContext &context, int fd, std::atomic<bool> &submitted)
-    -> xrpc::runtime::Task<xrpc::io::IoResult> {
+auto PendingRead(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<xrpc::io::IoResult> {
   auto read_buffer = std::make_shared<std::array<char, 8>>();
-  xrpc::io::UringAwaitable awaitable = context.Recv(fd, read_buffer->data(), read_buffer->size());
-  submitted.store(true);
-  co_return co_await std::move(awaitable);
+  co_return co_await context.Recv(fd, read_buffer->data(), read_buffer->size());
 }
 
 auto SubmitAfterStop(xrpc::io::UringContext &context) -> xrpc::runtime::Task<xrpc::io::IoResult> {
@@ -94,16 +90,16 @@ auto SubmitAfterStop(xrpc::io::UringContext &context) -> xrpc::runtime::Task<xrp
 
 }  // namespace
 
-TEST(IoUringAwaitableTest, MoveAfterSubmissionPreservesCompletion) {
+TEST(IoUringAwaitableTest, MoveBeforeAwaitPreservesOperation) {
   xrpc::io::UringContext context;
 
-  const xrpc::io::IoResult result = WaitTaskWithContext(MoveAwaitableBeforeSuspend(context), context);
+  const xrpc::io::IoResult result = WaitTaskWithContext(MoveAwaitableBeforeAwait(context), context);
   EXPECT_EQ(result.type_, xrpc::io::OperationType::Recv);
   EXPECT_NE(result.error_code_, 0);
   EXPECT_LT(result.result_, 0);
 }
 
-TEST(IoUringAwaitableTest, CompletionBeforeAwaitSuspendIsObserved) {
+TEST(IoUringAwaitableTest, StartAfterStopReturnsSynchronousCancellation) {
   xrpc::io::UringContext context;
 
   const xrpc::io::IoResult result = WaitTaskWithContext(SubmitAfterStop(context), context);
@@ -112,44 +108,33 @@ TEST(IoUringAwaitableTest, CompletionBeforeAwaitSuspendIsObserved) {
   EXPECT_LT(result.result_, 0);
 }
 
-TEST(IoUringAwaitableTest, DestroyingPendingTaskDoesNotLeaveCompletionTarget) {
-  xrpc::io::Socket listen_socket;
-  listen_socket.Bind("127.0.0.1", 0);
-  listen_socket.Listen(1);
-
-  xrpc::io::Socket client_socket;
-  client_socket.Connect("127.0.0.1", listen_socket.LocalPort());
-  xrpc::io::Socket server_socket = listen_socket.Accept();
-
+TEST(IoUringAwaitableTest, UnawaitedOperationIsNeverStarted) {
   xrpc::io::UringContext context;
-  std::exception_ptr context_error;
-  std::atomic<bool> submitted = false;
+  std::array<char, 8> read_buffer{};
+  [[maybe_unused]] xrpc::io::UringAwaitable awaitable = context.Recv(-1, read_buffer.data(), read_buffer.size());
+}
 
-  std::jthread context_thread([&]() {
-    try {
-      context.Run();
-    } catch (...) {
-      context_error = std::current_exception();
-    }
-  });
+TEST(IoUringAwaitableTest, DestroyingPendingIoTaskTerminates) {
+  EXPECT_DEATH(
+      {
+        xrpc::io::Socket listen_socket;
+        listen_socket.Bind("127.0.0.1", 0);
+        listen_socket.Listen(1);
 
-  {
-    xrpc::runtime::Task<xrpc::io::IoResult> task = PendingRead(context, server_socket.fd(), submitted);
-    StartTaskOnContext(context, task);
+        xrpc::io::Socket client_socket;
+        client_socket.Connect("127.0.0.1", listen_socket.LocalPort());
+        xrpc::io::Socket server_socket = listen_socket.Accept();
 
-    for (int attempt = 0; attempt < 100 && !submitted.load(); ++attempt) {
-      std::this_thread::sleep_for(PollInterval);
-    }
-    EXPECT_TRUE(submitted.load());
-  }
-
-  client_socket.Close();
-  context.RequestStop();
-  context_thread.join();
-
-  if (context_error) {
-    std::rethrow_exception(context_error);
-  }
+        xrpc::io::UringContext context;
+        std::optional<xrpc::runtime::Task<xrpc::io::IoResult>> task;
+        task.emplace(PendingRead(context, server_socket.fd()));
+        context.Post([&task]() -> void {
+          task->Start();
+          task.reset();
+        });
+        context.Run();
+      },
+      "");
 }
 
 TEST(IoUringAwaitableTest, SendAndRecvReturnExpectedResults) {

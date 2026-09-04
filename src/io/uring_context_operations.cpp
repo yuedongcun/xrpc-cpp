@@ -2,45 +2,48 @@
  * @file uring_context_operations.cpp
  * @brief Implements io_uring operation submission and completion handling.
  *
- * Each asynchronous request uses an `Operation` for the kernel-side state and
- * an `AwaitableState` for the coroutine-side state. `UringAwaitable` owns the
- * awaitable state, while `Operation` keeps only a weak reference to it.
- * CQE dispatch is selected by completion category: awaitable completions
- * resume coroutine state, while cancel and wakeup completions follow separate
- * control paths.
+ * A one-shot asynchronous request has one `Operation` containing both its I/O
+ * parameters and coroutine completion state. `UringAwaitable` owns the
+ * operation until `await_suspend()` transfers it to the runtime. The CQE path
+ * takes final ownership, stores the result, resumes the coroutine synchronously,
+ * and destroys the operation after `await_resume()` has consumed that result.
  *
  * Operation lifecycle:
  *
- *   create Operation + AwaitableState
+ *      create deferred Operation
  *              |
  *              v
- *       prepare + submit SQE
+ *       await_suspend(waiter)
  *              |
  *              v
- *           kernel
+ *        prepare + stage SQE
  *              |
  *              v
- *             CQE
+ *       event-turn batch submit
+ *              |
+ *              v
+ *           kernel -> CQE
  *              |
  *              v
  *         recover Operation
  *              |
  *              v
- *           IoResult
- *              |
- *              +-- AwaitableState alive --> store result --> resume coroutine
- *              |
- *              `-- AwaitableState gone  --> skip coroutine completion
+ *       store result + resume
  *              |
  *              v
- *        destroy Operation
+ *     await_resume() reads result
+ *              |
+ *              v
+ *       destroy Operation
  *
  */
 
 #include "io/uring_context.h"
 
+#include <cassert>
 #include <cerrno>
 #include <cstddef>
+#include <exception>
 #include <memory>
 #include <utility>
 
@@ -64,47 +67,14 @@ auto UringContext::Runtime::AcquireSqe() -> io_uring_sqe * {
   return sqe;
 }
 
-/**
- * @brief Transfers a prepared SQE to either the current batch or the kernel.
- *
- * Outside an explicit submission batch this retains the original immediate
- * submission path. Inside a batch, operations remain in
- * `staged_operations_` and share one submission when the batch ends.
- */
-void UringContext::Runtime::SubmitPreparedOperation(std::unique_ptr<Operation> operation, bool counts_as_pending_io) {
+/** @brief Stages a prepared operation for the next submission flush. */
+void UringContext::Runtime::SubmitPreparedOperation(std::unique_ptr<Operation> operation,
+                                                    bool counts_as_pending_io) noexcept {
+  assert(staged_operations_.size() < staged_operations_.capacity());
   if (counts_as_pending_io) {
     ++pending_io_operations_;
   }
-
-  if (submission_batch_active_) {
-    staged_operations_.push_back(std::move(operation));
-    return;
-  }
-
-  const int ret = io_uring_submit(&ring_);
-  if (ret < 0) {
-    if (counts_as_pending_io) {
-      --pending_io_operations_;
-    }
-    throw InternalException(MakeErrorMessage("io_uring_submit", -ret));
-  }
-
-  [[maybe_unused]] Operation *released = operation.release();
-}
-
-void UringContext::Runtime::BeginSubmissionBatch() {
-  if (submission_batch_active_) {
-    throw InternalException("io_uring submission batch is already active");
-  }
-  submission_batch_active_ = true;
-}
-
-void UringContext::Runtime::EndSubmissionBatch() {
-  if (!submission_batch_active_) {
-    throw InternalException("io_uring submission batch is not active");
-  }
-  submission_batch_active_ = false;
-  FlushSubmissionBatch();
+  staged_operations_.push_back(std::move(operation));
 }
 
 void UringContext::Runtime::FlushSubmissionBatch() {
@@ -133,28 +103,57 @@ void UringContext::Runtime::FlushSubmissionBatch() {
 }
 
 /**
- * @brief Submits an awaitable operation and transfers ownership to the CQE path.
+ * @brief Starts a deferred awaitable operation on the run thread.
  *
- * After successful submission, ownership is released from the local
- * `unique_ptr`. The SQE stores the raw operation pointer, and `ProcessCqe()`
- * restores unique ownership when the matching CQE arrives.
+ * A stop request produces a synchronous cancellation result and leaves
+ * ownership with the awaitable. Otherwise, all potentially failing work is
+ * completed before the SQE receives the operation pointer. From that commit
+ * point onward, preparing the SQE and moving the operation into the reserved
+ * staging vector do not throw.
  */
-template <typename Prep>
-void UringContext::Runtime::SubmitAwaitableOperation(std::unique_ptr<Operation> operation, Prep &&prep) {
+auto UringContext::Runtime::TryStartAwaitableOperation(std::unique_ptr<Operation> &operation,
+                                                       std::coroutine_handle<> continuation) -> bool {
   AssertRunThread("io_uring submission");
+  if (!operation) {
+    throw LifecycleException("io_uring awaitable operation was already started");
+  }
   if (stop_requested_.load()) {
-    CompleteAwaitableState(*operation, MakeCancelledResult(*operation));
-    return;
+    operation->result_ = MakeCancelledResult(*operation);
+    return false;
   }
 
-  io_uring_sqe *sqe = AcquireSqe();
+  switch (operation->type_) {
+    case OperationType::Accept:
+    case OperationType::Recv:
+    case OperationType::Send:
+      break;
+    case OperationType::Unknown:
+      throw InternalException("cannot start an unknown io_uring operation");
+  }
 
-  prep(sqe);
+  operation->continuation_ = continuation;
+  io_uring_sqe *sqe = AcquireSqe();
+  assert(staged_operations_.size() < staged_operations_.capacity());
+
+  switch (operation->type_) {
+    case OperationType::Accept:
+      io_uring_prep_accept(sqe, operation->fd_, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+      break;
+    case OperationType::Recv:
+      io_uring_prep_recv(sqe, operation->fd_, operation->buffer_, operation->length_, 0);
+      break;
+    case OperationType::Send:
+      io_uring_prep_send(sqe, operation->fd_, operation->buffer_, operation->length_, MSG_NOSIGNAL);
+      break;
+    case OperationType::Unknown:
+      std::terminate();
+  }
 
   Operation *raw_operation = operation.get();
   io_uring_sqe_set_data(sqe, raw_operation);
 
   SubmitPreparedOperation(std::move(operation), true);
+  return true;
 }
 
 void UringContext::Runtime::ProcessCqe(io_uring_cqe *cqe) {
@@ -185,17 +184,20 @@ void UringContext::Runtime::ProcessAwaitableCqe(Operation &operation, io_uring_c
   }
   --pending_io_operations_;
 
-  IoResult result;
-  result.type_ = operation.type_;
-  result.fd_ = operation.fd_;
-  result.result_ = cqe->res;
-  result.error_code_ = cqe->res < 0 ? -cqe->res : 0;
+  operation.result_.type_ = operation.type_;
+  operation.result_.fd_ = operation.fd_;
+  operation.result_.result_ = cqe->res;
+  operation.result_.error_code_ = cqe->res < 0 ? -cqe->res : 0;
   if (operation.type_ == OperationType::Recv || operation.type_ == OperationType::Send) {
-    result.bytes_transferred_ = cqe->res > 0 ? static_cast<std::size_t>(cqe->res) : 0;
+    operation.result_.bytes_transferred_ = cqe->res > 0 ? static_cast<std::size_t>(cqe->res) : 0;
   }
 
   io_uring_cqe_seen(&ring_, cqe);
-  CompleteAwaitableState(operation, result);
+  std::coroutine_handle<> continuation = std::exchange(operation.continuation_, {});
+  if (!continuation) {
+    throw InternalException("io_uring completion has no coroutine waiter");
+  }
+  continuation.resume();
 }
 
 void UringContext::Runtime::ProcessCancelCqe(io_uring_cqe *cqe) {
@@ -225,26 +227,6 @@ auto UringContext::Runtime::MakeCancelledResult(const Operation &operation) -> I
   return result;
 }
 
-/**
- * @brief Delivers an I/O result if the coroutine-side state still exists.
- *
- * If the awaitable state has already been destroyed, the completion is
- * discarded and no coroutine is resumed.
- */
-void UringContext::Runtime::CompleteAwaitableState(Operation &operation, const IoResult &result) {
-  std::shared_ptr<detail::AwaitableState> state = operation.awaitable_state_.lock();
-  if (!state) {
-    return;
-  }
-
-  state->result_ = result;
-  state->ready_ = true;
-  std::coroutine_handle<> continuation = std::exchange(state->continuation_, {});
-  if (continuation) {
-    continuation.resume();
-  }
-}
-
 void UringContext::Runtime::SubmitCancelFd(int fd) {
   AssertRunThread("UringContext::CancelFd");
 
@@ -260,58 +242,96 @@ void UringContext::Runtime::SubmitCancelFd(int fd) {
 
   SubmitPreparedOperation(std::move(operation), true);
 
-  // Callers close the descriptor immediately after CancelFd() returns. Even
-  // inside a callback batch, publish the cancellation before that close.
+  // Callers close the descriptor immediately after CancelFd() returns. Publish
+  // the cancellation before that close instead of waiting for the turn boundary.
   FlushSubmissionBatch();
 }
 
 auto UringContext::Accept(int listen_fd) -> UringAwaitable {
-  auto state = std::make_shared<detail::AwaitableState>();
-  UringAwaitable awaitable(state);
   auto operation = std::make_unique<Operation>();
   operation->type_ = OperationType::Accept;
   operation->fd_ = listen_fd;
-  operation->awaitable_state_ = state;
-
-  runtime_->SubmitAwaitableOperation(std::move(operation), [listen_fd](io_uring_sqe *sqe) -> void {
-    io_uring_prep_accept(sqe, listen_fd, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
-  });
-
-  return awaitable;
+  return UringAwaitable(*this, std::move(operation));
 }
 
 auto UringContext::Recv(int fd, void *buffer, std::size_t len) -> UringAwaitable {
-  auto state = std::make_shared<detail::AwaitableState>();
-  UringAwaitable awaitable(state);
   auto operation = std::make_unique<Operation>();
   operation->type_ = OperationType::Recv;
   operation->fd_ = fd;
   operation->buffer_ = buffer;
   operation->length_ = len;
-  operation->awaitable_state_ = state;
-
-  runtime_->SubmitAwaitableOperation(std::move(operation), [fd, buffer, len](io_uring_sqe *sqe) -> void {
-    io_uring_prep_recv(sqe, fd, buffer, len, 0);
-  });
-
-  return awaitable;
+  return UringAwaitable(*this, std::move(operation));
 }
 
 auto UringContext::Send(int fd, const void *buffer, std::size_t len) -> UringAwaitable {
-  auto state = std::make_shared<detail::AwaitableState>();
-  UringAwaitable awaitable(state);
   auto operation = std::make_unique<Operation>();
   operation->type_ = OperationType::Send;
   operation->fd_ = fd;
   operation->buffer_ = const_cast<void *>(buffer);
   operation->length_ = len;
-  operation->awaitable_state_ = state;
+  return UringAwaitable(*this, std::move(operation));
+}
 
-  runtime_->SubmitAwaitableOperation(std::move(operation), [fd, buffer, len](io_uring_sqe *sqe) -> void {
-    io_uring_prep_send(sqe, fd, buffer, len, MSG_NOSIGNAL);
-  });
+UringAwaitable::UringAwaitable(UringContext &context, std::unique_ptr<Operation> operation) noexcept
+    : context_(&context), unstarted_operation_(std::move(operation)) {}
 
-  return awaitable;
+UringAwaitable::~UringAwaitable() {
+  if (active_operation_ != nullptr) {
+    std::terminate();
+  }
+}
+
+UringAwaitable::UringAwaitable(UringAwaitable &&other) noexcept
+    : context_(std::exchange(other.context_, nullptr)),
+      unstarted_operation_(std::move(other.unstarted_operation_)),
+      active_operation_(std::exchange(other.active_operation_, nullptr)) {
+  if (active_operation_ != nullptr) {
+    std::terminate();
+  }
+}
+
+auto UringAwaitable::operator=(UringAwaitable &&other) noexcept -> UringAwaitable & {
+  if (this == &other) {
+    return *this;
+  }
+  if (active_operation_ != nullptr || other.active_operation_ != nullptr) {
+    std::terminate();
+  }
+  context_ = std::exchange(other.context_, nullptr);
+  unstarted_operation_ = std::move(other.unstarted_operation_);
+  return *this;
+}
+
+auto UringAwaitable::await_suspend(std::coroutine_handle<> continuation) -> bool {
+  if (context_ == nullptr || !unstarted_operation_ || active_operation_ != nullptr) {
+    throw LifecycleException("io_uring awaitable may only be awaited once");
+  }
+
+  Operation *operation = unstarted_operation_.get();
+  if (!context_->TryStartOperation(unstarted_operation_, continuation)) {
+    return false;
+  }
+  active_operation_ = operation;
+  return true;
+}
+
+auto UringAwaitable::await_resume() -> IoResult {
+  if (active_operation_ != nullptr) {
+    IoResult result = active_operation_->result_;
+    active_operation_ = nullptr;
+    return result;
+  }
+  if (unstarted_operation_) {
+    IoResult result = unstarted_operation_->result_;
+    unstarted_operation_.reset();
+    return result;
+  }
+  throw LifecycleException("io_uring awaitable result was already consumed");
+}
+
+auto UringContext::TryStartOperation(std::unique_ptr<Operation> &operation, std::coroutine_handle<> continuation)
+    -> bool {
+  return runtime_->TryStartAwaitableOperation(operation, continuation);
 }
 
 }  // namespace xrpc::io

@@ -38,7 +38,9 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#include <cassert>
 #include <cerrno>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -116,9 +118,12 @@ void UringContext::Run() {
   runtime_->BeginRun();
   try {
     runtime_->SubmitWakeupPoll();
+    runtime_->FlushSubmissionBatch();
 
     while (!runtime_->stop_requested_.load() || runtime_->pending_io_operations_ > 0 ||
            runtime_->wakeup_poll_pending_) {
+      // No operation may remain staged while the event loop blocks.
+      assert(runtime_->staged_operations_.empty());
       io_uring_cqe *cqe = nullptr;
       const int ret = io_uring_wait_cqe(&runtime_->ring_, &cqe);
       if (ret < 0) {
@@ -128,10 +133,22 @@ void UringContext::Run() {
         throw InternalException(Runtime::MakeErrorMessage("io_uring_wait_cqe", -ret));
       }
 
-      runtime_->ProcessCqe(cqe);
-      while (io_uring_peek_cqe(&runtime_->ring_, &cqe) == 0) {
+      // Bound one event-loop turn so newly staged Recv/Send/Accept operations
+      // cannot be starved by a continuously replenished completion queue.
+      const std::size_t completion_budget = runtime_->staged_operations_.capacity();
+      std::size_t processed_cqes = 0;
+      try {
         runtime_->ProcessCqe(cqe);
+        ++processed_cqes;
+        while (processed_cqes < completion_budget && io_uring_peek_cqe(&runtime_->ring_, &cqe) == 0) {
+          runtime_->ProcessCqe(cqe);
+          ++processed_cqes;
+        }
+      } catch (...) {
+        runtime_->FlushSubmissionBatch();
+        throw;
       }
+      runtime_->FlushSubmissionBatch();
     }
   } catch (...) {
     runtime_->EndRun();

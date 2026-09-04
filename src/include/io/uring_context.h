@@ -3,13 +3,13 @@
  * @brief Declares xRPC's single-threaded io_uring event loop.
  *
  * A `UringContext` owns one io_uring ring and drives asynchronous operations
- * on the thread running `Run()`. `Accept`, `Recv`, and `Send` submit work on
- * that thread and return move-only awaitables that resume
- * the awaiting coroutine with an `IoResult`.
+ * on the thread running `Run()`. `Accept`, `Recv`, and `Send` create deferred,
+ * move-only awaitables. The operation starts when the coroutine suspends and
+ * resumes that coroutine with an `IoResult`.
  *
  * `Post()` and `RequestStop()` form the cross-thread control boundary. They wake the
  * event loop safely, but callbacks themselves always execute on the run thread.
- * `CancelFd()` and all awaitable I/O submission must run on that same thread.
+ * `CancelFd()` and all awaitable I/O starts must run on that same thread.
  */
 
 #pragma once
@@ -39,56 +39,49 @@ struct IoResult {
 };
 
 struct Operation;
-
-namespace detail {
-
-struct AwaitableState {
-  IoResult result_{};
-  bool ready_ = false;
-  std::coroutine_handle<> continuation_;
-};
-
-}  // namespace detail
+class UringContext;
 
 /**
  * @brief Move-only result of an I/O submission for one coroutine awaiter.
  *
- * An awaitable has one awaiter and is used on the `UringContext` run thread.
- * Its completion state is updated by that thread before the coroutine resumes.
+ * An awaitable owns one unstarted operation. `await_suspend()` transfers that
+ * operation to the `UringContext`; `await_resume()` borrows it synchronously
+ * from the CQE handler to read the result. Destroying an awaitable while its
+ * operation is pending is a programming error.
  */
 class UringAwaitable final {
  public:
-  ~UringAwaitable() = default;
+  ~UringAwaitable();
 
   UringAwaitable(const UringAwaitable &) = delete;
   auto operator=(const UringAwaitable &) -> UringAwaitable & = delete;
 
-  UringAwaitable(UringAwaitable &&other) noexcept = default;
-  auto operator=(UringAwaitable &&other) noexcept -> UringAwaitable & = default;
+  UringAwaitable(UringAwaitable &&other) noexcept;
+  auto operator=(UringAwaitable &&other) noexcept -> UringAwaitable &;
 
-  auto await_ready() const noexcept -> bool { return state_->ready_; }
+  auto await_ready() const noexcept -> bool { return false; }
 
-  auto await_suspend(std::coroutine_handle<> continuation) noexcept -> bool {
-    state_->continuation_ = continuation;
-    return !state_->ready_;
-  }
+  auto await_suspend(std::coroutine_handle<> continuation) -> bool;
 
-  auto await_resume() -> IoResult { return state_->result_; }
+  auto await_resume() -> IoResult;
 
  private:
-  explicit UringAwaitable(std::shared_ptr<detail::AwaitableState> state) noexcept : state_(std::move(state)) {}
+  explicit UringAwaitable(UringContext &context, std::unique_ptr<Operation> operation) noexcept;
 
   friend class UringContext;
 
-  std::shared_ptr<detail::AwaitableState> state_;
+  UringContext *context_ = nullptr;
+  std::unique_ptr<Operation> unstarted_operation_;
+  Operation *active_operation_ = nullptr;
 };
 
 /**
  * @brief Single-threaded io_uring execution context with cross-thread control.
  *
  * `Run()` has one owner. `Post()` and `RequestStop()` may be called concurrently
- * from other threads; `Accept()`, `Recv()`, `Send()`, and `CancelFd()` are
- * run-thread-only operations.
+ * from other threads. Awaitable construction is deferred; `Accept()`, `Recv()`,
+ * and `Send()` start on the run thread when awaited. `CancelFd()` is also a
+ * run-thread-only operation.
  */
 class UringContext final {
  public:
@@ -129,7 +122,12 @@ class UringContext final {
   void Post(std::function<void()> fn);
 
  private:
+  friend class UringAwaitable;
+
   struct Runtime;
+
+  [[nodiscard]] auto TryStartOperation(std::unique_ptr<Operation> &operation, std::coroutine_handle<> continuation)
+      -> bool;
 
   std::unique_ptr<Runtime> runtime_;
 };

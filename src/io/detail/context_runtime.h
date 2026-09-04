@@ -40,7 +40,8 @@ struct Operation {
   int fd_ = -1;
   void *buffer_ = nullptr;
   std::size_t length_ = 0;
-  std::weak_ptr<detail::AwaitableState> awaitable_state_;
+  IoResult result_{};
+  std::coroutine_handle<> continuation_;
 };
 
 struct UringContext::Runtime final {
@@ -56,16 +57,12 @@ struct UringContext::Runtime final {
 
   [[nodiscard]] auto IsRunning() const -> bool;
 
-  template <typename Prep>
-  void SubmitAwaitableOperation(std::unique_ptr<Operation> operation, Prep &&prep);
+  [[nodiscard]] auto TryStartAwaitableOperation(std::unique_ptr<Operation> &operation,
+                                                std::coroutine_handle<> continuation) -> bool;
 
   [[nodiscard]] auto AcquireSqe() -> io_uring_sqe *;
 
-  void SubmitPreparedOperation(std::unique_ptr<Operation> operation, bool counts_as_pending_io);
-
-  void BeginSubmissionBatch();
-
-  void EndSubmissionBatch();
+  void SubmitPreparedOperation(std::unique_ptr<Operation> operation, bool counts_as_pending_io) noexcept;
 
   void FlushSubmissionBatch();
 
@@ -76,8 +73,6 @@ struct UringContext::Runtime final {
   void ProcessCancelCqe(io_uring_cqe *cqe);
 
   static auto MakeCancelledResult(const Operation &operation) -> IoResult;
-
-  static void CompleteAwaitableState(Operation &operation, const IoResult &result);
 
   void SubmitCancelFd(int fd);
 
@@ -108,8 +103,6 @@ struct UringContext::Runtime final {
   std::atomic<bool> stop_requested_{false};
 
   std::size_t pending_io_operations_ = 0;
-
-  bool submission_batch_active_ = false;
 
   std::vector<std::unique_ptr<Operation>> staged_operations_;
 

@@ -122,8 +122,8 @@ void UringContext::Runtime::SubmitWakeupPoll() {
  * @brief Handles completion of the eventfd wakeup poll.
  *
  * The wakeup counter and posted callbacks are drained first. During normal
- * operation, a new wakeup poll is submitted. During shutdown, the poll is not
- * rearmed.
+ * operation, a new wakeup poll is staged for the current event-loop turn.
+ * During shutdown, the poll is not rearmed.
  */
 void UringContext::Runtime::ProcessWakeupCqe(io_uring_cqe *cqe) {
   wakeup_poll_pending_ = false;
@@ -143,17 +143,10 @@ void UringContext::Runtime::ProcessWakeupCqe(io_uring_cqe *cqe) {
   }
 
   DrainWakeupCounter();
-  BeginSubmissionBatch();
-  try {
-    DrainPosted();
-    if (!stop_requested_.load()) {
-      SubmitWakeupPoll();
-    }
-  } catch (...) {
-    EndSubmissionBatch();
-    throw;
+  DrainPosted();
+  if (!stop_requested_.load()) {
+    SubmitWakeupPoll();
   }
-  EndSubmissionBatch();
 }
 
 void UringContext::Runtime::SignalWakeup() const {
