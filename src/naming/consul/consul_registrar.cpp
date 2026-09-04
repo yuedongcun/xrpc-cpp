@@ -20,7 +20,7 @@ constexpr std::string_view TCP_CHECK_TIMEOUT = "1s";
 
 }  // namespace
 
-ConsulRegistrar::ConsulRegistrar(const std::string &consul_address) : http_client_(consul_address) {}
+ConsulRegistrar::ConsulRegistrar(ConsulHttpClient http_client) : http_client_(std::move(http_client)) {}
 
 auto ConsulRegistrar::Register(const Options &options) -> Status {
   Status validation_status = ValidateOptions(options);

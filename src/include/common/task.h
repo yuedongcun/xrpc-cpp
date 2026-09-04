@@ -75,7 +75,7 @@
 #include <optional>
 #include <utility>
 
-#include "common/xrpc_exception.h"
+#include "common/abort.h"
 
 namespace xrpc::runtime {
 
@@ -122,7 +122,7 @@ struct TaskStorage {
 
   auto Result() -> T {
     if (!value_.has_value()) {
-      throw LifecycleException("task result is not available");
+      Abort("Task::Result() called before the task produced a value");
     }
     return std::move(*value_);
   }

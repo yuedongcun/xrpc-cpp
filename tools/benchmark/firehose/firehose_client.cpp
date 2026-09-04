@@ -467,7 +467,7 @@ class EpollFirehoseConnection final {
       std::optional<DecodedFirehoseResponse> decoded;
       try {
         decoded = TryDecodeResponse(readable, expected_response_payload_);
-      } catch (...) {
+      } catch (const std::exception &) {
         FailOutstanding();
         return;
       }
@@ -618,7 +618,7 @@ class EpollFirehoseWorker final {
       try {
         start_latch.wait();
         Run(deadline);
-      } catch (...) {
+      } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: thread entry
         exception_ = std::current_exception();
       }
     });
@@ -895,7 +895,7 @@ auto RunEpollFirehoseBenchmark(const FirehoseConfig &config) -> BenchmarkStats {
     for (auto &worker : workers) {
       worker->Join();
     }
-  } catch (...) {
+  } catch (const std::exception &) {
     start_latch.count_down();
     for (auto &worker : workers) {
       worker->Join();

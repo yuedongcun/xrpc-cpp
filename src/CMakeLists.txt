@@ -27,6 +27,7 @@ set(XRPC_SOURCES
     io/uring_context_control.cpp
     protocol/frame_header.cpp
     protocol/frame_codec.cpp
+    common/abort.cpp
     common/xrpc_exception.cpp
     client/tcp_transport.cpp
     client/rpc_client_impl.cpp

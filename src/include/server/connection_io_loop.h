@@ -11,7 +11,6 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <exception>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -73,7 +72,7 @@ class ConnectionIoLoop final {
   void BeginDrain();
 
   // Owner-thread graceful shutdown operation. Not concurrent with Start().
-  void FinishDrain();
+  [[nodiscard]] auto FinishDrain() -> Status;
 
   // Accept-thread command. Posts connection creation to the I/O thread.
   void PostStartConnection(io::Socket client_socket);
@@ -95,6 +94,8 @@ class ConnectionIoLoop final {
   // I/O-context-thread-only operations. They do not take a state lock.
   void StartConnectionOnContext(io::Socket client_socket);
 
+  [[nodiscard]] auto AllocateConnectionId() -> ConnectionId;
+
   void CollectClosedConnections();
 
   void CloseConnectionsOnContext();
@@ -115,7 +116,7 @@ class ConnectionIoLoop final {
   std::unordered_map<ConnectionId, std::unique_ptr<ServerConnection>> connections_;
   ConnectionId next_connection_id_ = 1;
   std::jthread thread_;
-  std::exception_ptr error_;
+  Status error_;
   std::mutex drain_mutex_;
   std::condition_variable drain_cv_;
   std::size_t live_connections_ = 0;

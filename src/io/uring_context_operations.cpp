@@ -50,6 +50,7 @@
 #include <liburing.h>
 #include <sys/socket.h>
 
+#include "common/abort.h"
 #include "common/xrpc_exception.h"
 #include "detail/context_runtime.h"
 
@@ -88,12 +89,12 @@ void UringContext::Runtime::FlushSubmissionBatch() {
       throw InternalException(MakeErrorMessage("io_uring_submit", -ret));
     }
     if (ret == 0) {
-      throw InternalException("io_uring_submit made no progress");
+      Abort("io_uring_submit returned zero while operations remain staged");
     }
 
     const auto submitted = static_cast<std::size_t>(ret);
     if (submitted > staged_operations_.size()) {
-      throw InternalException("io_uring_submit returned an invalid submission count");
+      Abort("io_uring_submit reported more operations than were staged");
     }
     for (std::size_t index = 0; index < submitted; ++index) {
       [[maybe_unused]] Operation *released = staged_operations_[index].release();
@@ -113,9 +114,9 @@ void UringContext::Runtime::FlushSubmissionBatch() {
  */
 auto UringContext::Runtime::TryStartAwaitableOperation(std::unique_ptr<Operation> &operation,
                                                        std::coroutine_handle<> continuation) -> bool {
-  AssertRunThread("io_uring submission");
+  AssertRunThread("io_uring submission attempted outside the owning Run thread");
   if (!operation) {
-    throw LifecycleException("io_uring awaitable operation was already started");
+    Abort("UringContext attempted to start an empty operation");
   }
   if (stop_requested_.load()) {
     operation->result_ = MakeCancelledResult(*operation);
@@ -128,7 +129,7 @@ auto UringContext::Runtime::TryStartAwaitableOperation(std::unique_ptr<Operation
     case OperationType::Send:
       break;
     case OperationType::Unknown:
-      throw InternalException("cannot start an unknown io_uring operation");
+      Abort("UringContext attempted to start an operation with unknown type");
   }
 
   operation->continuation_ = continuation;
@@ -146,7 +147,7 @@ auto UringContext::Runtime::TryStartAwaitableOperation(std::unique_ptr<Operation
       io_uring_prep_send(sqe, operation->fd_, operation->buffer_, operation->length_, MSG_NOSIGNAL);
       break;
     case OperationType::Unknown:
-      std::terminate();
+      Abort("UringContext prepared an operation with unknown type");
   }
 
   Operation *raw_operation = operation.get();
@@ -180,7 +181,7 @@ void UringContext::Runtime::ProcessCqe(io_uring_cqe *cqe) {
 void UringContext::Runtime::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) {
   if (pending_io_operations_ == 0) {
     io_uring_cqe_seen(&ring_, cqe);
-    throw InternalException("io_uring completion without a pending operation");
+    Abort("UringContext received an awaitable CQE with no pending I/O");
   }
   --pending_io_operations_;
 
@@ -195,7 +196,7 @@ void UringContext::Runtime::ProcessAwaitableCqe(Operation &operation, io_uring_c
   io_uring_cqe_seen(&ring_, cqe);
   std::coroutine_handle<> continuation = std::exchange(operation.continuation_, {});
   if (!continuation) {
-    throw InternalException("io_uring completion has no coroutine waiter");
+    Abort("UringContext completed an awaitable operation without a continuation");
   }
   continuation.resume();
 }
@@ -203,7 +204,7 @@ void UringContext::Runtime::ProcessAwaitableCqe(Operation &operation, io_uring_c
 void UringContext::Runtime::ProcessCancelCqe(io_uring_cqe *cqe) {
   if (pending_io_operations_ == 0) {
     io_uring_cqe_seen(&ring_, cqe);
-    throw InternalException("io_uring completion without a pending operation");
+    Abort("UringContext received a cancel CQE with no pending I/O");
   }
   --pending_io_operations_;
 
@@ -228,7 +229,7 @@ auto UringContext::Runtime::MakeCancelledResult(const Operation &operation) -> I
 }
 
 void UringContext::Runtime::SubmitCancelFd(int fd) {
-  AssertRunThread("UringContext::CancelFd");
+  AssertRunThread("UringContext::CancelFd called outside the owning Run thread");
 
   auto operation = std::make_unique<Operation>();
   operation->completion_category_ = Operation::CompletionCategory::Cancel;
@@ -277,7 +278,7 @@ UringAwaitable::UringAwaitable(UringContext &context, std::unique_ptr<Operation>
 
 UringAwaitable::~UringAwaitable() {
   if (active_operation_ != nullptr) {
-    std::terminate();
+    Abort("UringAwaitable destroyed while an I/O operation is pending");
   }
 }
 
@@ -286,7 +287,7 @@ UringAwaitable::UringAwaitable(UringAwaitable &&other) noexcept
       unstarted_operation_(std::move(other.unstarted_operation_)),
       active_operation_(std::exchange(other.active_operation_, nullptr)) {
   if (active_operation_ != nullptr) {
-    std::terminate();
+    Abort("UringAwaitable moved while an I/O operation is pending");
   }
 }
 
@@ -295,7 +296,7 @@ auto UringAwaitable::operator=(UringAwaitable &&other) noexcept -> UringAwaitabl
     return *this;
   }
   if (active_operation_ != nullptr || other.active_operation_ != nullptr) {
-    std::terminate();
+    Abort("UringAwaitable move-assigned while an I/O operation is pending");
   }
   context_ = std::exchange(other.context_, nullptr);
   unstarted_operation_ = std::move(other.unstarted_operation_);
@@ -304,7 +305,7 @@ auto UringAwaitable::operator=(UringAwaitable &&other) noexcept -> UringAwaitabl
 
 auto UringAwaitable::await_suspend(std::coroutine_handle<> continuation) -> bool {
   if (context_ == nullptr || !unstarted_operation_ || active_operation_ != nullptr) {
-    throw LifecycleException("io_uring awaitable may only be awaited once");
+    Abort("UringAwaitable suspended in an invalid or already-consumed state");
   }
 
   Operation *operation = unstarted_operation_.get();
@@ -326,7 +327,7 @@ auto UringAwaitable::await_resume() -> IoResult {
     unstarted_operation_.reset();
     return result;
   }
-  throw LifecycleException("io_uring awaitable result was already consumed");
+  Abort("UringAwaitable resumed without an operation result");
 }
 
 auto UringContext::TryStartOperation(std::unique_ptr<Operation> &operation, std::coroutine_handle<> continuation)

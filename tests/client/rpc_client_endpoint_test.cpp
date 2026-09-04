@@ -25,11 +25,11 @@ class EchoTestServer final {
   EchoTestServer() = default;
 
   void Listen() {
-    listener_.Bind("127.0.0.1", 0);
-    listener_.Listen(8);
+    ASSERT_TRUE(listener_.Bind("127.0.0.1", 0).ok());
+    ASSERT_TRUE(listener_.Listen(8).ok());
   }
 
-  [[nodiscard]] auto port() const -> std::uint16_t { return listener_.LocalPort(); }
+  [[nodiscard]] auto port() const -> std::uint16_t { return listener_.LocalPort().value(); }
 
   void ServeConnections(std::size_t connection_count) {
     for (std::size_t i = 0; i < connection_count; ++i) {
@@ -46,7 +46,7 @@ class EchoTestServer final {
 
  private:
   void ServeOneConnection(std::size_t request_count) {
-    xrpc::io::Socket socket = listener_.Accept();
+    xrpc::io::Socket socket = listener_.Accept().value();
     std::string buffer;
     char chunk[4096];
     xrpc::FrameCodec codec;
@@ -67,13 +67,13 @@ class EchoTestServer final {
           response.status_ = xrpc::Status::Ok();
           response.payload_ = echo_response.SerializeAsString();
 
-          socket.WriteAll(codec.Encode(response));
+          EXPECT_TRUE(socket.WriteAll(codec.Encode(response).value()).ok());
           buffer.erase(0, decoded.consumed_);
           break;
         }
 
         ASSERT_EQ(decoded.error_, xrpc::ProtocolError::NeedMoreData);
-        const ssize_t received = socket.Read(chunk, sizeof(chunk));
+        const ssize_t received = socket.Read(chunk, sizeof(chunk)).value();
         ASSERT_GT(received, 0);
         buffer.append(chunk, static_cast<std::size_t>(received));
       }
@@ -133,7 +133,7 @@ TEST(RpcClientEndpointTest, CallFallsBackToNextEndpointOnConnectFailure) {
   std::jthread server_thread([&]() {
     try {
       server.ServeOnce();
-    } catch (...) {
+    } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: test thread entry
       server_error = std::current_exception();
     }
   });
@@ -171,7 +171,7 @@ TEST(RpcClientEndpointTest, MultiplexedConnectionRoutesByStickyKeyAndReusesPerEn
   std::jthread endpoint0_thread([&]() {
     try {
       endpoint0_server.ServeConnectionRequestBatches({2});
-    } catch (...) {
+    } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: test thread entry
       endpoint0_error = std::current_exception();
     }
   });
@@ -180,7 +180,7 @@ TEST(RpcClientEndpointTest, MultiplexedConnectionRoutesByStickyKeyAndReusesPerEn
   std::jthread endpoint1_thread([&]() {
     try {
       endpoint1_server.ServeConnectionRequestBatches({1});
-    } catch (...) {
+    } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: test thread entry
       endpoint1_error = std::current_exception();
     }
   });

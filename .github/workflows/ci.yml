@@ -35,6 +35,9 @@ jobs:
       - name: Check format
         run: make check-format CLANG_FORMAT=clang-format-20
 
+      - name: Check exception boundaries
+        run: make check-exceptions
+
       - name: Build
         run: make
 

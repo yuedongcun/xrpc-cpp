@@ -30,7 +30,7 @@ struct ProtocolLimits {
 };
 
 /** @brief Builds validated protocol limits for one configured payload bound. */
-[[nodiscard]] auto MakeProtocolLimits(std::size_t max_payload_size) -> ProtocolLimits;
+[[nodiscard]] auto MakeProtocolLimits(std::size_t max_payload_size) -> StatusOr<ProtocolLimits>;
 
 /**
  * @brief Outcome of decoding an xRPC wire frame.
@@ -77,10 +77,10 @@ class FrameCodec final {
   explicit FrameCodec(ProtocolLimits limits = {});
 
   /** @brief Encodes one request into a complete wire frame. */
-  [[nodiscard]] auto Encode(const RequestEnvelope &request) const -> std::string;
+  [[nodiscard]] auto Encode(const RequestEnvelope &request) const -> StatusOr<std::string>;
 
   /** @brief Encodes one response into a complete wire frame. */
-  [[nodiscard]] auto Encode(const ResponseEnvelope &response) const -> std::string;
+  [[nodiscard]] auto Encode(const ResponseEnvelope &response) const -> StatusOr<std::string>;
 
   /**
    * @brief Attempts to decode one request or response from the start of `buf`.

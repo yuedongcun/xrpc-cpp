@@ -91,7 +91,7 @@ class RpcFrameStream final {
    */
   [[nodiscard]] auto FeedBytes(std::string_view bytes) -> FrameStreamFeedResult;
 
-  [[nodiscard]] auto EncodeResponse(ResponseEnvelope &&response) const -> std::string;
+  [[nodiscard]] auto EncodeResponse(ResponseEnvelope &&response) const -> StatusOr<std::string>;
 
  private:
   /**

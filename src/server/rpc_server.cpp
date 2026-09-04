@@ -21,8 +21,12 @@ RpcServer::RpcServer(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 
 auto RpcServer::Create(const RpcServerOptions &options) -> StatusOr<RpcServer> {
   try {
-    return StatusOr<RpcServer>(RpcServer(std::make_unique<Impl>(options)));
-  } catch (...) {
+    StatusOr<ServerConfig> config = NormalizeServerOptions(options);
+    if (!config.ok()) {
+      return StatusOr<RpcServer>(config.status());
+    }
+    return StatusOr<RpcServer>(RpcServer(std::make_unique<Impl>(std::move(config).value())));
+  } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: public API
     return StatusOr<RpcServer>(CaughtExceptionToStatus("failed to create RPC server"));
   }
 }
@@ -33,39 +37,30 @@ auto RpcServer::operator=(RpcServer &&) noexcept -> RpcServer & = default;
 
 auto RpcServer::RegisterMethod(MethodRegistration registration) -> Status {
   try {
-    impl_->RegisterMethod(std::move(registration));
-    return Status::Ok();
-  } catch (...) {
+    return impl_->RegisterMethod(std::move(registration));
+  } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: public API
     return CaughtExceptionToStatus("failed to register RPC method");
   }
 }
 
 auto RpcServer::Listen(std::string_view host, std::uint16_t port) -> Status {
   try {
-    impl_->Listen(host, port);
-    return Status::Ok();
-  } catch (...) {
+    return impl_->Listen(host, port);
+  } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: public API
     return CaughtExceptionToStatus("failed to listen");
   }
 }
 
 auto RpcServer::Run() -> Status {
   try {
-    impl_->Run();
-    return Status::Ok();
-  } catch (...) {
+    return impl_->Run();
+  } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: public API
     return CaughtExceptionToStatus("server runtime failed");
   }
 }
 
 void RpcServer::Stop() { impl_->Stop(); }
 
-auto RpcServer::port() const -> StatusOr<std::uint16_t> {
-  try {
-    return StatusOr<std::uint16_t>(impl_->port());
-  } catch (...) {
-    return StatusOr<std::uint16_t>(CaughtExceptionToStatus("server port is unavailable"));
-  }
-}
+auto RpcServer::port() const -> StatusOr<std::uint16_t> { return StatusOr<std::uint16_t>(impl_->port()); }
 
 }  // namespace xrpc

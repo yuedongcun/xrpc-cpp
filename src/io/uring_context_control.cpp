@@ -36,6 +36,7 @@
 #include <atomic>
 #include <cerrno>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <queue>
@@ -43,6 +44,7 @@
 
 #include <liburing.h>
 
+#include "common/abort.h"
 #include "common/xrpc_exception.h"
 #include "detail/context_runtime.h"
 
@@ -99,9 +101,9 @@ void UringContext::Runtime::DrainPosted() {
  * released to the completion path and remains alive until its CQE is processed.
  */
 void UringContext::Runtime::SubmitWakeupPoll() {
-  AssertRunThread("wakeup poll submission");
+  AssertRunThread("wakeup poll submission attempted outside the owning Run thread");
   if (wakeup_poll_pending_) {
-    throw InternalException("eventfd wakeup poll already pending");
+    Abort("UringContext attempted to arm a second wakeup poll");
   }
 
   auto operation = std::make_unique<Operation>();

@@ -127,7 +127,7 @@ class TcpTransport final {
   };
 
   /** Lazily connects and starts the endpoint's sole response reader. */
-  void EnsureConnectedWithTimeout(std::chrono::milliseconds timeout);
+  [[nodiscard]] auto EnsureConnectedWithTimeout(std::chrono::milliseconds timeout) -> Status;
 
   [[nodiscard]] auto ConnectedFd() const -> int;
 

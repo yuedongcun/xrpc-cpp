@@ -46,7 +46,7 @@ struct ServerConfig {
  * @brief Validates public server options and produces the internal runtime
  * configuration.
  */
-[[nodiscard]] auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerConfig;
+[[nodiscard]] auto NormalizeServerOptions(const RpcServerOptions &options) -> StatusOr<ServerConfig>;
 
 [[nodiscard]] auto ServiceRegistrationEnabled(const ServerConfig &config) -> bool;
 
@@ -58,6 +58,6 @@ struct ServerConfig {
  * concrete registration always uses the actual listening port.
  */
 [[nodiscard]] auto ResolveRegistrarOptions(const ServerConfig &config, std::string_view host, std::uint16_t listen_port)
-    -> ConsulRegistrar::Options;
+    -> StatusOr<ConsulRegistrar::Options>;
 
 }  // namespace xrpc

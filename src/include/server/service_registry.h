@@ -27,9 +27,9 @@ class ServiceRegistry final {
   /**
    * @brief Registers one request handler.
    *
-   * Throws `ConfigException` if the service-method pair is already registered.
+   * Returns `InvalidArgument` if the service-method pair is already registered.
    */
-  void Register(const std::string &service, const std::string &method, RequestHandler handler);
+  [[nodiscard]] auto Register(const std::string &service, const std::string &method, RequestHandler handler) -> Status;
 
   /**
    * @brief Dispatches one request envelope to its registered handler.

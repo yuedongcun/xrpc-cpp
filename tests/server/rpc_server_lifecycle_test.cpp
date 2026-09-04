@@ -47,7 +47,7 @@ auto MakeRequestFrame(std::string message, std::uint64_t request_id) -> std::str
   request_envelope.payload_ = request.SerializeAsString();
 
   xrpc::FrameCodec codec;
-  return codec.Encode(request_envelope);
+  return codec.Encode(request_envelope).value();
 }
 
 auto RecvFrame(xrpc::io::Socket &socket) -> std::string {
@@ -64,7 +64,7 @@ auto RecvFrame(xrpc::io::Socket &socket) -> std::string {
     }
 
     EXPECT_EQ(decoded.error_, xrpc::ProtocolError::NeedMoreData);
-    const ssize_t received = socket.Read(chunk, sizeof(chunk));
+    const ssize_t received = socket.Read(chunk, sizeof(chunk)).value();
     if (received <= 0) {
       throw std::runtime_error("failed to receive frame");
     }
@@ -94,9 +94,9 @@ TEST(RpcServerLifecycleTest, StopUnblocksBlockingRun) {
   std::jthread run_thread([&]() { run_finished.set_value(server.Run()); });
 
   xrpc::io::Socket socket;
-  socket.Connect("127.0.0.1", port_result.value(), WaitTimeout);
-  socket.SetReadWriteTimeout(WaitTimeout);
-  socket.WriteAll(MakeRequestFrame("ready", 1));
+  ASSERT_TRUE(socket.Connect("127.0.0.1", port_result.value(), WaitTimeout).ok());
+  ASSERT_TRUE(socket.SetReadWriteTimeout(WaitTimeout).ok());
+  ASSERT_TRUE(socket.WriteAll(MakeRequestFrame("ready", 1)).ok());
   (void)RecvFrame(socket);
 
   server.Stop();
@@ -118,7 +118,7 @@ TEST(RpcServerLifecycleTest, StopBeforeRunClosesRuntimeAndRejectsRun) {
   EXPECT_EQ(server.Run().code(), xrpc::StatusCode::FailedPrecondition);
 
   xrpc::io::Socket socket;
-  EXPECT_THROW(socket.Connect("127.0.0.1", port_result.value(), std::chrono::milliseconds(100)), xrpc::io::SocketError);
+  EXPECT_FALSE(socket.Connect("127.0.0.1", port_result.value(), std::chrono::milliseconds(100)).ok());
 }
 
 TEST(RpcServerLifecycleTest, StopDrainsAdmittedHandlerAndWritesResponse) {
@@ -152,9 +152,9 @@ TEST(RpcServerLifecycleTest, StopDrainsAdmittedHandlerAndWritesResponse) {
   std::jthread run_thread([&]() { run_finished.set_value(server.Run()); });
 
   xrpc::io::Socket client_socket;
-  client_socket.Connect("127.0.0.1", port_result.value(), WaitTimeout);
-  client_socket.SetReadWriteTimeout(WaitTimeout);
-  client_socket.WriteAll(MakeRequestFrame("first", 1));
+  ASSERT_TRUE(client_socket.Connect("127.0.0.1", port_result.value(), WaitTimeout).ok());
+  ASSERT_TRUE(client_socket.SetReadWriteTimeout(WaitTimeout).ok());
+  ASSERT_TRUE(client_socket.WriteAll(MakeRequestFrame("first", 1)).ok());
   ASSERT_EQ(handler_started_future.wait_for(WaitTimeout), std::future_status::ready);
 
   std::jthread first_stop([&]() { server.Stop(); });
@@ -163,10 +163,7 @@ TEST(RpcServerLifecycleTest, StopDrainsAdmittedHandlerAndWritesResponse) {
   second_stop.join();
 
   EXPECT_EQ(run_finished_future.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
-  try {
-    client_socket.WriteAll(MakeRequestFrame("after-stop", 2));
-  } catch (const xrpc::io::SocketError &) {
-  }
+  (void)client_socket.WriteAll(MakeRequestFrame("after-stop", 2));
 
   release_handler.set_value();
   const std::string response_frame = RecvFrame(client_socket);
@@ -196,7 +193,7 @@ TEST(RpcServerLifecycleTest, DestructorClosesListeningRuntime) {
   }
 
   xrpc::io::Socket socket;
-  EXPECT_THROW(socket.Connect("127.0.0.1", port, std::chrono::milliseconds(100)), xrpc::io::SocketError);
+  EXPECT_FALSE(socket.Connect("127.0.0.1", port, std::chrono::milliseconds(100)).ok());
 }
 
 TEST(RpcServerLifecycleTest, ListenTwiceReturnsFailedPrecondition) {
@@ -225,9 +222,9 @@ TEST(RpcServerLifecycleTest, RegisterMethodAfterRunStartsReturnsFailedPreconditi
 
   std::jthread run_thread([&server]() { EXPECT_TRUE(server.Run().ok()); });
   xrpc::io::Socket socket;
-  socket.Connect("127.0.0.1", port_result.value(), WaitTimeout);
-  socket.SetReadWriteTimeout(WaitTimeout);
-  socket.WriteAll(MakeRequestFrame("ready", 1));
+  ASSERT_TRUE(socket.Connect("127.0.0.1", port_result.value(), WaitTimeout).ok());
+  ASSERT_TRUE(socket.SetReadWriteTimeout(WaitTimeout).ok());
+  ASSERT_TRUE(socket.WriteAll(MakeRequestFrame("ready", 1)).ok());
   (void)RecvFrame(socket);
 
   const xrpc::Status status =
@@ -371,13 +368,13 @@ TEST(RpcServerLifecycleTest, PerConnectionInflightLimitReturnsResourceExhausted)
   std::jthread run_thread([&server]() { EXPECT_TRUE(server.Run().ok()); });
 
   xrpc::io::Socket client_socket;
-  client_socket.Connect("127.0.0.1", port_result.value(), WaitTimeout);
-  client_socket.WriteAll(MakeRequestFrame("first", 1));
+  ASSERT_TRUE(client_socket.Connect("127.0.0.1", port_result.value(), WaitTimeout).ok());
+  ASSERT_TRUE(client_socket.WriteAll(MakeRequestFrame("first", 1)).ok());
 
   const bool handler_started_before_timeout = handler_started_future.wait_for(WaitTimeout) == std::future_status::ready;
   EXPECT_TRUE(handler_started_before_timeout);
   if (handler_started_before_timeout) {
-    client_socket.WriteAll(MakeRequestFrame("second", 2));
+    EXPECT_TRUE(client_socket.WriteAll(MakeRequestFrame("second", 2)).ok());
     const std::string rejection_frame = RecvFrame(client_socket);
     xrpc::FrameCodec codec;
     const xrpc::FrameDecodeResult decoded = codec.Decode(rejection_frame);

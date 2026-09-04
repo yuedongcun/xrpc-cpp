@@ -50,6 +50,7 @@
 
 #include <liburing.h>
 
+#include "common/abort.h"
 #include "common/xrpc_exception.h"
 #include "detail/context_runtime.h"
 
@@ -96,7 +97,7 @@ auto UringContext::Runtime::CurrentThreadId() -> pid_t {
 void UringContext::Runtime::BeginRun() {
   pid_t expected = 0;
   if (!run_thread_id_.compare_exchange_strong(expected, CurrentThreadId())) {
-    throw LifecycleException("UringContext::Run is not reentrant");
+    Abort("UringContext::Run called while another Run thread owns the context");
   }
 }
 
@@ -104,7 +105,7 @@ void UringContext::Runtime::EndRun() { run_thread_id_.store(0); }
 
 void UringContext::Runtime::AssertRunThread(std::string_view action) const {
   if (run_thread_id_.load() != CurrentThreadId()) {
-    throw LifecycleException(std::string(action) + " must run on the UringContext thread");
+    Abort(action);
   }
 }
 
@@ -116,45 +117,43 @@ UringContext::~UringContext() = default;
 
 void UringContext::Run() {
   runtime_->BeginRun();
-  try {
-    runtime_->SubmitWakeupPoll();
-    runtime_->FlushSubmissionBatch();
+  struct RunOwnership final {
+    Runtime &runtime_;
+    ~RunOwnership() { runtime_.EndRun(); }
+  } run_ownership{*runtime_};
 
-    while (!runtime_->stop_requested_.load() || runtime_->pending_io_operations_ > 0 ||
-           runtime_->wakeup_poll_pending_) {
-      // No operation may remain staged while the event loop blocks.
-      assert(runtime_->staged_operations_.empty());
-      io_uring_cqe *cqe = nullptr;
-      const int ret = io_uring_wait_cqe(&runtime_->ring_, &cqe);
-      if (ret < 0) {
-        if (ret == -EINTR) {
-          continue;
-        }
-        throw InternalException(Runtime::MakeErrorMessage("io_uring_wait_cqe", -ret));
+  runtime_->SubmitWakeupPoll();
+  runtime_->FlushSubmissionBatch();
+
+  while (!runtime_->stop_requested_.load() || runtime_->pending_io_operations_ > 0 || runtime_->wakeup_poll_pending_) {
+    // No operation may remain staged while the event loop blocks.
+    assert(runtime_->staged_operations_.empty());
+    io_uring_cqe *cqe = nullptr;
+    const int ret = io_uring_wait_cqe(&runtime_->ring_, &cqe);
+    if (ret < 0) {
+      if (ret == -EINTR) {
+        continue;
       }
+      throw InternalException(Runtime::MakeErrorMessage("io_uring_wait_cqe", -ret));
+    }
 
-      // Bound one event-loop turn so newly staged Recv/Send/Accept operations
-      // cannot be starved by a continuously replenished completion queue.
-      const std::size_t completion_budget = runtime_->staged_operations_.capacity();
-      std::size_t processed_cqes = 0;
-      try {
+    // Bound one event-loop turn so newly staged Recv/Send/Accept operations
+    // cannot be starved by a continuously replenished completion queue.
+    const std::size_t completion_budget = runtime_->staged_operations_.capacity();
+    std::size_t processed_cqes = 0;
+    try {
+      runtime_->ProcessCqe(cqe);
+      ++processed_cqes;
+      while (processed_cqes < completion_budget && io_uring_peek_cqe(&runtime_->ring_, &cqe) == 0) {
         runtime_->ProcessCqe(cqe);
         ++processed_cqes;
-        while (processed_cqes < completion_budget && io_uring_peek_cqe(&runtime_->ring_, &cqe) == 0) {
-          runtime_->ProcessCqe(cqe);
-          ++processed_cqes;
-        }
-      } catch (...) {
-        runtime_->FlushSubmissionBatch();
-        throw;
       }
+    } catch (const std::exception &) {  // XRPC_EXCEPTION_GUARD: flush staged SQEs before propagation
       runtime_->FlushSubmissionBatch();
+      throw;
     }
-  } catch (...) {
-    runtime_->EndRun();
-    throw;
+    runtime_->FlushSubmissionBatch();
   }
-  runtime_->EndRun();
 }
 
 void UringContext::RequestStop() { runtime_->RequestStop(); }

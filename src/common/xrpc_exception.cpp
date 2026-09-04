@@ -33,15 +33,15 @@ auto CaughtExceptionToStatus(StatusCode non_standard_exception_code, std::string
 
   try {
     std::rethrow_exception(current_exception);
-  } catch (const XrpcException &exception) {
+  } catch (const XrpcException &exception) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: exception translator
     return exception.status();
-  } catch (const std::bad_alloc &) {
+  } catch (const std::bad_alloc &) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: exception translator
     return {StatusCode::ResourceExhausted, "memory allocation failed"};
-  } catch (const std::invalid_argument &exception) {
+  } catch (const std::invalid_argument &exception) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: exception translator
     return {StatusCode::InvalidArgument, exception.what()};
-  } catch (const std::exception &exception) {
+  } catch (const std::exception &exception) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: exception translator
     return {StatusCode::Internal, exception.what()};
-  } catch (...) {
+  } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: exception-to-status translator
     return {non_standard_exception_code, std::string(non_standard_exception_message)};
   }
 }

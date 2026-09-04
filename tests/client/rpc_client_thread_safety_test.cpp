@@ -28,16 +28,16 @@ class EchoTestServer final {
   EchoTestServer() = default;
 
   void Listen() {
-    listener_.Bind("127.0.0.1", 0);
-    listener_.Listen(8);
+    ASSERT_TRUE(listener_.Bind("127.0.0.1", 0).ok());
+    ASSERT_TRUE(listener_.Listen(8).ok());
   }
 
-  [[nodiscard]] auto port() const -> std::uint16_t { return listener_.LocalPort(); }
+  [[nodiscard]] auto port() const -> std::uint16_t { return listener_.LocalPort().value(); }
 
   void ServeSingleConnectionOutOfOrderBatch(std::size_t request_count) {
     // Respond in reverse order to prove concurrent callers are matched by
     // request id, not by write order on the shared TCP connection.
-    xrpc::io::Socket socket = listener_.Accept();
+    xrpc::io::Socket socket = listener_.Accept().value();
     std::string buffer;
     xrpc::FrameCodec codec;
     std::vector<xrpc::RequestEnvelope> requests;
@@ -47,14 +47,14 @@ class EchoTestServer final {
     }
 
     for (auto it = requests.rbegin(); it != requests.rend(); ++it) {
-      socket.WriteAll(codec.Encode(MakeEchoResponse(*it)));
+      EXPECT_TRUE(socket.WriteAll(codec.Encode(MakeEchoResponse(*it)).value()).ok());
     }
     socket.Close();
   }
 
   void ServeOneRequestAfterRelease(std::promise<void> &request_received, std::shared_future<void> release_response,
                                    bool &extra_request_received) {
-    xrpc::io::Socket socket = listener_.Accept();
+    xrpc::io::Socket socket = listener_.Accept().value();
     std::string buffer;
     xrpc::FrameCodec codec;
     const xrpc::RequestEnvelope request = ReadRequest(socket, buffer, codec);
@@ -68,7 +68,7 @@ class EchoTestServer final {
     const int poll_result = ::poll(&client, 1, 50);
     extra_request_received = poll_result > 0 && (client.revents & POLLIN) != 0;
 
-    socket.WriteAll(codec.Encode(MakeEchoResponse(request)));
+    EXPECT_TRUE(socket.WriteAll(codec.Encode(MakeEchoResponse(request)).value()).ok());
     socket.Close();
   }
 
@@ -92,7 +92,11 @@ class EchoTestServer final {
         throw std::runtime_error("failed to decode request frame");
       }
 
-      const ssize_t received = socket.Read(chunk, sizeof(chunk));
+      xrpc::StatusOr<ssize_t> read_result = socket.Read(chunk, sizeof(chunk));
+      if (!read_result.ok()) {
+        throw std::runtime_error(read_result.status().message());
+      }
+      const ssize_t received = std::move(read_result).value();
       if (received <= 0) {
         throw std::runtime_error("connection closed before request frame was complete");
       }
@@ -154,7 +158,7 @@ TEST(RpcClientThreadSafetyTest, ConnectionSupportsConcurrentCallsOnSharedConnect
   std::jthread server_thread([&]() {
     try {
       server.ServeSingleConnectionOutOfOrderBatch(4);
-    } catch (...) {
+    } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: test thread entry
       server_error = std::current_exception();
     }
   });
@@ -189,7 +193,7 @@ TEST(RpcClientThreadSafetyTest, MaxInflightPerEndpointFailsFastWithoutSendingSec
   std::jthread server_thread([&]() {
     try {
       server.ServeOneRequestAfterRelease(request_received, release_response_future, extra_request_received);
-    } catch (...) {
+    } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: test thread entry
       server_error = std::current_exception();
     }
   });

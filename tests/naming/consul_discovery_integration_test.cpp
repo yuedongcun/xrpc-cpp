@@ -24,14 +24,14 @@ namespace {
 class EchoTestServer final {
  public:
   void Listen() {
-    listener_.Bind("127.0.0.1", 0);
-    listener_.Listen(8);
+    ASSERT_TRUE(listener_.Bind("127.0.0.1", 0).ok());
+    ASSERT_TRUE(listener_.Listen(8).ok());
   }
 
-  [[nodiscard]] auto port() const -> std::uint16_t { return listener_.LocalPort(); }
+  [[nodiscard]] auto port() const -> std::uint16_t { return listener_.LocalPort().value(); }
 
   void ServeOnce() {
-    xrpc::io::Socket socket = listener_.Accept();
+    xrpc::io::Socket socket = listener_.Accept().value();
     std::string buffer;
     char chunk[4096];
     xrpc::FrameCodec codec;
@@ -48,12 +48,12 @@ class EchoTestServer final {
         xrpc::ResponseEnvelope response_envelope;
         response_envelope.request_id_ = decoded.request_->request_id_;
         response_envelope.payload_ = response.SerializeAsString();
-        socket.WriteAll(codec.Encode(response_envelope));
+        EXPECT_TRUE(socket.WriteAll(codec.Encode(response_envelope).value()).ok());
         return;
       }
 
       ASSERT_EQ(decoded.error_, xrpc::ProtocolError::NeedMoreData);
-      const ssize_t received = socket.Read(chunk, sizeof(chunk));
+      const ssize_t received = socket.Read(chunk, sizeof(chunk)).value();
       ASSERT_GT(received, 0);
       buffer.append(chunk, static_cast<std::size_t>(received));
     }
@@ -70,8 +70,8 @@ auto ConsulIntegrationEnabled() -> bool {
 
 void ConsulRequest(std::string_view method, std::string_view path, std::string_view body) {
   xrpc::io::Socket socket;
-  socket.Connect("127.0.0.1", 8500, std::chrono::milliseconds(500));
-  socket.SetReadWriteTimeout(std::chrono::milliseconds(500));
+  ASSERT_TRUE(socket.Connect("127.0.0.1", 8500, std::chrono::milliseconds(500)).ok());
+  ASSERT_TRUE(socket.SetReadWriteTimeout(std::chrono::milliseconds(500)).ok());
 
   std::string request;
   request.append(method);
@@ -81,12 +81,12 @@ void ConsulRequest(std::string_view method, std::string_view path, std::string_v
   request.append(std::to_string(body.size()));
   request.append("\r\n\r\n");
   request.append(body);
-  socket.WriteAll(request);
+  ASSERT_TRUE(socket.WriteAll(request).ok());
 
   std::string response;
   char chunk[1024];
   while (true) {
-    const ssize_t received = socket.Read(chunk, sizeof(chunk));
+    const ssize_t received = socket.Read(chunk, sizeof(chunk)).value();
     if (received == 0) {
       break;
     }
@@ -135,7 +135,7 @@ TEST(ConsulDiscoveryIntegrationTest, DiscoversRegisteredEndpointAndCallsEcho) {
   std::jthread server_thread([&]() {
     try {
       server.ServeOnce();
-    } catch (...) {
+    } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: test thread entry
       server_error = std::current_exception();
     }
   });

@@ -6,10 +6,12 @@
 #include "server/rpc_frame_stream.h"
 
 #include <cassert>
+#include <exception>
 #include <string>
 #include <utility>
 
-#include "common/xrpc_exception.h"
+#include "common/abort.h"
+
 #include "protocol/frame_codec.h"
 #include "protocol/rpc_envelope.h"
 
@@ -38,7 +40,7 @@ auto RpcFrameStream::ByteBuffer::ReadableBytes() const -> std::string_view {
 
 void RpcFrameStream::ByteBuffer::Consume(std::size_t n) {
   if (n > ReadableSize()) {
-    throw LifecycleException("ByteBuffer::Consume exceeds readable bytes");
+    Abort("RpcFrameStream attempted to consume beyond readable bytes");
   }
   read_offset_ += n;
   if (read_offset_ == buffer_.size()) {
@@ -100,7 +102,7 @@ auto RpcFrameStream::FeedBytes(std::string_view bytes) -> FrameStreamFeedResult 
   return {.requests_ = std::move(requests), .closed_ = closed_};
 }
 
-auto RpcFrameStream::EncodeResponse(ResponseEnvelope &&response) const -> std::string {
+auto RpcFrameStream::EncodeResponse(ResponseEnvelope &&response) const -> StatusOr<std::string> {
   FrameCodec codec(protocol_limits_);
   return codec.Encode(response);
 }

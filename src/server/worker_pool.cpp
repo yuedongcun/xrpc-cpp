@@ -4,19 +4,19 @@
  */
 #include "server/worker_pool.h"
 
-#include <stdexcept>
+#include <exception>
 #include <utility>
 
-#include "common/xrpc_exception.h"
+#include "common/abort.h"
 
 namespace xrpc {
 
 WorkerPool::WorkerPool(std::size_t worker_count, std::size_t max_pending_jobs) : max_pending_jobs_(max_pending_jobs) {
   if (worker_count == 0) {
-    throw ConfigException("WorkerPool requires at least one worker");
+    Abort("WorkerPool requires at least one worker");
   }
   if (max_pending_jobs_ == 0) {
-    throw ConfigException("WorkerPool requires a positive pending job limit");
+    Abort("WorkerPool requires positive pending-job capacity");
   }
 
   worker_queues_.reserve(worker_count);
@@ -33,7 +33,7 @@ WorkerPool::~WorkerPool() { DrainAndJoin(); }
 
 auto WorkerPool::TrySubmitBatch(std::function<void()> job, std::size_t logical_jobs) -> bool {
   if (logical_jobs == 0) {
-    throw std::invalid_argument("WorkerPool::TrySubmitBatch requires at least one logical job");
+    Abort("WorkerPool::TrySubmitBatch requires at least one logical job");
   }
   if (!accepting_submissions_.load()) {
     return false;
@@ -56,7 +56,7 @@ auto WorkerPool::TrySubmitBatch(std::function<void()> job, std::size_t logical_j
     }
     queue.jobs_.push(WorkerJob{.run_ = std::move(job), .logical_jobs_ = logical_jobs});
     queue.pending_entries_.fetch_add(1);
-  } catch (...) {
+  } catch (const std::exception &) {  // XRPC_EXCEPTION_GUARD: roll back reserved capacity
     ReleasePendingJobs(logical_jobs);
     throw;
   }

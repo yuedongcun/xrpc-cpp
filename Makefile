@@ -4,7 +4,7 @@ CMAKE_ARGS ?=
 CLANG_FORMAT ?= clang-format-20
 
 .DEFAULT_GOAL := all
-.PHONY: all configure release test format check-format check-tidy clangd-db dev clean
+.PHONY: all configure release test format check-format check-tidy check-exceptions clangd-db dev clean
 
 FORMAT_FILES = $(shell find include src -type f \( \
 	-name '*.h' -o -name '*.hh' -o -name '*.hpp' -o \
@@ -51,6 +51,9 @@ check-format:
 		exit 1; \
 	}
 	@$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_FILES)
+
+check-exceptions:
+	@python3 tools/check_exception_boundaries.py
 
 check-tidy:
 	@command -v run-clang-tidy >/dev/null 2>&1 || { \

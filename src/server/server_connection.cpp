@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cassert>
 #include <memory>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
@@ -29,13 +30,13 @@ void ExecuteDispatchBatchOnWorker(ConnectionId connection_id, ConnectionIoLoop &
 
   for (RequestEnvelope &request : requests) {
     ResponseEnvelope response = registry.Dispatch(std::move(request));
-    try {
-      FrameCodec codec(protocol_limits);
-      batch_response_bytes.append(codec.Encode(response));
-      ++successful_jobs;
-    } catch (...) {
+    FrameCodec codec(protocol_limits);
+    StatusOr<std::string> encoded = codec.Encode(response);
+    if (!encoded.ok()) {
       break;
     }
+    batch_response_bytes.append(std::move(encoded).value());
+    ++successful_jobs;
   }
 
   if (successful_jobs > 0) {
@@ -182,7 +183,7 @@ void ServerConnection::OnEncodedDispatchComplete(std::string &&response_bytes, s
   }
   try {
     (void)EnqueueWrite(std::move(response_bytes));
-  } catch (...) {
+  } catch (const std::bad_alloc &) {  // XRPC_EXCEPTION_GUARD: isolate allocation failure to this connection
     Close();
   }
   TryFinishDrain();
@@ -319,12 +320,12 @@ auto ServerConnection::RejectForBackpressure(RequestEnvelope &&request, std::str
   response.request_id_ = request.request_id_;
   response.status_ = {StatusCode::ResourceExhausted, std::move(message)};
 
-  try {
-    return EnqueueWrite(frame_stream_.EncodeResponse(std::move(response)));
-  } catch (...) {
+  StatusOr<std::string> encoded = frame_stream_.EncodeResponse(std::move(response));
+  if (!encoded.ok()) {
     Close();
     return false;
   }
+  return EnqueueWrite(std::move(encoded).value());
 }
 
 void ServerConnection::TryFinishDrain() {

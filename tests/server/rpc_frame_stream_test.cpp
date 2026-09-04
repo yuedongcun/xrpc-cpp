@@ -26,7 +26,7 @@ auto MakeRequestFrame(std::string payload, std::uint64_t request_id) -> std::str
   request.payload_ = std::move(payload);
 
   xrpc::FrameCodec codec;
-  return codec.Encode(request);
+  return codec.Encode(request).value();
 }
 
 auto DecodeResponseFrame(const std::string &frame) -> xrpc::ResponseEnvelope {
@@ -66,7 +66,7 @@ TEST(RpcFrameStreamTest, FeedBytesDecodesRepeatedAndChangedRoutingMetadata) {
   different_route_request.payload_ = "payload";
 
   xrpc::FrameCodec codec;
-  const std::string changed = codec.Encode(different_route_request);
+  const std::string changed = codec.Encode(different_route_request).value();
 
   const xrpc::FrameStreamFeedResult fed = frame_stream.FeedBytes(repeated_one + repeated_two + changed);
   EXPECT_FALSE(fed.closed_);
@@ -127,7 +127,7 @@ TEST(RpcFrameStreamTest, FeedBytesClosesFrameStreamWhenDeclaredPayloadExceedsDef
 }
 
 TEST(RpcFrameStreamTest, FeedBytesClosesFrameStreamWhenPayloadExceedsConfiguredLimit) {
-  xrpc::RpcFrameStream frame_stream(xrpc::MakeProtocolLimits(3));
+  xrpc::RpcFrameStream frame_stream(xrpc::MakeProtocolLimits(3).value());
 
   xrpc::RequestEnvelope request;
   request.request_id_ = 501;
@@ -136,7 +136,7 @@ TEST(RpcFrameStreamTest, FeedBytesClosesFrameStreamWhenPayloadExceedsConfiguredL
   request.payload_ = "1234";
 
   xrpc::FrameCodec default_codec;
-  const xrpc::FrameStreamFeedResult result = frame_stream.FeedBytes(default_codec.Encode(request));
+  const xrpc::FrameStreamFeedResult result = frame_stream.FeedBytes(default_codec.Encode(request).value());
 
   EXPECT_TRUE(result.closed_);
   EXPECT_TRUE(result.requests_.empty());
@@ -150,7 +150,7 @@ TEST(RpcFrameStreamTest, EncodeResponseBuildsResponseFrame) {
   response.status_ = xrpc::Status::Ok();
   response.payload_ = "payload";
 
-  const std::string frame = frame_stream.EncodeResponse(std::move(response));
+  const std::string frame = frame_stream.EncodeResponse(std::move(response)).value();
   const xrpc::ResponseEnvelope decoded = DecodeResponseFrame(frame);
   EXPECT_EQ(decoded.request_id_, 301U);
   EXPECT_TRUE(decoded.status_.ok());
@@ -163,7 +163,7 @@ TEST(RpcFrameStreamTest, EncodeResponsePreservesErrorStatus) {
   response.request_id_ = 402;
   response.status_ = {xrpc::StatusCode::Internal, "handler failed"};
 
-  const std::string response_frame = frame_stream.EncodeResponse(std::move(response));
+  const std::string response_frame = frame_stream.EncodeResponse(std::move(response)).value();
   const xrpc::ResponseEnvelope decoded_response = DecodeResponseFrame(response_frame);
 
   EXPECT_EQ(decoded_response.request_id_, 402U);

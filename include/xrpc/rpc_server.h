@@ -63,16 +63,16 @@ auto MakeMethodRegistration(std::string service_name, std::string method_name, F
           return StatusOr<std::string>(Status{StatusCode::Internal, "failed to serialize protobuf response"});
         }
         return StatusOr<std::string>(std::move(encoded));
-      } catch (const std::exception &exception) {
+      } catch (const std::exception &exception) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: user handler
         return StatusOr<std::string>(Status{StatusCode::Internal, exception.what()});
-      } catch (...) {
+      } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: user handler
         return StatusOr<std::string>(Status{StatusCode::Internal, "handler threw unknown exception"});
       }
     };
     return StatusOr<MethodRegistration>(std::move(registration));
-  } catch (const std::exception &exception) {
+  } catch (const std::exception &exception) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: public template API
     return StatusOr<MethodRegistration>(Status{StatusCode::Internal, exception.what()});
-  } catch (...) {
+  } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: public template API
     return StatusOr<MethodRegistration>(Status{StatusCode::Internal, "failed to create method registration"});
   }
 }

@@ -55,8 +55,8 @@ auto MakeSlowEchoHandler() -> xrpc::RequestHandler {
 
 auto MakeRegistry(xrpc::RequestHandler handler) -> xrpc::ServiceRegistry {
   xrpc::ServiceRegistry registry;
-  registry.Register("EchoService", "Echo", handler);
-  registry.Register("EchoService", "SlowEcho", std::move(handler));
+  EXPECT_TRUE(registry.Register("EchoService", "Echo", handler).ok());
+  EXPECT_TRUE(registry.Register("EchoService", "SlowEcho", std::move(handler)).ok());
   return registry;
 }
 
@@ -77,7 +77,7 @@ auto MakeRequestFrame(std::string message, std::uint64_t request_id) -> std::str
   request_envelope.payload_ = request.SerializeAsString();
 
   xrpc::FrameCodec codec;
-  return codec.Encode(request_envelope);
+  return codec.Encode(request_envelope).value();
 }
 
 auto RecvFrame(xrpc::io::Socket &socket, std::string &buffer) -> std::string {
@@ -92,7 +92,7 @@ auto RecvFrame(xrpc::io::Socket &socket, std::string &buffer) -> std::string {
       return frame;
     }
 
-    const ssize_t received = socket.Read(chunk, sizeof(chunk));
+    const ssize_t received = socket.Read(chunk, sizeof(chunk)).value();
     if (received <= 0) {
       break;
     }
@@ -134,14 +134,14 @@ struct ConnectedPair {
 
 auto MakeConnectedPair() -> ConnectedPair {
   xrpc::io::Socket listen_socket;
-  listen_socket.Bind("127.0.0.1", 0);
-  listen_socket.Listen(1);
+  EXPECT_TRUE(listen_socket.Bind("127.0.0.1", 0).ok());
+  EXPECT_TRUE(listen_socket.Listen(1).ok());
 
   xrpc::io::Socket client_socket;
-  client_socket.Connect("127.0.0.1", listen_socket.LocalPort());
-  client_socket.SetReadWriteTimeout(WaitTimeout);
+  EXPECT_TRUE(client_socket.Connect("127.0.0.1", listen_socket.LocalPort().value()).ok());
+  EXPECT_TRUE(client_socket.SetReadWriteTimeout(WaitTimeout).ok());
 
-  return ConnectedPair{.client_socket_ = std::move(client_socket), .server_socket_ = listen_socket.Accept()};
+  return ConnectedPair{.client_socket_ = std::move(client_socket), .server_socket_ = listen_socket.Accept().value()};
 }
 
 }  // namespace
@@ -156,13 +156,13 @@ TEST(ServerConnectionTest, EchoesSingleFrameAndClosesAfterPeerShutdown) {
   loop.PostStartConnection(std::move(pair.server_socket_));
 
   std::string received_buffer;
-  pair.client_socket_.WriteAll(MakeRequestFrame("hello", 7));
+  EXPECT_TRUE(pair.client_socket_.WriteAll(MakeRequestFrame("hello", 7)).ok());
   pair.client_socket_.ShutdownWrite();
 
   const std::string response = RecvFrame(pair.client_socket_, received_buffer);
   pair.client_socket_.Close();
 
-  loop.FinishDrain();
+  EXPECT_TRUE(loop.FinishDrain().ok());
   EXPECT_EQ(DecodeEchoMessage(response, 7), "echo: hello");
 }
 
@@ -176,15 +176,15 @@ TEST(ServerConnectionTest, ServerDrainClosesConnection) {
   loop.PostStartConnection(std::move(pair.server_socket_));
 
   std::string received_buffer;
-  pair.client_socket_.WriteAll(MakeRequestFrame("before-drain", 8));
+  EXPECT_TRUE(pair.client_socket_.WriteAll(MakeRequestFrame("before-drain", 8)).ok());
   const std::string response = RecvFrame(pair.client_socket_, received_buffer);
   EXPECT_EQ(DecodeEchoMessage(response, 8), "echo: before-drain");
 
   loop.BeginDrain();
 
-  loop.FinishDrain();
+  EXPECT_TRUE(loop.FinishDrain().ok());
   char byte = 0;
-  EXPECT_EQ(pair.client_socket_.Read(&byte, sizeof(byte)), 0);
+  EXPECT_EQ(pair.client_socket_.Read(&byte, sizeof(byte)).value(), 0);
   pair.client_socket_.Close();
 }
 
@@ -200,11 +200,11 @@ TEST(ServerConnectionTest, HandlesHalfPacketsAndStickyPackets) {
   const std::string first_request = MakeRequestFrame("first", 11);
   const std::string second_request = MakeRequestFrame("second", 12);
   const std::size_t split = first_request.size() / 2;
-  pair.client_socket_.WriteAll(std::string_view(first_request.data(), split));
+  EXPECT_TRUE(pair.client_socket_.WriteAll(std::string_view(first_request.data(), split)).ok());
 
   std::string remainder_and_second(first_request.data() + split, first_request.size() - split);
   remainder_and_second.append(second_request);
-  pair.client_socket_.WriteAll(remainder_and_second);
+  EXPECT_TRUE(pair.client_socket_.WriteAll(remainder_and_second).ok());
   pair.client_socket_.ShutdownWrite();
 
   std::string received_buffer;
@@ -212,7 +212,7 @@ TEST(ServerConnectionTest, HandlesHalfPacketsAndStickyPackets) {
   const std::string second_response = RecvFrame(pair.client_socket_, received_buffer);
   pair.client_socket_.Close();
 
-  loop.FinishDrain();
+  EXPECT_TRUE(loop.FinishDrain().ok());
   EXPECT_EQ(DecodeEchoMessage(first_response, 11), "echo: first");
   EXPECT_EQ(DecodeEchoMessage(second_response, 12), "echo: second");
 }
@@ -228,7 +228,7 @@ TEST(ServerConnectionTest, HandlesPipelinedRequestsOnOneConnection) {
 
   const std::string first_request = MakeRequestFrame("first", 21);
   const std::string second_request = MakeRequestFrame("second", 22);
-  pair.client_socket_.WriteAll(first_request + second_request);
+  EXPECT_TRUE(pair.client_socket_.WriteAll(first_request + second_request).ok());
 
   std::string received_buffer;
   const std::string first_response = RecvFrame(pair.client_socket_, received_buffer);
@@ -237,7 +237,7 @@ TEST(ServerConnectionTest, HandlesPipelinedRequestsOnOneConnection) {
   pair.client_socket_.ShutdownWrite();
   pair.client_socket_.Close();
 
-  loop.FinishDrain();
+  EXPECT_TRUE(loop.FinishDrain().ok());
   EXPECT_EQ(DecodeEchoMessage(first_response, 21), "echo: first");
   EXPECT_EQ(DecodeEchoMessage(second_response, 22), "echo: second");
 }
@@ -252,16 +252,16 @@ TEST(ServerConnectionTest, WakesIdleWriteLoopForLaterResponse) {
   loop.PostStartConnection(std::move(pair.server_socket_));
 
   std::string received_buffer;
-  pair.client_socket_.WriteAll(MakeRequestFrame("first", 23));
+  EXPECT_TRUE(pair.client_socket_.WriteAll(MakeRequestFrame("first", 23)).ok());
   const std::string first_response = RecvFrame(pair.client_socket_, received_buffer);
 
-  pair.client_socket_.WriteAll(MakeRequestFrame("second", 24));
+  EXPECT_TRUE(pair.client_socket_.WriteAll(MakeRequestFrame("second", 24)).ok());
   const std::string second_response = RecvFrame(pair.client_socket_, received_buffer);
 
   pair.client_socket_.ShutdownWrite();
   pair.client_socket_.Close();
 
-  loop.FinishDrain();
+  EXPECT_TRUE(loop.FinishDrain().ok());
   EXPECT_EQ(DecodeEchoMessage(first_response, 23), "echo: first");
   EXPECT_EQ(DecodeEchoMessage(second_response, 24), "echo: second");
 }
@@ -277,11 +277,11 @@ TEST(ServerConnectionTest, ClosesOnInvalidFrame) {
 
   std::string invalid_request = MakeRequestFrame("hello", 42);
   invalid_request[0] = '\0';
-  pair.client_socket_.WriteAll(invalid_request);
+  EXPECT_TRUE(pair.client_socket_.WriteAll(invalid_request).ok());
   pair.client_socket_.ShutdownWrite();
   pair.client_socket_.Close();
 
-  loop.FinishDrain();
+  EXPECT_TRUE(loop.FinishDrain().ok());
 }
 
 TEST(ServerConnectionTest, HandlesConcurrentResponsesWithWorkerPool) {
@@ -310,7 +310,10 @@ TEST(ServerConnectionTest, HandlesConcurrentResponsesWithWorkerPool) {
   fast_request_envelope.payload_ = fast_request.SerializeAsString();
 
   xrpc::FrameCodec codec;
-  pair.client_socket_.WriteAll(codec.Encode(slow_request_envelope) + codec.Encode(fast_request_envelope));
+  EXPECT_TRUE(pair.client_socket_
+                  .WriteAll(codec.Encode(slow_request_envelope).value() +
+                            codec.Encode(fast_request_envelope).value())
+                  .ok());
 
   std::string received_buffer;
   const std::string first_response = RecvFrame(pair.client_socket_, received_buffer);
@@ -318,7 +321,7 @@ TEST(ServerConnectionTest, HandlesConcurrentResponsesWithWorkerPool) {
   pair.client_socket_.ShutdownWrite();
   pair.client_socket_.Close();
 
-  loop.FinishDrain();
+  EXPECT_TRUE(loop.FinishDrain().ok());
 
   const xrpc::FrameDecodeResult first_decoded = codec.Decode(first_response);
   const xrpc::FrameDecodeResult second_decoded = codec.Decode(second_response);
@@ -360,11 +363,11 @@ TEST(ServerConnectionTest, KeepsReadingWhileWorkerHandlerIsPending) {
   loop.Start();
   loop.PostStartConnection(std::move(pair.server_socket_));
 
-  pair.client_socket_.WriteAll(MakeRequestFrame("first", 81));
+  EXPECT_TRUE(pair.client_socket_.WriteAll(MakeRequestFrame("first", 81)).ok());
   const std::future_status handler_started_status = handler_started_future.wait_for(WaitTimeout);
 
   if (handler_started_status == std::future_status::ready) {
-    pair.client_socket_.WriteAll(MakeRequestFrame("second", 82));
+    EXPECT_TRUE(pair.client_socket_.WriteAll(MakeRequestFrame("second", 82)).ok());
     std::string received_buffer;
     const std::string rejection_response = RecvFrame(pair.client_socket_, received_buffer);
     const xrpc::Status rejection_status = DecodeResponseStatus(rejection_response, 82);
@@ -374,7 +377,7 @@ TEST(ServerConnectionTest, KeepsReadingWhileWorkerHandlerIsPending) {
 
   pair.client_socket_.ShutdownWrite();
   pair.client_socket_.Close();
-  loop.FinishDrain();
+  EXPECT_TRUE(loop.FinishDrain().ok());
 
   EXPECT_EQ(handler_started_status, std::future_status::ready);
 }
@@ -403,7 +406,10 @@ TEST(ServerConnectionTest, RejectsEntireReadBatchWhenInflightLimitWouldBeExceede
   xrpc::RequestEnvelope rejected_request_envelope = request_envelope;
   rejected_request_envelope.request_id_ = 52;
   xrpc::FrameCodec codec;
-  pair.client_socket_.WriteAll(codec.Encode(request_envelope) + codec.Encode(rejected_request_envelope));
+  EXPECT_TRUE(pair.client_socket_
+                  .WriteAll(codec.Encode(request_envelope).value() +
+                            codec.Encode(rejected_request_envelope).value())
+                  .ok());
 
   std::string received_buffer;
   const std::string first_rejection = RecvFrame(pair.client_socket_, received_buffer);
@@ -413,7 +419,7 @@ TEST(ServerConnectionTest, RejectsEntireReadBatchWhenInflightLimitWouldBeExceede
 
   pair.client_socket_.ShutdownWrite();
   pair.client_socket_.Close();
-  loop.FinishDrain();
+  EXPECT_TRUE(loop.FinishDrain().ok());
 
   EXPECT_EQ(handler_calls.load(), 0U);
 }
@@ -428,10 +434,10 @@ TEST(ServerConnectionTest, ClosesWhenWriteQueueByteLimitIsReached) {
   loop.Start();
   loop.PostStartConnection(std::move(pair.server_socket_));
 
-  pair.client_socket_.WriteAll(MakeRequestFrame("response-is-larger-than-one-byte", 71));
+  EXPECT_TRUE(pair.client_socket_.WriteAll(MakeRequestFrame("response-is-larger-than-one-byte", 71)).ok());
 
   char byte = 0;
-  EXPECT_EQ(pair.client_socket_.Read(&byte, sizeof(byte)), 0);
+  EXPECT_EQ(pair.client_socket_.Read(&byte, sizeof(byte)).value(), 0);
   pair.client_socket_.Close();
-  loop.FinishDrain();
+  EXPECT_TRUE(loop.FinishDrain().ok());
 }

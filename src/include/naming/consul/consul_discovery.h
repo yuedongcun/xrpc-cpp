@@ -31,7 +31,7 @@ namespace xrpc {
  */
 class ConsulDiscovery final : public ServiceDiscovery {
  public:
-  ConsulDiscovery(std::string service_name, const std::string &consul_address);
+  ConsulDiscovery(std::string service_name, ConsulHttpClient http_client);
 
   ~ConsulDiscovery() override;
 

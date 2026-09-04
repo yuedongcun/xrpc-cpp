@@ -10,8 +10,12 @@
 
 #include "server/connection_io_loop.h"
 
+#include <exception>
 #include <utility>
 
+#include "common/abort.h"
+
+#include "common/xrpc_exception.h"
 #include "server/service_registry.h"
 
 namespace xrpc {
@@ -27,19 +31,14 @@ void ConnectionIoLoop::Start() {
   if (state_ != State::Created) {
     return;
   }
+  thread_ = std::jthread([this]() -> void {
+    try {
+      context_.Run();
+    } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: thread entry
+      error_ = CaughtExceptionToStatus("connection I/O loop failed");
+    }
+  });
   state_ = State::Running;
-  try {
-    thread_ = std::jthread([this]() -> void {
-      try {
-        context_.Run();
-      } catch (...) {
-        error_ = std::current_exception();
-      }
-    });
-  } catch (...) {
-    state_ = State::Stopped;
-    throw;
-  }
 }
 
 /**
@@ -87,12 +86,12 @@ void ConnectionIoLoop::BeginDrain() {
   context_.Post([this]() -> void { BeginDrainOnContext(); });
 }
 
-void ConnectionIoLoop::FinishDrain() {
+auto ConnectionIoLoop::FinishDrain() -> Status {
   BeginDrain();
   {
     std::unique_lock lock(drain_mutex_);
     if (state_ == State::Stopped) {
-      return;
+      return error_;
     }
     drain_cv_.wait(lock, [this]() -> bool { return live_connections_ == 0; });
   }
@@ -107,9 +106,7 @@ void ConnectionIoLoop::FinishDrain() {
     std::lock_guard lock(drain_mutex_);
     state_ = State::Stopped;
   }
-  if (error_) {
-    std::rethrow_exception(error_);
-  }
+  return error_;
 }
 
 void ConnectionIoLoop::PostStartConnection(io::Socket client_socket) {
@@ -129,33 +126,37 @@ void ConnectionIoLoop::PostStartConnection(io::Socket client_socket) {
 }
 
 void ConnectionIoLoop::StartConnectionOnContext(io::Socket client_socket) {
+  ServerConnection *connection = nullptr;
   {
     std::lock_guard lock(drain_mutex_);
     if (state_ != State::Running) {
       client_socket.Close();
       return;
     }
-    ++live_connections_;
-  }
 
-  const ServerConnectionConfig config{.limits_ = limits_, .protocol_limits_ = protocol_limits_};
-  const ConnectionId connection_id = next_connection_id_++;
-  ServerConnection *connection = nullptr;
-  try {
+    const ConnectionId connection_id = AllocateConnectionId();
+    const ServerConnectionConfig config{.limits_ = limits_, .protocol_limits_ = protocol_limits_};
     // The constructor is private so only the owning loop can create a connection.
     auto owned_connection = std::unique_ptr<ServerConnection>(
         new ServerConnection(connection_id, *this, context_, registry_, worker_pool_, std::move(client_socket), config,
                              [this]() -> void { OnConnectionClosed(); }));
     auto [position, inserted] = connections_.emplace(connection_id, std::move(owned_connection));
     if (!inserted) {
-      throw LifecycleException("connection ID space exhausted");
+      Abort("ConnectionIoLoop generated a duplicate connection ID");
     }
     connection = position->second.get();
-  } catch (...) {
-    OnConnectionClosed();
-    throw;
+    ++live_connections_;
   }
   connection->Start();
+}
+
+auto ConnectionIoLoop::AllocateConnectionId() -> ConnectionId {
+  const ConnectionId connection_id = next_connection_id_;
+  if (connection_id == 0) {
+    Abort("ConnectionIoLoop exhausted the connection ID space");
+  }
+  ++next_connection_id_;
+  return connection_id;
 }
 
 void ConnectionIoLoop::CollectClosedConnections() {

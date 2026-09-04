@@ -20,7 +20,9 @@ namespace xrpc {
  */
 class StaticDiscovery final : public ServiceDiscovery {
  public:
-  explicit StaticDiscovery(std::string_view target);
+  explicit StaticDiscovery(DiscoverySnapshot endpoints);
+
+  [[nodiscard]] static auto ParseTarget(std::string_view target) -> StatusOr<DiscoverySnapshot>;
 
   [[nodiscard]] auto Start() -> Status override;
   void Stop() override;

@@ -167,7 +167,7 @@ auto RunRpcClientBenchmark(const ClientConfig &config) -> BenchmarkStats {
     worker.thread_ = std::jthread([&client, &message, &start_latch, &ready_latch, &deadline, worker_ptr]() {
       try {
         RunWorker(*client, message, start_latch, ready_latch, deadline, worker_ptr->recorder_);
-      } catch (...) {
+      } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: thread entry
         worker_ptr->exception_ = std::current_exception();
       }
     });

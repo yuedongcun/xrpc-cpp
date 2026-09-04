@@ -32,7 +32,7 @@ auto WaitTaskWithContext(xrpc::runtime::Task<T> task, xrpc::io::UringContext &co
   std::jthread context_thread([&]() {
     try {
       context.Run();
-    } catch (...) {
+    } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: test thread entry
       context_error = std::current_exception();
     }
   });
@@ -118,12 +118,12 @@ TEST(IoUringAwaitableTest, DestroyingPendingIoTaskTerminates) {
   EXPECT_DEATH(
       {
         xrpc::io::Socket listen_socket;
-        listen_socket.Bind("127.0.0.1", 0);
-        listen_socket.Listen(1);
+        EXPECT_TRUE(listen_socket.Bind("127.0.0.1", 0).ok());
+        EXPECT_TRUE(listen_socket.Listen(1).ok());
 
         xrpc::io::Socket client_socket;
-        client_socket.Connect("127.0.0.1", listen_socket.LocalPort());
-        xrpc::io::Socket server_socket = listen_socket.Accept();
+        EXPECT_TRUE(client_socket.Connect("127.0.0.1", listen_socket.LocalPort().value()).ok());
+        xrpc::io::Socket server_socket = listen_socket.Accept().value();
 
         xrpc::io::UringContext context;
         std::optional<xrpc::runtime::Task<xrpc::io::IoResult>> task;
@@ -134,17 +134,44 @@ TEST(IoUringAwaitableTest, DestroyingPendingIoTaskTerminates) {
         });
         context.Run();
       },
-      "");
+      "UringAwaitable destroyed while an I/O operation is pending");
+}
+
+TEST(SocketTest, InvalidSocketOperationsReturnFailedPrecondition) {
+  xrpc::io::Socket socket;
+  std::array<char, 8> buffer{};
+
+  const auto local_port = socket.LocalPort();
+  EXPECT_FALSE(local_port.ok());
+  EXPECT_EQ(local_port.status().code(), xrpc::StatusCode::FailedPrecondition);
+
+  const xrpc::Status listen_status = socket.Listen(1);
+  EXPECT_EQ(listen_status.code(), xrpc::StatusCode::FailedPrecondition);
+
+  const auto accept_result = socket.Accept();
+  EXPECT_FALSE(accept_result.ok());
+  EXPECT_EQ(accept_result.status().code(), xrpc::StatusCode::FailedPrecondition);
+
+  const auto read_result = socket.Read(buffer.data(), buffer.size());
+  EXPECT_FALSE(read_result.ok());
+  EXPECT_EQ(read_result.status().code(), xrpc::StatusCode::FailedPrecondition);
+
+  const auto write_result = socket.Write("payload");
+  EXPECT_FALSE(write_result.ok());
+  EXPECT_EQ(write_result.status().code(), xrpc::StatusCode::FailedPrecondition);
+
+  const xrpc::Status timeout_status = socket.SetReadWriteTimeout(std::chrono::milliseconds(1));
+  EXPECT_EQ(timeout_status.code(), xrpc::StatusCode::FailedPrecondition);
 }
 
 TEST(IoUringAwaitableTest, SendAndRecvReturnExpectedResults) {
   xrpc::io::Socket listen_socket;
-  listen_socket.Bind("127.0.0.1", 0);
-  listen_socket.Listen(1);
+  ASSERT_TRUE(listen_socket.Bind("127.0.0.1", 0).ok());
+  ASSERT_TRUE(listen_socket.Listen(1).ok());
 
   xrpc::io::Socket client_socket;
-  client_socket.Connect("127.0.0.1", listen_socket.LocalPort());
-  xrpc::io::Socket server_socket = listen_socket.Accept();
+  ASSERT_TRUE(client_socket.Connect("127.0.0.1", listen_socket.LocalPort().value()).ok());
+  xrpc::io::Socket server_socket = listen_socket.Accept().value();
 
   const auto payload = std::make_shared<std::string>("awaitable-message");
 

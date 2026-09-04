@@ -21,7 +21,7 @@
 
 #include <sys/types.h>
 
-#include "common/xrpc_exception.h"
+#include <xrpc/status.h>
 
 namespace xrpc::io {
 
@@ -72,25 +72,6 @@ enum class SocketErrorCode : std::uint8_t {
   return {system_error, std::generic_category()};
 }
 
-class SocketError final : public TransportException {
- public:
-  SocketError(SocketErrorCode code, std::error_code system_error, const std::string &message)
-      : TransportException(ToStatusCode(code), message), code_(code), system_error_(system_error) {}
-
-  SocketError(SocketErrorCode code, int system_error, const std::string &message)
-      : SocketError(code, MakeSystemErrorCode(system_error), message) {}
-
-  [[nodiscard]] auto code() const noexcept -> SocketErrorCode { return code_; }
-
-  [[nodiscard]] auto system_error() const noexcept -> int { return system_error_.value(); }
-
-  [[nodiscard]] auto system_error_code() const noexcept -> const std::error_code & { return system_error_; }
-
- private:
-  SocketErrorCode code_;
-  std::error_code system_error_;
-};
-
 class Socket final {
  public:
   Socket() = default;
@@ -110,31 +91,31 @@ class Socket final {
 
   [[nodiscard]] auto valid() const noexcept -> bool { return fd_ >= 0; }
 
-  [[nodiscard]] auto LocalPort() const -> std::uint16_t;
+  [[nodiscard]] auto LocalPort() const -> StatusOr<std::uint16_t>;
 
-  void Bind(std::string_view host, std::uint16_t port);
+  [[nodiscard]] auto Bind(std::string_view host, std::uint16_t port) -> Status;
 
-  void Listen(int backlog);
+  [[nodiscard]] auto Listen(int backlog) -> Status;
 
-  [[nodiscard]] auto Accept() -> Socket;
+  [[nodiscard]] auto Accept() -> StatusOr<Socket>;
 
-  void Connect(std::string_view host, std::uint16_t port);
+  [[nodiscard]] auto Connect(std::string_view host, std::uint16_t port) -> Status;
 
-  void Connect(std::string_view host, std::uint16_t port, std::chrono::milliseconds timeout);
+  [[nodiscard]] auto Connect(std::string_view host, std::uint16_t port, std::chrono::milliseconds timeout) -> Status;
 
-  [[nodiscard]] auto Read(char *buf, std::size_t len) -> ssize_t;
+  [[nodiscard]] auto Read(char *buf, std::size_t len) -> StatusOr<ssize_t>;
 
-  [[nodiscard]] auto Write(std::string_view bytes) -> ssize_t;
+  [[nodiscard]] auto Write(std::string_view bytes) -> StatusOr<ssize_t>;
 
-  void WriteAll(std::string_view bytes);
+  [[nodiscard]] auto WriteAll(std::string_view bytes) -> Status;
 
-  void SetReadWriteTimeout(std::chrono::milliseconds timeout);
+  [[nodiscard]] auto SetReadWriteTimeout(std::chrono::milliseconds timeout) -> Status;
 
-  void ShutdownWrite();
+  void ShutdownWrite() noexcept;
 
-  void ShutdownReadWrite();
+  void ShutdownReadWrite() noexcept;
 
-  void Close();
+  void Close() noexcept;
 
  private:
   int fd_ = -1;
