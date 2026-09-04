@@ -11,7 +11,6 @@
 
 #include <sys/socket.h>
 
-#include "common/latency_trace.h"
 #include "server/connection_io_loop.h"
 #include "server/service_registry.h"
 
@@ -22,47 +21,17 @@ auto MakeReadBufferSize() -> std::size_t { return 16U * 1024U; }
 
 auto MakeMaxWriteBatchBytes() -> std::size_t { return 64U * 1024U; }
 
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-void RecordBatchStage(const std::vector<RequestEnvelope> &requests, diagnostics::LatencyStage stage,
-                      std::uint32_t value = 0, std::uint64_t timestamp_ns = 0) {
-  for (const RequestEnvelope &request : requests) {
-    diagnostics::RecordLatencyTrace(stage, request.request_id_, value, timestamp_ns);
-  }
-}
-#endif
-
 void ExecuteDispatchBatchOnWorker(ConnectionId connection_id, ConnectionIoLoop &owner_loop, ServiceRegistry &registry,
                                   ProtocolLimits protocol_limits, std::vector<RequestEnvelope> &requests) {
   const std::size_t request_count = requests.size();
   std::string batch_response_bytes;
   std::size_t successful_jobs = 0;
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-  std::vector<std::uint64_t> trace_request_ids;
-  trace_request_ids.reserve(request_count);
-#endif
 
-  for (std::size_t index = 0; index < request_count; ++index) {
-    RequestEnvelope &request = requests[index];
-    const std::uint64_t request_id = request.request_id_;
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-    const std::uint32_t batch_position =
-        (static_cast<std::uint32_t>(std::min<std::size_t>(request_count, UINT16_MAX)) << 16U) |
-        static_cast<std::uint32_t>(std::min<std::size_t>(index, UINT16_MAX));
-    diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::RequestStart, request_id, batch_position);
-#endif
+  for (RequestEnvelope &request : requests) {
     ResponseEnvelope response = registry.Dispatch(std::move(request));
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-    diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::DispatchEnd, request_id);
-#endif
     try {
       FrameCodec codec(protocol_limits);
       batch_response_bytes.append(codec.Encode(response));
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-      diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::EncodeEnd, request_id);
-      if (diagnostics::LatencyTraceSampled(request_id)) {
-        trace_request_ids.push_back(request_id);
-      }
-#endif
       ++successful_jobs;
     } catch (...) {
       break;
@@ -74,13 +43,6 @@ void ExecuteDispatchBatchOnWorker(ConnectionId connection_id, ConnectionIoLoop &
                                   .response_bytes_ = std::move(batch_response_bytes),
                                   .completed_jobs_ = successful_jobs,
                                   .encode_failed_ = false};
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-    completion.trace_request_ids_ = std::move(trace_request_ids);
-    for (const std::uint64_t request_id : completion.trace_request_ids_) {
-      diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::CompletionPost, request_id,
-                                      static_cast<std::uint32_t>(completion.completed_jobs_));
-    }
-#endif
     owner_loop.PostDispatchCompletion(std::move(completion));
   }
 
@@ -129,9 +91,6 @@ void ServerConnection::WriteQueueAwaiter::await_suspend(std::coroutine_handle<> 
 auto ServerConnection::ReadLoop() -> runtime::Task<void> {
   while (state_ == State::Active) {
     const io::IoResult recv_result = co_await context_.Recv(socket_.fd(), read_buffer_.data(), read_buffer_.size());
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-    const std::uint64_t received_at_ns = diagnostics::LatencyTraceEnabled() ? diagnostics::LatencyNowNs() : 0;
-#endif
     if (state_ == State::Closed) {
       co_return;
     }
@@ -153,12 +112,7 @@ auto ServerConnection::ReadLoop() -> runtime::Task<void> {
 
     const std::string_view received_bytes(read_buffer_.data(), recv_result.bytes_transferred_);
     FrameStreamFeedResult feed_result = frame_stream_.FeedBytes(received_bytes);
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-    const std::uint64_t decoded_at_ns = diagnostics::LatencyTraceEnabled() ? diagnostics::LatencyNowNs() : 0;
-    if (!HandleFeedResult(std::move(feed_result), received_at_ns, decoded_at_ns)) {
-#else
     if (!HandleFeedResult(std::move(feed_result))) {
-#endif
       co_return;
     }
   }
@@ -166,12 +120,7 @@ auto ServerConnection::ReadLoop() -> runtime::Task<void> {
   TryFinishDrain();
 }
 
-auto ServerConnection::HandleFeedResult(FrameStreamFeedResult &&feed
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-                                        ,
-                                        std::uint64_t received_at_ns, std::uint64_t decoded_at_ns
-#endif
-                                        ) -> bool {
+auto ServerConnection::HandleFeedResult(FrameStreamFeedResult &&feed) -> bool {
   if (feed.closed_) {
     Close();
     return false;
@@ -181,15 +130,6 @@ auto ServerConnection::HandleFeedResult(FrameStreamFeedResult &&feed
   if (request_count == 0) {
     return true;
   }
-
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-  const std::uint32_t batch_size = static_cast<std::uint32_t>(std::min<std::size_t>(request_count, UINT32_MAX));
-  for (std::size_t i = 0; i < request_count; ++i) {
-    const std::uint64_t request_id = feed.requests_[i].request_id_;
-    diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::ServerRecv, request_id, batch_size, received_at_ns);
-    diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::ServerDecoded, request_id, batch_size, decoded_at_ns);
-  }
-#endif
 
   assert(inflight_requests_ <= limits_.max_inflight_);
   if (request_count > limits_.max_inflight_ - inflight_requests_) {
@@ -235,23 +175,13 @@ void ServerConnection::BeginDrain() {
   TryFinishDrain();
 }
 
-void ServerConnection::OnEncodedDispatchComplete(std::string &&response_bytes, std::size_t completed_jobs
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-                                                 ,
-                                                 std::vector<std::uint64_t> trace_request_ids
-#endif
-) {
+void ServerConnection::OnEncodedDispatchComplete(std::string &&response_bytes, std::size_t completed_jobs) {
   ReleaseDispatchJobs(completed_jobs);
   if (state_ == State::Closed) {
     return;
   }
   try {
-    (void)EnqueueWrite(std::move(response_bytes)
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-                           ,
-                       std::move(trace_request_ids)
-#endif
-    );
+    (void)EnqueueWrite(std::move(response_bytes));
   } catch (...) {
     Close();
   }
@@ -268,12 +198,7 @@ void ServerConnection::ReleaseDispatchJobs(std::size_t completed_jobs) {
   inflight_requests_ -= completed_jobs;
 }
 
-auto ServerConnection::EnqueueWrite(std::string bytes
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-                                    ,
-                                    std::vector<std::uint64_t> trace_request_ids
-#endif
-                                    ) -> bool {
+auto ServerConnection::EnqueueWrite(std::string bytes) -> bool {
   if (state_ == State::Closed) {
     return false;
   }
@@ -282,12 +207,7 @@ auto ServerConnection::EnqueueWrite(std::string bytes
     return false;
   }
 
-  write_queue_.push_back(PendingWrite{.bytes_ = std::move(bytes)
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-                                          ,
-                                      .trace_request_ids_ = std::move(trace_request_ids)
-#endif
-  });
+  write_queue_.push_back(PendingWrite{.bytes_ = std::move(bytes)});
   WakeWriteLoop();
   return true;
 }
@@ -316,9 +236,6 @@ auto ServerConnection::WriteLoop() -> runtime::Task<void> {
       PendingWrite pending_write = std::move(write_queue_.front());
       write_queue_.pop_front();
       std::string frame = std::move(pending_write.bytes_);
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-      std::vector<std::uint64_t> trace_request_ids = std::move(pending_write.trace_request_ids_);
-#endif
       std::size_t frame_size = frame.size();
       if (!write_queue_.empty()) {
         const std::size_t max_batch_bytes = MakeMaxWriteBatchBytes();
@@ -326,23 +243,11 @@ auto ServerConnection::WriteLoop() -> runtime::Task<void> {
         while (!write_queue_.empty() && frame.size() + write_queue_.front().bytes_.size() <= max_batch_bytes) {
           frame_size += write_queue_.front().bytes_.size();
           frame.append(write_queue_.front().bytes_);
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-          trace_request_ids.insert(trace_request_ids.end(), write_queue_.front().trace_request_ids_.begin(),
-                                   write_queue_.front().trace_request_ids_.end());
-#endif
           write_queue_.pop_front();
         }
       }
 
       std::size_t offset = 0;
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-      const std::uint64_t send_started_at_ns = diagnostics::LatencyTraceEnabled() ? diagnostics::LatencyNowNs() : 0;
-      for (const std::uint64_t request_id : trace_request_ids) {
-        diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::ServerSend, request_id,
-                                        static_cast<std::uint32_t>(std::min<std::size_t>(frame.size(), UINT32_MAX)),
-                                        send_started_at_ns);
-      }
-#endif
       while (state_ != State::Closed && offset < frame.size()) {
         const std::string_view remaining(frame.data() + offset, frame.size() - offset);
         const io::IoResult send_result = co_await context_.Send(socket_.fd(), remaining.data(), remaining.size());
@@ -357,11 +262,6 @@ auto ServerConnection::WriteLoop() -> runtime::Task<void> {
 
         offset += send_result.bytes_transferred_;
       }
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-      for (const std::uint64_t request_id : trace_request_ids) {
-        diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::ServerSendComplete, request_id);
-      }
-#endif
       ReleaseWriteBytes(frame_size);
     }
 
@@ -387,22 +287,12 @@ auto ServerConnection::SubmitDispatchBatch(std::vector<RequestEnvelope> requests
   assert(request_count > 0);
 
   auto request_batch = std::make_shared<std::vector<RequestEnvelope>>(std::move(requests));
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-  const std::size_t pending_after_submission = worker_pool_.pending_jobs() + request_count;
-  RecordBatchStage(*request_batch, diagnostics::LatencyStage::WorkerEnqueue,
-                   static_cast<std::uint32_t>(std::min<std::size_t>(pending_after_submission, UINT32_MAX)));
-#endif
   const ConnectionId connection_id = connection_id_;
   ConnectionIoLoop *owner_loop = &owner_loop_;
   ServiceRegistry *registry = &registry_;
-  WorkerPool *worker_pool = &worker_pool_;
   const ProtocolLimits protocol_limits = protocol_limits_;
   const bool accepted = worker_pool_.TrySubmitBatch(
-      [connection_id, owner_loop, registry, worker_pool, protocol_limits, request_batch]() -> void {
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-        RecordBatchStage(*request_batch, diagnostics::LatencyStage::WorkerStart,
-                         static_cast<std::uint32_t>(std::min<std::size_t>(worker_pool->pending_jobs(), UINT32_MAX)));
-#endif
+      [connection_id, owner_loop, registry, protocol_limits, request_batch]() -> void {
         ExecuteDispatchBatchOnWorker(connection_id, *owner_loop, *registry, protocol_limits, *request_batch);
       },
       request_count);

@@ -14,9 +14,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from schedstat_sampler import SchedstatSampler
-
-
 TOTAL_PATTERN = re.compile(r"total_calls=(\d+) success=(\d+) failed=(\d+)")
 LATENCY_PATTERN = re.compile(
     r"qps=([0-9.]+) avg_us=([0-9.]+) p50_us=([0-9.]+) "
@@ -153,10 +150,10 @@ def cases(config):
     return result
 
 
-def stop(process, initial_signal=signal.SIGTERM):
+def stop(process):
     if process.poll() is not None:
         return
-    os.killpg(process.pid, initial_signal)
+    os.killpg(process.pid, signal.SIGTERM)
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
@@ -164,28 +161,7 @@ def stop(process, initial_signal=signal.SIGTERM):
         process.wait(timeout=5)
 
 
-def benchmark_env(trace_prefix=None, trace_sample_shift=10):
-    env = os.environ.copy()
-    if trace_prefix is not None:
-        env["XRPC_LATENCY_TRACE_PREFIX"] = str(trace_prefix)
-        env["XRPC_LATENCY_TRACE_SAMPLE_SHIFT"] = str(trace_sample_shift)
-    return env
-
-
-PERF_EVENTS = (
-    "task-clock,cycles,instructions,context-switches,cpu-migrations,"
-    "cache-references,cache-misses,page-faults"
-)
-
-
-def with_perf_stat(command, output_path):
-    if output_path is None:
-        return command
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    return ["perf", "stat", "-x,", "-o", str(output_path), "-e", PERF_EVENTS, "--", *command]
-
-
-def start_server(repo_root, server_bin, config, env=None, cpu_list=None, perf_stat_path=None):
+def start_server(repo_root, server_bin, config, cpu_list=None):
     command = [
         str(server_bin),
         "--port=0",
@@ -196,7 +172,6 @@ def start_server(repo_root, server_bin, config, env=None, cpu_list=None, perf_st
         command.append(f"--max_inflight_per_connection={config.server_max_inflight_per_connection}")
     if cpu_list is not None:
         command = ["taskset", "-c", cpu_list, *command]
-    command = with_perf_stat(command, perf_stat_path)
     process = subprocess.Popen(
         command,
         cwd=repo_root,
@@ -204,7 +179,6 @@ def start_server(repo_root, server_bin, config, env=None, cpu_list=None, perf_st
         stderr=subprocess.STDOUT,
         text=True,
         preexec_fn=os.setsid,
-        env=env,
     )
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ)
@@ -268,70 +242,33 @@ def parse_stats(output):
     }
 
 
-def run_client(command, timeout, env=None, perf_stat_path=None, schedstat_sampler=None, role="client"):
-    command = with_perf_stat(command, perf_stat_path)
-    process = subprocess.Popen(
-        command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env
-    )
-    if schedstat_sampler is not None:
-        schedstat_sampler.add_process(role, process.pid)
-    try:
-        output, _ = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.communicate()
-        raise
-    print(output, end="")
-    if process.returncode != 0:
-        raise RuntimeError(f"benchmark client failed with exit code {process.returncode}")
-    return parse_stats(output)
+def run_client(command, timeout):
+    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout)
+    print(result.stdout, end="")
+    if result.returncode != 0:
+        raise RuntimeError(f"benchmark client failed with exit code {result.returncode}")
+    return parse_stats(result.stdout)
 
 
-def run_case(
-    repo_root,
-    build_dir,
-    config,
-    case,
-    trace_prefix=None,
-    trace_sample_shift=10,
-    server_cpus=None,
-    client_cpus=None,
-    server_perf_stat=None,
-    client_perf_stat=None,
-    schedstat_path=None,
-    schedstat_interval_ms=50,
-):
+def run_case(repo_root, build_dir, config, case, server_cpus=None, client_cpus=None):
     server_bin = build_dir / "tools" / "benchmark" / "xrpc_benchmark_server"
     client_bin = build_dir / "tools" / "benchmark" / (
         "xrpc_benchmark_firehose" if config.benchmark_type == "firehose" else "xrpc_benchmark_client"
     )
-    env = benchmark_env(trace_prefix, trace_sample_shift)
-    server, port = start_server(repo_root, server_bin, config, env, server_cpus, server_perf_stat)
-    schedstat_sampler = None
-    if schedstat_path is not None:
-        schedstat_sampler = SchedstatSampler(schedstat_path, schedstat_interval_ms)
-        schedstat_sampler.add_process("server", server.pid)
+    server, port = start_server(repo_root, server_bin, config, server_cpus)
     try:
         if config.warmup_duration > 0:
             print(f"warmup: {case.name}")
             run_client(
                 client_command(client_bin, config, case, port, config.warmup_duration, client_cpus),
                 config.warmup_duration + PROCESS_TIMEOUT_MARGIN,
-                env,
-                schedstat_sampler=schedstat_sampler,
-                role="client-warmup",
             )
         return run_client(
             client_command(client_bin, config, case, port, config.duration, client_cpus),
             config.duration + PROCESS_TIMEOUT_MARGIN,
-            env,
-            client_perf_stat,
-            schedstat_sampler,
         )
     finally:
-        if schedstat_sampler is not None:
-            schedstat_sampler.stop()
-        stop(server, signal.SIGINT if server_perf_stat is not None else signal.SIGTERM)
+        stop(server)
 
 
 def summarize(rows):
@@ -359,14 +296,8 @@ def parse_args(argv=None):
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--build-dir", type=Path, default=Path("build-release"))
     parser.add_argument("--output-json", type=Path)
-    parser.add_argument("--trace-dir", type=Path)
-    parser.add_argument("--trace-sample-shift", type=int, default=10)
     parser.add_argument("--server-cpus")
     parser.add_argument("--client-cpus")
-    parser.add_argument("--server-perf-stat", type=Path)
-    parser.add_argument("--client-perf-stat", type=Path)
-    parser.add_argument("--schedstat-dir", type=Path)
-    parser.add_argument("--schedstat-interval-ms", type=int, default=50)
     return parser.parse_args(argv)
 
 
@@ -377,17 +308,6 @@ def main(argv=None):
     config = load_config(args.config)
     case_list = cases(config)
 
-    if args.trace_sample_shift < 0 or args.trace_sample_shift > 20:
-        raise RuntimeError("trace-sample-shift must be between 0 and 20")
-    if args.trace_dir is not None:
-        args.trace_dir.mkdir(parents=True, exist_ok=True)
-    if args.schedstat_dir is not None:
-        args.schedstat_dir.mkdir(parents=True, exist_ok=True)
-    if args.schedstat_interval_ms < 10:
-        raise RuntimeError("schedstat-interval-ms must be at least 10")
-    if args.schedstat_dir is not None and (args.server_perf_stat is not None or args.client_perf_stat is not None):
-        raise RuntimeError("schedstat sampling cannot be combined with perf wrappers")
-
     rows = []
     total = len(case_list) * config.repetitions
     index = 0
@@ -397,37 +317,16 @@ def main(argv=None):
         for case in repetition_cases:
             index += 1
             print(f"\n[{index}/{total}] repetition={repetition} {case.name}")
-            trace_prefix = None
-            safe_case = re.sub(r"[^a-zA-Z0-9_.-]+", "_", case.name)
-            if args.trace_dir is not None:
-                run_trace_dir = args.trace_dir / f"run-{index:03d}-rep-{repetition}-{safe_case}"
-                run_trace_dir.mkdir(parents=True, exist_ok=False)
-                trace_prefix = run_trace_dir / "trace"
-            schedstat_path = None
-            if args.schedstat_dir is not None:
-                schedstat_path = (
-                    args.schedstat_dir / f"run-{index:03d}-rep-{repetition}-{safe_case}-schedstat.csv"
-                )
             stats = run_case(
                 repo_root,
                 build_dir,
                 config,
                 case,
-                trace_prefix,
-                args.trace_sample_shift,
                 args.server_cpus,
                 args.client_cpus,
-                args.server_perf_stat,
-                args.client_perf_stat,
-                schedstat_path,
-                args.schedstat_interval_ms,
             )
             stats["case"] = case.name
             stats["repetition"] = repetition
-            if trace_prefix is not None:
-                stats["trace_prefix"] = str(trace_prefix)
-            if schedstat_path is not None:
-                stats["schedstat_path"] = str(schedstat_path)
             rows.append(stats)
     summarize(rows)
     if args.output_json is not None:
@@ -435,12 +334,8 @@ def main(argv=None):
         payload = {
             "config_path": str(args.config),
             "build_dir": str(build_dir),
-            "trace_sample_shift": args.trace_sample_shift if args.trace_dir is not None else None,
             "server_cpus": args.server_cpus,
             "client_cpus": args.client_cpus,
-            "server_perf_stat": str(args.server_perf_stat) if args.server_perf_stat is not None else None,
-            "client_perf_stat": str(args.client_perf_stat) if args.client_perf_stat is not None else None,
-            "schedstat_interval_ms": args.schedstat_interval_ms if args.schedstat_dir is not None else None,
             "rows": rows,
         }
         args.output_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

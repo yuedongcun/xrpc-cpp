@@ -39,10 +39,6 @@ struct DispatchCompletion final {
   std::size_t completed_jobs_ = 1;
 
   bool encode_failed_ = false;
-
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-  std::vector<std::uint64_t> trace_request_ids_;
-#endif
 };
 
 /**

@@ -7,7 +7,6 @@
 #include <stdexcept>
 #include <utility>
 
-#include "common/latency_trace.h"
 #include "common/xrpc_exception.h"
 
 namespace xrpc {
@@ -129,7 +128,6 @@ void WorkerPool::DrainAndJoin() {
 }
 
 void WorkerPool::WorkerLoop(WorkerQueue &queue) {
-  diagnostics::SetLatencyTraceThreadName("xrpc-worker");
   while (true) {
     WorkerJob job;
     {

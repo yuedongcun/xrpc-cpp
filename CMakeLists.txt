@@ -8,7 +8,6 @@ include(GNUInstallDirs)
 option(XRPC_BUILD_EXAMPLES "Build xrpc examples" OFF)
 option(XRPC_BUILD_TESTS "Build xrpc tests" OFF)
 option(XRPC_BUILD_TOOLS "Build xrpc tools" OFF)
-option(XRPC_ENABLE_LATENCY_TRACE "Build local-only sampled latency tracing" OFF)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 

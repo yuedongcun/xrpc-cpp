@@ -95,23 +95,13 @@ class ServerConnection final {
   /** @brief Reads and decodes requests until the connection stops receiving. */
   [[nodiscard]] auto ReadLoop() -> runtime::Task<void>;
 
-  void OnEncodedDispatchComplete(std::string &&response_bytes, std::size_t completed_jobs
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-                                 ,
-                                 std::vector<std::uint64_t> trace_request_ids
-#endif
-  );
+  void OnEncodedDispatchComplete(std::string &&response_bytes, std::size_t completed_jobs);
 
   void OnDispatchEncodeFailure(std::size_t completed_jobs);
 
   void ReleaseDispatchJobs(std::size_t completed_jobs);
 
-  [[nodiscard]] auto EnqueueWrite(std::string bytes
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-                                  ,
-                                  std::vector<std::uint64_t> trace_request_ids = {}
-#endif
-                                  ) -> bool;
+  [[nodiscard]] auto EnqueueWrite(std::string bytes) -> bool;
 
   [[nodiscard]] auto TryReserveWriteBytes(std::size_t bytes) -> bool;
 
@@ -130,12 +120,7 @@ class ServerConnection final {
   /** @return true after both connection I/O coroutines have completed. */
   [[nodiscard]] auto CanBeCollected() const -> bool;
 
-  [[nodiscard]] auto HandleFeedResult(FrameStreamFeedResult &&feed
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-                                      ,
-                                      std::uint64_t received_at_ns, std::uint64_t decoded_at_ns
-#endif
-                                      ) -> bool;
+  [[nodiscard]] auto HandleFeedResult(FrameStreamFeedResult &&feed) -> bool;
 
   [[nodiscard]] auto SubmitDispatchBatch(std::vector<RequestEnvelope> requests) -> bool;
 
@@ -163,9 +148,6 @@ class ServerConnection final {
 
   struct PendingWrite final {
     std::string bytes_;
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-    std::vector<std::uint64_t> trace_request_ids_;
-#endif
   };
 
   std::deque<PendingWrite> write_queue_;

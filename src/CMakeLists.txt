@@ -28,7 +28,6 @@ set(XRPC_SOURCES
     protocol/frame_header.cpp
     protocol/frame_codec.cpp
     common/xrpc_exception.cpp
-    common/latency_trace.cpp
     client/tcp_transport.cpp
     client/rpc_client_impl.cpp
     client/rpc_client.cpp
@@ -76,7 +75,3 @@ target_link_libraries(
 )
 
 target_compile_features(xrpc PUBLIC cxx_std_20)
-
-if(XRPC_ENABLE_LATENCY_TRACE)
-    target_compile_definitions(xrpc PUBLIC XRPC_ENABLE_LATENCY_TRACE=1)
-endif()

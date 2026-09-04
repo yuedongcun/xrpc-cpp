@@ -12,7 +12,6 @@
 
 #include <utility>
 
-#include "common/latency_trace.h"
 #include "server/service_registry.h"
 
 namespace xrpc {
@@ -32,7 +31,6 @@ void ConnectionIoLoop::Start() {
   try {
     thread_ = std::jthread([this]() -> void {
       try {
-        diagnostics::SetLatencyTraceThreadName("xrpc-io");
         context_.Run();
       } catch (...) {
         error_ = std::current_exception();
@@ -193,26 +191,10 @@ void ConnectionIoLoop::HandleDispatchCompletion(DispatchCompletion completion) {
     return;
   }
 
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-  for (const std::uint64_t request_id : completion.trace_request_ids_) {
-    diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::CompletionCallback, request_id,
-                                    static_cast<std::uint32_t>(completion.completed_jobs_));
-  }
-#endif
   if (completion.encode_failed_) {
     connection->second->OnDispatchEncodeFailure(completion.completed_jobs_);
   } else {
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-    for (const std::uint64_t request_id : completion.trace_request_ids_) {
-      diagnostics::RecordLatencyTrace(diagnostics::LatencyStage::WriteEnqueue, request_id);
-    }
-#endif
-    connection->second->OnEncodedDispatchComplete(std::move(completion.response_bytes_), completion.completed_jobs_
-#ifdef XRPC_ENABLE_LATENCY_TRACE
-                                                  ,
-                                                  std::move(completion.trace_request_ids_)
-#endif
-    );
+    connection->second->OnEncodedDispatchComplete(std::move(completion.response_bytes_), completion.completed_jobs_);
   }
   CollectClosedConnections();
 }
