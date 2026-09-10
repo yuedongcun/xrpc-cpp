@@ -7,11 +7,13 @@
 #include <exception>
 #include <memory>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <thread>
 
 #include "common/task.h"
+#include "common/xrpc_exception.h"
 #include "io/socket.h"
 #include "io/uring_context.h"
 
@@ -88,6 +90,23 @@ auto SubmitAfterStop(xrpc::io::UringContext &context) -> xrpc::runtime::Task<xrp
   co_return co_await context.Recv(-1, read_buffer->data(), read_buffer->size());
 }
 
+auto ReadProvidedTwice(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<std::string> {
+  std::string received;
+  for (int read = 0; read < 2; ++read) {
+    xrpc::io::IoResult result = co_await context.RecvProvided(fd);
+    if (result.result_ <= 0) {
+      co_return received;
+    }
+    const std::span<const std::byte> bytes = result.buffer_.Bytes();
+    received.append(reinterpret_cast<const char *>(bytes.data()), bytes.size());
+  }
+  co_return received;
+}
+
+auto ReadProvidedInvalidFd(xrpc::io::UringContext &context) -> xrpc::runtime::Task<xrpc::io::IoResult> {
+  co_return co_await context.RecvProvided(-1);
+}
+
 }  // namespace
 
 TEST(IoUringAwaitableTest, MoveBeforeAwaitPreservesOperation) {
@@ -112,6 +131,12 @@ TEST(IoUringAwaitableTest, UnawaitedOperationIsNeverStarted) {
   xrpc::io::UringContext context;
   std::array<char, 8> read_buffer{};
   [[maybe_unused]] xrpc::io::UringAwaitable awaitable = context.Recv(-1, read_buffer.data(), read_buffer.size());
+}
+
+TEST(IoUringAwaitableTest, ProvidedRecvRequiresRegisteredPool) {
+  xrpc::io::UringContext context;
+
+  EXPECT_THROW((void)context.RecvProvided(-1), xrpc::LifecycleException);
 }
 
 TEST(IoUringAwaitableTest, DestroyingPendingIoTaskTerminates) {
@@ -200,4 +225,40 @@ TEST(IoUringAwaitableTest, RecvOnInvalidFdReturnsError) {
   EXPECT_EQ(result.type_, xrpc::io::OperationType::Recv);
   EXPECT_NE(result.error_code_, 0);
   EXPECT_LT(result.result_, 0);
+}
+
+TEST(IoUringAwaitableTest, ProvidedRecvReturnsAndRecyclesSelectedBuffer) {
+  xrpc::io::Socket listen_socket;
+  ASSERT_TRUE(listen_socket.Bind("127.0.0.1", 0).ok());
+  ASSERT_TRUE(listen_socket.Listen(1).ok());
+
+  xrpc::io::Socket client_socket;
+  ASSERT_TRUE(client_socket.Connect("127.0.0.1", listen_socket.LocalPort().value()).ok());
+  xrpc::io::Socket server_socket = listen_socket.Accept().value();
+  ASSERT_TRUE(client_socket.WriteAll("abcdefgh").ok());
+
+  const xrpc::io::UringBufferPoolConfig buffer_config{
+      .buffer_count_ = 1,
+      .buffer_size_ = 4,
+      .group_id_ = 7,
+  };
+  xrpc::io::UringContext context(8, buffer_config);
+
+  const std::string received = WaitTaskWithContext(ReadProvidedTwice(context, server_socket.fd()), context);
+  EXPECT_EQ(received, "abcdefgh");
+}
+
+TEST(IoUringAwaitableTest, ProvidedRecvErrorDoesNotReturnBuffer) {
+  const xrpc::io::UringBufferPoolConfig buffer_config{
+      .buffer_count_ = 1,
+      .buffer_size_ = 4,
+      .group_id_ = 7,
+  };
+  xrpc::io::UringContext context(8, buffer_config);
+
+  xrpc::io::IoResult result = WaitTaskWithContext(ReadProvidedInvalidFd(context), context);
+  EXPECT_EQ(result.type_, xrpc::io::OperationType::RecvProvided);
+  EXPECT_NE(result.error_code_, 0);
+  EXPECT_LT(result.result_, 0);
+  EXPECT_TRUE(result.buffer_.Empty());
 }

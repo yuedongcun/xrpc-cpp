@@ -1,5 +1,5 @@
 /**
- * @file context_runtime.h
+ * @file uring_context_runtime.h
  * @brief Defines the private runtime state of `UringContext`.
  *
  * This header contains the internal `Runtime` and `Operation` definitions
@@ -15,6 +15,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <string>
 #include <string_view>
@@ -40,12 +41,12 @@ struct Operation {
   int fd_ = -1;
   void *buffer_ = nullptr;
   std::size_t length_ = 0;
-  IoResult result_{};
+  IoResult result_;
   std::coroutine_handle<> continuation_;
 };
 
 struct UringContext::Runtime final {
-  explicit Runtime(std::uint32_t entries);
+  explicit Runtime(std::uint32_t entries, std::optional<UringBufferPoolConfig> buffer_pool_config = std::nullopt);
 
   ~Runtime();
 
@@ -95,6 +96,8 @@ struct UringContext::Runtime final {
   [[nodiscard]] static auto CurrentThreadId() -> pid_t;
 
   io_uring ring_{};
+
+  std::unique_ptr<UringProvidedBufferPool> provided_buffer_pool_;
 
   int wakeup_fd_ = -1;
 

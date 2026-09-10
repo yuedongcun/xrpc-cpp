@@ -22,6 +22,7 @@ endif()
 
 set(XRPC_SOURCES
     io/socket.cpp
+    io/uring_buffer_pool.cpp
     io/uring_context.cpp
     io/uring_context_operations.cpp
     io/uring_context_control.cpp

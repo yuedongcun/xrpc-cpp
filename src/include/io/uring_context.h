@@ -3,9 +3,9 @@
  * @brief Declares xRPC's single-threaded io_uring event loop.
  *
  * A `UringContext` owns one io_uring ring and drives asynchronous operations
- * on the thread running `Run()`. `Accept`, `Recv`, and `Send` create deferred,
- * move-only awaitables. The operation starts when the coroutine suspends and
- * resumes that coroutine with an `IoResult`.
+ * on the thread running `Run()`. `Accept`, `Recv`, `RecvProvided`, and `Send`
+ * create deferred, move-only awaitables. The operation starts when the
+ * coroutine suspends and resumes that coroutine with an `IoResult`.
  *
  * `Post()` and `RequestStop()` form the cross-thread control boundary. They wake the
  * event loop safely, but callbacks themselves always execute on the run thread.
@@ -21,21 +21,33 @@
 #include <memory>
 #include <utility>
 
+#include "io/uring_buffer_pool.h"
+
 namespace xrpc::io {
 
 enum class OperationType : std::uint8_t {
   Unknown = 0,
   Accept,
   Recv,
+  RecvProvided,
   Send,
 };
 
 struct IoResult {
+  IoResult() = default;
+
+  IoResult(const IoResult &) = delete;
+  auto operator=(const IoResult &) -> IoResult & = delete;
+
+  IoResult(IoResult &&) noexcept = default;
+  auto operator=(IoResult &&) noexcept -> IoResult & = default;
+
   OperationType type_ = OperationType::Unknown;
   int fd_ = -1;
   int result_ = 0;
   int error_code_ = 0;
   std::size_t bytes_transferred_ = 0;
+  UringBuffer buffer_;
 };
 
 struct Operation;
@@ -45,9 +57,9 @@ class UringContext;
  * @brief Move-only result of an I/O submission for one coroutine awaiter.
  *
  * An awaitable owns one unstarted operation. `await_suspend()` transfers that
- * operation to the `UringContext`; `await_resume()` borrows it synchronously
- * from the CQE handler to read the result. Destroying an awaitable while its
- * operation is pending is a programming error.
+ * operation to the `UringContext`; `await_resume()` moves the completed result
+ * out of the operation. Destroying an awaitable while its operation is pending
+ * is a programming error.
  */
 class UringAwaitable final {
  public:
@@ -80,12 +92,14 @@ class UringAwaitable final {
  *
  * `Run()` has one owner. `Post()` and `RequestStop()` may be called concurrently
  * from other threads. Awaitable construction is deferred; `Accept()`, `Recv()`,
- * and `Send()` start on the run thread when awaited. `CancelFd()` is also a
- * run-thread-only operation.
+ * `RecvProvided()`, and `Send()` start on the run thread when awaited.
+ * `CancelFd()` is also a run-thread-only operation.
  */
 class UringContext final {
  public:
   explicit UringContext(std::uint32_t entries = 256);
+
+  UringContext(std::uint32_t entries, UringBufferPoolConfig buffer_pool_config);
 
   ~UringContext();
 
@@ -114,6 +128,14 @@ class UringContext final {
   [[nodiscard]] auto Accept(int listen_fd) -> UringAwaitable;
 
   [[nodiscard]] auto Recv(int fd, void *buffer, std::size_t len) -> UringAwaitable;
+
+  /**
+   * @brief Receives into a buffer selected from this context's registered pool.
+   *
+   * The context must have been constructed with a UringBufferPoolConfig. A
+   * successful result owns the selected buffer through `IoResult::buffer_`.
+   */
+  [[nodiscard]] auto RecvProvided(int fd) -> UringAwaitable;
 
   [[nodiscard]] auto Send(int fd, const void *buffer, std::size_t len) -> UringAwaitable;
 

@@ -43,6 +43,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -52,7 +53,7 @@
 
 #include "common/abort.h"
 #include "common/xrpc_exception.h"
-#include "detail/context_runtime.h"
+#include "uring_context_runtime.h"
 
 namespace xrpc::io {
 
@@ -66,7 +67,7 @@ auto UringContext::Runtime::MakeErrorMessage(std::string_view action, int error_
   return message;
 }
 
-UringContext::Runtime::Runtime(std::uint32_t entries) {
+UringContext::Runtime::Runtime(std::uint32_t entries, std::optional<UringBufferPoolConfig> buffer_pool_config) {
   staged_operations_.reserve(entries);
 
   const int ret = io_uring_queue_init(entries, &ring_, 0);
@@ -74,11 +75,25 @@ UringContext::Runtime::Runtime(std::uint32_t entries) {
     throw InternalException(MakeErrorMessage("io_uring_queue_init", -ret));
   }
 
-  wakeup_fd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-  if (wakeup_fd_ < 0) {
-    const int error_code = errno;
+  try {
+    if (buffer_pool_config.has_value()) {
+      StatusOr<std::unique_ptr<UringProvidedBufferPool>> registered =
+          UringProvidedBufferPool::Register(ring_, *buffer_pool_config);
+      if (!registered.ok()) {
+        throw InternalException(registered.status().message());
+      }
+      provided_buffer_pool_ = std::move(registered).value();
+    }
+
+    wakeup_fd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (wakeup_fd_ < 0) {
+      const int error_code = errno;
+      throw InternalException(MakeErrorMessage("eventfd", error_code));
+    }
+  } catch (...) {
+    provided_buffer_pool_.reset();
     io_uring_queue_exit(&ring_);
-    throw InternalException(MakeErrorMessage("eventfd", error_code));
+    throw;
   }
 }
 
@@ -86,11 +101,12 @@ UringContext::Runtime::~Runtime() {
   if (wakeup_fd_ >= 0) {
     (void)::close(wakeup_fd_);
   }
+  provided_buffer_pool_.reset();
   io_uring_queue_exit(&ring_);
 }
 
 auto UringContext::Runtime::CurrentThreadId() -> pid_t {
-  static thread_local const pid_t thread_id = static_cast<pid_t>(::syscall(SYS_gettid));
+  static thread_local const auto thread_id = static_cast<pid_t>(::syscall(SYS_gettid));
   return thread_id;
 }
 
@@ -112,6 +128,9 @@ void UringContext::Runtime::AssertRunThread(std::string_view action) const {
 auto UringContext::Runtime::IsRunning() const -> bool { return run_thread_id_.load() != 0; }
 
 UringContext::UringContext(std::uint32_t entries) : runtime_(std::make_unique<Runtime>(entries)) {}
+
+UringContext::UringContext(std::uint32_t entries, UringBufferPoolConfig buffer_pool_config)
+    : runtime_(std::make_unique<Runtime>(entries, buffer_pool_config)) {}
 
 UringContext::~UringContext() = default;
 

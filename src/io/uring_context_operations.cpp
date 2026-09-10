@@ -52,7 +52,7 @@
 
 #include "common/abort.h"
 #include "common/xrpc_exception.h"
-#include "detail/context_runtime.h"
+#include "uring_context_runtime.h"
 
 namespace xrpc::io {
 
@@ -126,6 +126,7 @@ auto UringContext::Runtime::TryStartAwaitableOperation(std::unique_ptr<Operation
   switch (operation->type_) {
     case OperationType::Accept:
     case OperationType::Recv:
+    case OperationType::RecvProvided:
     case OperationType::Send:
       break;
     case OperationType::Unknown:
@@ -142,6 +143,14 @@ auto UringContext::Runtime::TryStartAwaitableOperation(std::unique_ptr<Operation
       break;
     case OperationType::Recv:
       io_uring_prep_recv(sqe, operation->fd_, operation->buffer_, operation->length_, 0);
+      break;
+    case OperationType::RecvProvided:
+      if (!provided_buffer_pool_) {
+        Abort("UringContext attempted a provided-buffer receive without a registered pool");
+      }
+      io_uring_prep_recv(sqe, operation->fd_, nullptr, provided_buffer_pool_->BufferSize(), 0);
+      sqe->flags |= IOSQE_BUFFER_SELECT;
+      sqe->buf_group = provided_buffer_pool_->GroupId();
       break;
     case OperationType::Send:
       io_uring_prep_send(sqe, operation->fd_, operation->buffer_, operation->length_, MSG_NOSIGNAL);
@@ -189,8 +198,24 @@ void UringContext::Runtime::ProcessAwaitableCqe(Operation &operation, io_uring_c
   operation.result_.fd_ = operation.fd_;
   operation.result_.result_ = cqe->res;
   operation.result_.error_code_ = cqe->res < 0 ? -cqe->res : 0;
-  if (operation.type_ == OperationType::Recv || operation.type_ == OperationType::Send) {
+  if (operation.type_ == OperationType::Recv || operation.type_ == OperationType::RecvProvided ||
+      operation.type_ == OperationType::Send) {
     operation.result_.bytes_transferred_ = cqe->res > 0 ? static_cast<std::size_t>(cqe->res) : 0;
+  }
+  if (operation.type_ == OperationType::RecvProvided) {
+    const bool has_selected_buffer = (cqe->flags & IORING_CQE_F_BUFFER) != 0;
+    if (cqe->res > 0 && !has_selected_buffer) {
+      io_uring_cqe_seen(&ring_, cqe);
+      Abort("io_uring completed a provided-buffer receive without selecting a buffer");
+    }
+    if (has_selected_buffer) {
+      if (!provided_buffer_pool_) {
+        io_uring_cqe_seen(&ring_, cqe);
+        Abort("io_uring selected a buffer after its provided-buffer pool was destroyed");
+      }
+      const auto buffer_id = static_cast<std::uint16_t>(cqe->flags >> IORING_CQE_BUFFER_SHIFT);
+      operation.result_.buffer_ = provided_buffer_pool_->Acquire(buffer_id, operation.result_.bytes_transferred_);
+    }
   }
 
   io_uring_cqe_seen(&ring_, cqe);
@@ -264,6 +289,16 @@ auto UringContext::Recv(int fd, void *buffer, std::size_t len) -> UringAwaitable
   return UringAwaitable(*this, std::move(operation));
 }
 
+auto UringContext::RecvProvided(int fd) -> UringAwaitable {
+  if (!runtime_->provided_buffer_pool_) {
+    throw LifecycleException("UringContext::RecvProvided requires a registered provided-buffer pool");
+  }
+  auto operation = std::make_unique<Operation>();
+  operation->type_ = OperationType::RecvProvided;
+  operation->fd_ = fd;
+  return UringAwaitable(*this, std::move(operation));
+}
+
 auto UringContext::Send(int fd, const void *buffer, std::size_t len) -> UringAwaitable {
   auto operation = std::make_unique<Operation>();
   operation->type_ = OperationType::Send;
@@ -318,12 +353,12 @@ auto UringAwaitable::await_suspend(std::coroutine_handle<> continuation) -> bool
 
 auto UringAwaitable::await_resume() -> IoResult {
   if (active_operation_ != nullptr) {
-    IoResult result = active_operation_->result_;
+    IoResult result = std::move(active_operation_->result_);
     active_operation_ = nullptr;
     return result;
   }
   if (unstarted_operation_) {
-    IoResult result = unstarted_operation_->result_;
+    IoResult result = std::move(unstarted_operation_->result_);
     unstarted_operation_.reset();
     return result;
   }
