@@ -137,8 +137,6 @@ class ServerConnection final {
 
   io::Socket socket_;
 
-  std::string read_buffer_;
-
   struct PendingWrite final {
     std::string bytes_;
   };

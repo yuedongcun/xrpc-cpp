@@ -107,6 +107,31 @@ auto ReadProvidedInvalidFd(xrpc::io::UringContext &context) -> xrpc::runtime::Ta
   co_return co_await context.RecvProvided(-1);
 }
 
+auto ExhaustAndReusePool(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<void> {
+  auto first = co_await context.RecvProvided(fd);
+  EXPECT_EQ(first.result_, 4);
+  auto held_buffer = std::move(first.buffer_);
+  EXPECT_TRUE(first.buffer_.Empty());
+
+  // The only buffer remains leased, so the next receive must fail rather than overwrite it.
+  auto exhausted = co_await context.RecvProvided(fd);
+  EXPECT_EQ(exhausted.error_code_, ENOBUFS);
+  EXPECT_EQ(exhausted.buffer_group_, 7);
+  EXPECT_TRUE(exhausted.buffer_.Empty());
+  const auto bytes = held_buffer.Bytes();
+  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(bytes.data()), bytes.size()), "abcd");
+
+  held_buffer = {};
+  auto next = co_await context.RecvProvided(fd);
+  EXPECT_EQ(next.result_, 4);
+  const auto next_bytes = next.buffer_.Bytes();
+  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(next_bytes.data()), next_bytes.size()), "efgh");
+  next.buffer_ = {};
+  auto eof = co_await context.RecvProvided(fd);
+  EXPECT_EQ(eof.result_, 0);
+  EXPECT_TRUE(eof.buffer_.Empty());
+}
+
 }  // namespace
 
 TEST(IoUringAwaitableTest, MoveBeforeAwaitPreservesOperation) {
@@ -261,4 +286,17 @@ TEST(IoUringAwaitableTest, ProvidedRecvErrorDoesNotReturnBuffer) {
   EXPECT_NE(result.error_code_, 0);
   EXPECT_LT(result.result_, 0);
   EXPECT_TRUE(result.buffer_.Empty());
+}
+
+TEST(IoUringAwaitableTest, ProvidedPoolExhaustionPreservesLeaseAndRecoversAfterRelease) {
+  xrpc::io::Socket listen_socket;
+  ASSERT_TRUE(listen_socket.Bind("127.0.0.1", 0).ok());
+  ASSERT_TRUE(listen_socket.Listen(1).ok());
+  xrpc::io::Socket client_socket;
+  ASSERT_TRUE(client_socket.Connect("127.0.0.1", listen_socket.LocalPort().value()).ok());
+  auto server_socket = listen_socket.Accept().value();
+  ASSERT_TRUE(client_socket.WriteAll("abcdefgh").ok());
+  client_socket.ShutdownWrite();
+  xrpc::io::UringContext context(8, {.buffer_count_ = 1, .buffer_size_ = 4, .group_id_ = 7});
+  WaitTaskWithContext(ExhaustAndReusePool(context, server_socket.fd()), context);
 }

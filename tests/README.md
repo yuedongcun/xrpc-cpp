@@ -7,7 +7,7 @@
 | 改动内容 | 主要测试 | 核心行为 |
 | --- | --- | --- |
 | 协程基础 | `common/task_test.cpp` | 返回值、等待、异常传播 |
-| io_uring / buffer pool | `io/uring_awaitable_test.cpp` | 收发、停止、operation 生命周期、buffer 复用 |
+| io_uring / buffer pool | `io/uring_awaitable_test.cpp` | 收发、停止、operation 生命周期、buffer 耗尽与归还复用 |
 | 线协议 | `protocol/protocol_test.cpp` | 编解码、所有截断位置、长度和非法数据 |
 | 接收数据拼帧 | `server/rpc_frame_stream_test.cpp` | 跨次输入保留半包、多帧解析、错误关闭 |
 | 连接读写 | `server/server_connection_io_uring_test.cpp` | pipeline、异步响应、背压、关闭 |

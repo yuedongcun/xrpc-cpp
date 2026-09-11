@@ -82,7 +82,7 @@ flowchart TD
 | 协程函数 | 等待的 I/O | 职责 |
 | --- | --- | --- |
 | `RpcServer::Impl::AcceptLoop()` | `Accept()` | 持续接收新 TCP 连接 |
-| `ServerConnection::ReadLoop()` | `Recv()` | 读取并解析一条连接上的请求字节流 |
+| `ServerConnection::ReadLoop()` | `RecvProvided()` | 读取并解析一条连接上的请求字节流 |
 | `ServerConnection::WriteLoop()` | 写队列通知、`Send()` | 等待并按顺序发送该连接写队列中的响应 |
 
 三者都返回 `Task<void>`。当前客户端不使用协程，生产路径也没有其他返回 `Task` 的函数。下面是连接读协程的简化结构：
@@ -90,17 +90,20 @@ flowchart TD
 ```cpp
 auto ServerConnection::ReadLoop() -> runtime::Task<void> {
   while (...) {
-    const io::IoResult result =
-        co_await context_->Recv(fd, buffer, size);
+    io::IoResult result = co_await context_.RecvProvided(fd);
 
-    // 解码并处理收到的数据
+    // 把 result.buffer_.Bytes() 交给 FrameStream，再归还 buffer
   }
 }
 ```
 
 调用协程函数时，编译器会把函数转换为状态机，并创建 coroutine frame，用来保存局部变量、当前执行位置和 promise。`Task<void>` 持有这个 frame 的 coroutine handle；xRPC 的 `Task` 初始处于挂起状态，由所属 runtime 通过 `Start()` 启动。
 
-每条服务端连接固定拥有一条读协程和一条写协程。读协程通过 `Recv()` 等待内核网络输入；写协程在有数据时通过 `Send()` 等待 socket，在队列为空时通过一个单等待者 awaiter 等待用户态入队通知。两种等待都只挂起当前协程，不阻塞 Connection I/O 线程。
+每条服务端连接固定拥有一条读协程和一条写协程。读协程通过 `RecvProvided()` 等待内核网络输入；写协程在有数据时通过 `Send()` 等待 socket，在队列为空时通过一个单等待者 awaiter 等待用户态入队通知。两种等待都只挂起当前协程，不阻塞 Connection I/O 线程。
+
+当前服务端使用单次 provided-buffer receive，尚未启用 multishot。每个 Connection I/O Loop 注册独立的 buffer pool，默认 512 × 16 KiB（8 MiB 数据区），由该 Loop 的连接共享；注册失败会使初始化失败，没有普通 `Recv()` 回退。`FrameStream::FeedBytes()` 仍复制输入，返回后立即归还 buffer，再分发请求，因此这一步还不是零复制。
+
+池耗尽返回 `ENOBUFS` 时，服务端通过 `LogError()` 同步向 stderr 写入一行错误，包含 connection ID、fd、buffer group、errno 和 `action=close_connection`，随后只关闭当前连接。暂不排队、等待 buffer 或自动重试。其他接收错误也记录后关闭；正常 EOF 和取消不记录错误。该日志入口只是最小可观测能力，不包含异步队列、限流或指标，高频错误时可能增加 I/O 线程开销。
 
 协程返回类型需要向编译器提供 `promise_type`。在 xRPC 中，`Task<void>::promise_type` 实际指向存放在 coroutine frame 内的 `TaskPromise<void>`。它参与整个协程从创建到结束的过程：
 

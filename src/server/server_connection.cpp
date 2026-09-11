@@ -3,7 +3,11 @@
 #include "server/server_connection.h"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
+#include <cerrno>
+#include <cinttypes>
+#include <cstdio>
 #include <memory>
 #include <new>
 #include <string>
@@ -12,13 +16,12 @@
 
 #include <sys/socket.h>
 
+#include "common/log.h"
 #include "server/connection_io_loop.h"
 #include "server/service_registry.h"
 
 namespace xrpc {
 namespace {
-
-auto MakeReadBufferSize() -> std::size_t { return 16U * 1024U; }
 
 auto MakeMaxWriteBatchBytes() -> std::size_t { return 64U * 1024U; }
 
@@ -67,7 +70,6 @@ ServerConnection::ServerConnection(ConnectionId connection_id, ConnectionIoLoop 
       frame_stream_(config.protocol_limits_),
       protocol_limits_(config.protocol_limits_),
       socket_(std::move(socket)),
-      read_buffer_(MakeReadBufferSize(), '\0'),
       limits_(config.limits_),
       on_closed_(std::move(on_closed)),
       read_loop_task_(ReadLoop()),
@@ -91,7 +93,7 @@ void ServerConnection::WriteQueueAwaiter::await_suspend(std::coroutine_handle<> 
 
 auto ServerConnection::ReadLoop() -> runtime::Task<void> {
   while (state_ == State::Active) {
-    const io::IoResult recv_result = co_await context_.Recv(socket_.fd(), read_buffer_.data(), read_buffer_.size());
+    io::IoResult recv_result = co_await context_.RecvProvided(socket_.fd());
     if (state_ == State::Closed) {
       co_return;
     }
@@ -107,12 +109,24 @@ auto ServerConnection::ReadLoop() -> runtime::Task<void> {
     }
 
     if (recv_result.result_ < 0) {
+      if (recv_result.error_code_ != ECANCELED) {
+        std::array<char, 256> message{};
+        const char *reason = recv_result.error_code_ == ENOBUFS ? "recv buffer pool exhausted" : "recv failed";
+        (void)std::snprintf(message.data(), message.size(),
+                            "%s connection_id=%" PRIu64 " fd=%d buffer_group=%u errno=%d action=close_connection",
+                            reason, connection_id_, recv_result.fd_,
+                            static_cast<unsigned int>(recv_result.buffer_group_), recv_result.error_code_);
+        LogError(message.data());
+      }
       Close();
       co_return;
     }
 
-    const std::string_view received_bytes(read_buffer_.data(), recv_result.bytes_transferred_);
+    const auto bytes = recv_result.buffer_.Bytes();
+    const std::string_view received_bytes(reinterpret_cast<const char *>(bytes.data()), bytes.size());
     FrameStreamFeedResult feed_result = frame_stream_.FeedBytes(received_bytes);
+    // FeedBytes owns its copied input. Release before dispatch and the next receive.
+    recv_result.buffer_ = {};
     if (!HandleFeedResult(std::move(feed_result))) {
       co_return;
     }

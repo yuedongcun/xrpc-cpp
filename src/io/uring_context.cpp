@@ -90,7 +90,7 @@ UringContext::Runtime::Runtime(std::uint32_t entries, std::optional<UringBufferP
       const int error_code = errno;
       throw InternalException(MakeErrorMessage("eventfd", error_code));
     }
-  } catch (...) {
+  } catch (...) {  // XRPC_EXCEPTION_GUARD: release registered resources if construction fails
     provided_buffer_pool_.reset();
     io_uring_queue_exit(&ring_);
     throw;

@@ -203,6 +203,7 @@ void UringContext::Runtime::ProcessAwaitableCqe(Operation &operation, io_uring_c
     operation.result_.bytes_transferred_ = cqe->res > 0 ? static_cast<std::size_t>(cqe->res) : 0;
   }
   if (operation.type_ == OperationType::RecvProvided) {
+    operation.result_.buffer_group_ = provided_buffer_pool_->GroupId();
     const bool has_selected_buffer = (cqe->flags & IORING_CQE_F_BUFFER) != 0;
     if (cqe->res > 0 && !has_selected_buffer) {
       io_uring_cqe_seen(&ring_, cqe);

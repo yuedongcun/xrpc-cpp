@@ -106,7 +106,7 @@ sequenceDiagram
   participant Worker as Worker 线程
   participant Handler as ServiceRegistry / Handler
 
-  IO->>IO: ReadLoop co_await Recv()
+  IO->>IO: ReadLoop co_await RecvProvided()
   IO->>IO: RpcFrameStream::FeedBytes()
   IO->>IO: 检查单连接 inflight 上限
   IO->>Pool: TrySubmitBatch(requests)

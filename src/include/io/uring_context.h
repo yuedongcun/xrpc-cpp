@@ -47,6 +47,8 @@ struct IoResult {
   int result_ = 0;
   int error_code_ = 0;
   std::size_t bytes_transferred_ = 0;
+  // Identifies the provided-buffer group even when receive fails without a buffer.
+  std::uint16_t buffer_group_ = 0;
   UringBuffer buffer_;
 };
 
