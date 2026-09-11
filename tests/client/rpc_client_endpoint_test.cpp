@@ -233,22 +233,18 @@ TEST(RpcClientEndpointTest, MultiplexedConnectionRoutesByStickyKeyAndReusesPerEn
   }
 }
 
-TEST(RpcClientEndpointTest, RejectsEmptyTargetAtCreation) {
-  xrpc::RpcClientOptions options;
+TEST(RpcClientEndpointTest, RejectsInvalidOptionsAtCreation) {
+  xrpc::RpcClientOptions empty_target;
+  xrpc::RpcClientOptions zero_payload_limit;
+  zero_payload_limit.target_ = "list://127.0.0.1:9000";
+  zero_payload_limit.max_payload_size_ = 0;
 
-  const xrpc::StatusOr<xrpc::RpcClient> result = xrpc::RpcClient::Create(options);
-  ASSERT_FALSE(result.ok());
-  EXPECT_EQ(result.status().code(), xrpc::StatusCode::InvalidArgument);
-}
-
-TEST(RpcClientEndpointTest, RejectsZeroMaxPayloadSizeAtCreation) {
-  xrpc::RpcClientOptions options;
-  options.target_ = "list://127.0.0.1:9000";
-  options.max_payload_size_ = 0;
-
-  const xrpc::StatusOr<xrpc::RpcClient> result = xrpc::RpcClient::Create(options);
-  ASSERT_FALSE(result.ok());
-  EXPECT_EQ(result.status().code(), xrpc::StatusCode::InvalidArgument);
+  for (const auto &options : {empty_target, zero_payload_limit}) {
+    SCOPED_TRACE(options.target_.empty() ? "empty target" : "zero payload limit");
+    const auto result = xrpc::RpcClient::Create(options);
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), xrpc::StatusCode::InvalidArgument);
+  }
 }
 
 TEST(RpcClientEndpointTest, CallPayloadRejectsPayloadLargerThanConfiguredLimitBeforeConnect) {

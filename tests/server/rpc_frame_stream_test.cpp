@@ -115,58 +115,30 @@ TEST(RpcFrameStreamTest, FeedBytesKeepsHalfPacketUntilComplete) {
   EXPECT_EQ(second.requests_[0].payload_, "half");
 }
 
-TEST(RpcFrameStreamTest, FeedBytesClosesFrameStreamWhenDeclaredPayloadExceedsDefaultLimit) {
-  xrpc::RpcFrameStream frame_stream;
-  xrpc::FrameHeader header;
-  header.payload_size_ = static_cast<std::uint32_t>(xrpc::ProtocolLimits::DEFAULT_MAX_PAYLOAD_SIZE + 1U);
-
-  const xrpc::FrameStreamFeedResult result = frame_stream.FeedBytes(EncodeFrameHeader(header));
-
-  EXPECT_TRUE(result.closed_);
-  EXPECT_TRUE(result.requests_.empty());
+TEST(RpcFrameStreamTest, ClosesOnOversizedPayload) {
+  for (const auto limit : {xrpc::ProtocolLimits::DEFAULT_MAX_PAYLOAD_SIZE, std::size_t{3}}) {
+    SCOPED_TRACE(limit);
+    xrpc::RpcFrameStream frame_stream(xrpc::MakeProtocolLimits(limit).value());
+    xrpc::FrameHeader header;
+    header.payload_size_ = static_cast<std::uint32_t>(limit + 1U);
+    const auto result = frame_stream.FeedBytes(EncodeFrameHeader(header));
+    EXPECT_TRUE(result.closed_);
+    EXPECT_TRUE(result.requests_.empty());
+  }
 }
 
-TEST(RpcFrameStreamTest, FeedBytesClosesFrameStreamWhenPayloadExceedsConfiguredLimit) {
-  xrpc::RpcFrameStream frame_stream(xrpc::MakeProtocolLimits(3).value());
-
-  xrpc::RequestEnvelope request;
-  request.request_id_ = 501;
-  request.service_name_ = "EchoService";
-  request.method_name_ = "Echo";
-  request.payload_ = "1234";
-
-  xrpc::FrameCodec default_codec;
-  const xrpc::FrameStreamFeedResult result = frame_stream.FeedBytes(default_codec.Encode(request).value());
-
-  EXPECT_TRUE(result.closed_);
-  EXPECT_TRUE(result.requests_.empty());
-}
-
-TEST(RpcFrameStreamTest, EncodeResponseBuildsResponseFrame) {
+TEST(RpcFrameStreamTest, EncodeResponsePreservesFields) {
   xrpc::RpcFrameStream frame_stream;
-
-  xrpc::ResponseEnvelope response;
-  response.request_id_ = 301;
-  response.status_ = xrpc::Status::Ok();
-  response.payload_ = "payload";
-
-  const std::string frame = frame_stream.EncodeResponse(std::move(response)).value();
-  const xrpc::ResponseEnvelope decoded = DecodeResponseFrame(frame);
-  EXPECT_EQ(decoded.request_id_, 301U);
-  EXPECT_TRUE(decoded.status_.ok());
-  EXPECT_EQ(decoded.payload_, "payload");
-}
-
-TEST(RpcFrameStreamTest, EncodeResponsePreservesErrorStatus) {
-  xrpc::RpcFrameStream frame_stream;
-  xrpc::ResponseEnvelope response;
-  response.request_id_ = 402;
-  response.status_ = {xrpc::StatusCode::Internal, "handler failed"};
-
-  const std::string response_frame = frame_stream.EncodeResponse(std::move(response)).value();
-  const xrpc::ResponseEnvelope decoded_response = DecodeResponseFrame(response_frame);
-
-  EXPECT_EQ(decoded_response.request_id_, 402U);
-  EXPECT_EQ(decoded_response.status_.code(), xrpc::StatusCode::Internal);
-  EXPECT_EQ(decoded_response.status_.message(), "handler failed");
+  for (const auto &status : {xrpc::Status::Ok(), xrpc::Status{xrpc::StatusCode::Internal, "handler failed"}}) {
+    SCOPED_TRACE(static_cast<int>(status.code()));
+    xrpc::ResponseEnvelope response;
+    response.request_id_ = 301;
+    response.status_ = status;
+    response.payload_ = "payload";
+    const auto decoded = DecodeResponseFrame(frame_stream.EncodeResponse(std::move(response)).value());
+    EXPECT_EQ(decoded.request_id_, 301U);
+    EXPECT_EQ(decoded.status_.code(), status.code());
+    EXPECT_EQ(decoded.status_.message(), status.message());
+    EXPECT_EQ(decoded.payload_, "payload");
+  }
 }

@@ -283,58 +283,28 @@ TEST(RpcServerLifecycleTest, WildcardListenRequiresServiceAddressWhenRegistratio
   EXPECT_EQ(server.Run().code(), xrpc::StatusCode::InvalidArgument);
 }
 
-TEST(RpcServerLifecycleTest, RejectsZeroListenBacklogAtConstruction) {
-  xrpc::RpcServerOptions options;
-  options.listen_backlog_ = 0;
-
-  const xrpc::StatusOr<xrpc::RpcServer> result = xrpc::RpcServer::Create(options);
-  ASSERT_FALSE(result.ok());
-  EXPECT_EQ(result.status().code(), xrpc::StatusCode::InvalidArgument);
-}
-
-TEST(RpcServerLifecycleTest, RejectsListenBacklogOutsideSocketApiRange) {
-  xrpc::RpcServerOptions options;
-  options.listen_backlog_ = static_cast<std::size_t>(std::numeric_limits<int>::max()) + 1U;
-
-  const xrpc::StatusOr<xrpc::RpcServer> result = xrpc::RpcServer::Create(options);
-  ASSERT_FALSE(result.ok());
-  EXPECT_EQ(result.status().code(), xrpc::StatusCode::InvalidArgument);
-}
-
-TEST(RpcServerLifecycleTest, RejectsZeroConnectionIoThreadsAtConstruction) {
-  xrpc::RpcServerOptions options;
-  options.connection_io_threads_ = 0;
-
-  const xrpc::StatusOr<xrpc::RpcServer> result = xrpc::RpcServer::Create(options);
-  ASSERT_FALSE(result.ok());
-  EXPECT_EQ(result.status().code(), xrpc::StatusCode::InvalidArgument);
-}
-
-TEST(RpcServerLifecycleTest, RejectsServiceAddressWithoutServiceNameAtConstruction) {
-  xrpc::RpcServerOptions options;
-  options.service_address_ = "127.0.0.1";
-
-  const xrpc::StatusOr<xrpc::RpcServer> result = xrpc::RpcServer::Create(options);
-  ASSERT_FALSE(result.ok());
-  EXPECT_EQ(result.status().code(), xrpc::StatusCode::InvalidArgument);
-}
-
-TEST(RpcServerLifecycleTest, RejectsZeroBackpressureLimitsAtConstruction) {
-  xrpc::RpcServerOptions options;
-  options.max_pending_jobs_global_ = 0;
-
-  const xrpc::StatusOr<xrpc::RpcServer> result = xrpc::RpcServer::Create(options);
-  ASSERT_FALSE(result.ok());
-  EXPECT_EQ(result.status().code(), xrpc::StatusCode::InvalidArgument);
-}
-
-TEST(RpcServerLifecycleTest, RejectsZeroMaxPayloadSizeAtConstruction) {
-  xrpc::RpcServerOptions options;
-  options.max_payload_size_ = 0;
-
-  const xrpc::StatusOr<xrpc::RpcServer> result = xrpc::RpcServer::Create(options);
-  ASSERT_FALSE(result.ok());
-  EXPECT_EQ(result.status().code(), xrpc::StatusCode::InvalidArgument);
+TEST(RpcServerLifecycleTest, RejectsInvalidOptionsAtCreation) {
+  struct Case {
+    const char *name_;
+    void (*configure_)(xrpc::RpcServerOptions &);
+  };
+  const Case cases[] = {
+      {"zero backlog", [](auto &o) { o.listen_backlog_ = 0; }},
+      {"backlog overflow",
+       [](auto &o) { o.listen_backlog_ = static_cast<std::size_t>(std::numeric_limits<int>::max()) + 1U; }},
+      {"zero I/O threads", [](auto &o) { o.connection_io_threads_ = 0; }},
+      {"address without service name", [](auto &o) { o.service_address_ = "127.0.0.1"; }},
+      {"zero pending jobs", [](auto &o) { o.max_pending_jobs_global_ = 0; }},
+      {"zero payload limit", [](auto &o) { o.max_payload_size_ = 0; }},
+  };
+  for (const auto &test_case : cases) {
+    SCOPED_TRACE(test_case.name_);
+    xrpc::RpcServerOptions options;
+    test_case.configure_(options);
+    const auto result = xrpc::RpcServer::Create(options);
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), xrpc::StatusCode::InvalidArgument);
+  }
 }
 
 TEST(RpcServerLifecycleTest, PerConnectionInflightLimitReturnsResourceExhausted) {

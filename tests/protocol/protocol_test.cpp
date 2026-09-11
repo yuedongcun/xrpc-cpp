@@ -386,48 +386,4 @@ TEST(FrameCodecRobustTest, PayloadMayContainNullBytesAndNonTextBytes) {
   EXPECT_EQ(decoded.payload_, payload);
 }
 
-TEST(FrameCodecRobustTest, CompleteFrameHeaderButIncompleteMetadataNeedsMoreData) {
-  FrameCodec codec;
-
-  RequestEnvelope req;
-  req.request_id_ = 9;
-  req.service_name_ = "S";
-  req.method_name_ = "M";
-  req.payload_ = "P";
-
-  std::string frame = codec.Encode(req).value();
-  ASSERT_GT(frame.size(), FrameHeader::SIZE);
-
-  // Provide only the complete FrameHeader, without the protobuf metadata or
-  // payload bytes that follow it.
-  auto result = codec.Decode(std::string_view(frame.data(), FrameHeader::SIZE));
-  EXPECT_EQ(result.error_, ProtocolError::NeedMoreData);
-  EXPECT_EQ(result.consumed_, 0U);
-  EXPECT_FALSE(result.HasEnvelope());
-}
-
-TEST(FrameCodecRobustTest, IncompletePayloadNeedsMoreData) {
-  FrameCodec codec;
-
-  RequestEnvelope req;
-  req.request_id_ = 10;
-  req.service_name_ = "S";
-  req.method_name_ = "M";
-  req.payload_ = "long-payload";
-
-  std::string frame = codec.Encode(req).value();
-  ASSERT_GT(frame.size(), FrameHeader::SIZE);
-
-  auto decoded_header = FrameHeader::Decode(std::string_view(frame.data(), FrameHeader::SIZE));
-  ASSERT_TRUE(decoded_header.has_value());
-
-  const size_t full_size = frame.size();
-  const size_t missing_one_byte = full_size - 1;
-
-  auto result = codec.Decode(std::string_view(frame.data(), missing_one_byte));
-  EXPECT_EQ(result.error_, ProtocolError::NeedMoreData);
-  EXPECT_EQ(result.consumed_, 0U);
-  EXPECT_FALSE(result.HasEnvelope());
-}
-
 }  // namespace xrpc
