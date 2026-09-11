@@ -4,9 +4,9 @@
  *
  * A one-shot asynchronous request has one `Operation` containing both its I/O
  * parameters and coroutine completion state. `UringAwaitable` owns the
- * operation until `await_suspend()` transfers it to the runtime. The CQE path
- * takes final ownership, stores the result, resumes the coroutine synchronously,
- * and destroys the operation after `await_resume()` has consumed that result.
+ * operation until `await_suspend()` transfers it to the runtime. A multishot
+ * awaitable keeps that operation in the runtime while CQEs carry MORE and
+ * releases it on the final CQE.
  *
  * Operation lifecycle:
  *
@@ -52,7 +52,7 @@
 
 #include "common/abort.h"
 #include "common/xrpc_exception.h"
-#include "uring_context_runtime.h"
+#include "io/uring_context_runtime.h"
 
 namespace xrpc::io {
 
@@ -148,7 +148,11 @@ auto UringContext::Runtime::TryStartAwaitableOperation(std::unique_ptr<Operation
       if (!provided_buffer_pool_) {
         Abort("UringContext attempted a provided-buffer receive without a registered pool");
       }
-      io_uring_prep_recv(sqe, operation->fd_, nullptr, provided_buffer_pool_->BufferSize(), 0);
+      if (operation->awaitable_ != nullptr) {
+        io_uring_prep_recv_multishot(sqe, operation->fd_, nullptr, 0, 0);
+      } else {
+        io_uring_prep_recv(sqe, operation->fd_, nullptr, provided_buffer_pool_->BufferSize(), 0);
+      }
       sqe->flags |= IOSQE_BUFFER_SELECT;
       sqe->buf_group = provided_buffer_pool_->GroupId();
       break;
@@ -174,9 +178,13 @@ void UringContext::Runtime::ProcessCqe(io_uring_cqe *cqe) {
   }
 
   std::unique_ptr<Operation> operation(raw_operation);
+  const bool keep_multishot_operation = operation->awaitable_ != nullptr && (cqe->flags & IORING_CQE_F_MORE) != 0;
   switch (operation->completion_category_) {
     case Operation::CompletionCategory::Awaitable:
       ProcessAwaitableCqe(*operation, cqe);
+      if (keep_multishot_operation) {
+        [[maybe_unused]] Operation *released = operation.release();
+      }
       return;
     case Operation::CompletionCategory::Cancel:
       ProcessCancelCqe(cqe);
@@ -192,7 +200,11 @@ void UringContext::Runtime::ProcessAwaitableCqe(Operation &operation, io_uring_c
     io_uring_cqe_seen(&ring_, cqe);
     Abort("UringContext received an awaitable CQE with no pending I/O");
   }
-  --pending_io_operations_;
+  const bool is_multishot = operation.awaitable_ != nullptr;
+  const bool has_more = (cqe->flags & IORING_CQE_F_MORE) != 0;
+  if (!is_multishot || !has_more) {
+    --pending_io_operations_;
+  }
 
   operation.result_.type_ = operation.type_;
   operation.result_.fd_ = operation.fd_;
@@ -220,6 +232,24 @@ void UringContext::Runtime::ProcessAwaitableCqe(Operation &operation, io_uring_c
   }
 
   io_uring_cqe_seen(&ring_, cqe);
+  if (is_multishot) {
+    UringAwaitable *awaitable = operation.awaitable_;
+    awaitable->result_ = std::move(operation.result_);
+    awaitable->result_ready_ = true;
+    if (!has_more) {
+      awaitable->active_operation_ = nullptr;
+    }
+    std::coroutine_handle<> continuation = std::exchange(operation.continuation_, {});
+    if (!continuation) {
+      Abort("multishot receive completed without a waiting coroutine");
+    }
+    continuation.resume();
+    if (has_more && !operation.continuation_) {
+      Abort("multishot consumer must await the receive again before yielding");
+    }
+    return;
+  }
+
   std::coroutine_handle<> continuation = std::exchange(operation.continuation_, {});
   if (!continuation) {
     Abort("UringContext completed an awaitable operation without a continuation");
@@ -274,6 +304,13 @@ void UringContext::Runtime::SubmitCancelFd(int fd) {
   FlushSubmissionBatch();
 }
 
+void UringContext::CancelFd(int fd) {
+  if (fd < 0 || !runtime_->IsRunning()) {
+    return;
+  }
+  runtime_->SubmitCancelFd(fd);
+}
+
 auto UringContext::Accept(int listen_fd) -> UringAwaitable {
   auto operation = std::make_unique<Operation>();
   operation->type_ = OperationType::Accept;
@@ -300,6 +337,16 @@ auto UringContext::RecvProvided(int fd) -> UringAwaitable {
   return UringAwaitable(*this, std::move(operation));
 }
 
+auto UringContext::RecvProvidedMultishot(int fd) -> UringAwaitable {
+  if (!runtime_->provided_buffer_pool_) {
+    throw LifecycleException("UringContext::RecvProvidedMultishot requires a registered provided-buffer pool");
+  }
+  auto operation = std::make_unique<Operation>();
+  operation->type_ = OperationType::RecvProvided;
+  operation->fd_ = fd;
+  return UringAwaitable(*this, std::move(operation), true);
+}
+
 auto UringContext::Send(int fd, const void *buffer, std::size_t len) -> UringAwaitable {
   auto operation = std::make_unique<Operation>();
   operation->type_ = OperationType::Send;
@@ -309,8 +356,8 @@ auto UringContext::Send(int fd, const void *buffer, std::size_t len) -> UringAwa
   return UringAwaitable(*this, std::move(operation));
 }
 
-UringAwaitable::UringAwaitable(UringContext &context, std::unique_ptr<Operation> operation) noexcept
-    : context_(&context), unstarted_operation_(std::move(operation)) {}
+UringAwaitable::UringAwaitable(UringContext &context, std::unique_ptr<Operation> operation, bool multishot) noexcept
+    : context_(&context), unstarted_operation_(std::move(operation)), multishot_(multishot) {}
 
 UringAwaitable::~UringAwaitable() {
   if (active_operation_ != nullptr) {
@@ -321,7 +368,10 @@ UringAwaitable::~UringAwaitable() {
 UringAwaitable::UringAwaitable(UringAwaitable &&other) noexcept
     : context_(std::exchange(other.context_, nullptr)),
       unstarted_operation_(std::move(other.unstarted_operation_)),
-      active_operation_(std::exchange(other.active_operation_, nullptr)) {
+      active_operation_(std::exchange(other.active_operation_, nullptr)),
+      result_(std::move(other.result_)),
+      multishot_(std::exchange(other.multishot_, false)),
+      result_ready_(std::exchange(other.result_ready_, false)) {
   if (active_operation_ != nullptr) {
     Abort("UringAwaitable moved while an I/O operation is pending");
   }
@@ -336,14 +386,37 @@ auto UringAwaitable::operator=(UringAwaitable &&other) noexcept -> UringAwaitabl
   }
   context_ = std::exchange(other.context_, nullptr);
   unstarted_operation_ = std::move(other.unstarted_operation_);
+  result_ = std::move(other.result_);
+  multishot_ = std::exchange(other.multishot_, false);
+  result_ready_ = std::exchange(other.result_ready_, false);
   return *this;
 }
 
 auto UringAwaitable::await_suspend(std::coroutine_handle<> continuation) -> bool {
-  if (context_ == nullptr || !unstarted_operation_ || active_operation_ != nullptr) {
+  if (context_ == nullptr || (!unstarted_operation_ && active_operation_ == nullptr)) {
     Abort("UringAwaitable suspended in an invalid or already-consumed state");
   }
 
+  if (multishot_) {
+    if (active_operation_ == nullptr) {
+      Operation *operation = unstarted_operation_.get();
+      operation->awaitable_ = this;
+      if (!context_->TryStartOperation(unstarted_operation_, continuation)) {
+        return false;
+      }
+      active_operation_ = operation;
+    } else {
+      if (active_operation_->continuation_) {
+        Abort("multishot receive already has a waiting coroutine");
+      }
+      active_operation_->continuation_ = continuation;
+    }
+    return true;
+  }
+
+  if (active_operation_ != nullptr || !unstarted_operation_) {
+    Abort("UringAwaitable suspended in an invalid or already-consumed state");
+  }
   Operation *operation = unstarted_operation_.get();
   if (!context_->TryStartOperation(unstarted_operation_, continuation)) {
     return false;
@@ -353,6 +426,18 @@ auto UringAwaitable::await_suspend(std::coroutine_handle<> continuation) -> bool
 }
 
 auto UringAwaitable::await_resume() -> IoResult {
+  if (multishot_) {
+    if (result_ready_) {
+      result_ready_ = false;
+      return std::exchange(result_, {});
+    }
+    if (unstarted_operation_) {
+      IoResult result = std::move(unstarted_operation_->result_);
+      unstarted_operation_.reset();
+      return result;
+    }
+    Abort("multishot receive resumed without an operation result");
+  }
   if (active_operation_ != nullptr) {
     IoResult result = std::move(active_operation_->result_);
     active_operation_ = nullptr;

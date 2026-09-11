@@ -46,7 +46,7 @@
 
 #include "common/abort.h"
 #include "common/xrpc_exception.h"
-#include "uring_context_runtime.h"
+#include "io/uring_context_runtime.h"
 
 namespace xrpc::io {
 
@@ -184,5 +184,9 @@ void UringContext::Runtime::DrainWakeupCounter() const {
     throw InternalException(MakeErrorMessage("eventfd read", errno));
   }
 }
+
+void UringContext::RequestStop() { runtime_->RequestStop(); }
+
+void UringContext::Post(std::function<void()> fn) { runtime_->EnqueuePosted(std::move(fn)); }
 
 }  // namespace xrpc::io

@@ -132,6 +132,102 @@ auto ExhaustAndReusePool(xrpc::io::UringContext &context, int fd) -> xrpc::runti
   EXPECT_TRUE(eof.buffer_.Empty());
 }
 
+auto ReadMultishot(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<std::string> {
+  auto receive = context.RecvProvidedMultishot(fd);
+  std::string received;
+  std::size_t completions = 0;
+  while (true) {
+    auto result = co_await receive;
+    EXPECT_EQ(result.error_code_, 0);
+    if (result.result_ <= 0) {
+      EXPECT_EQ(result.result_, 0);
+      break;
+    }
+    ++completions;
+    const auto bytes = result.buffer_.Bytes();
+    received.append(reinterpret_cast<const char *>(bytes.data()), bytes.size());
+  }
+  EXPECT_GE(completions, 3);
+  co_return received;
+}
+
+auto CancelMultishot(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<void> {
+  auto receive = context.RecvProvidedMultishot(fd);
+  context.Post([&context, fd]() {
+    context.CancelFd(fd);
+    context.CancelFd(fd);
+  });
+  while (true) {
+    auto result = co_await receive;
+    if (result.error_code_ == ECANCELED) {
+      EXPECT_TRUE(result.buffer_.Empty());
+      break;
+    }
+    EXPECT_GT(result.result_, 0);
+    if (result.result_ <= 0) {
+      co_return;
+    }
+    result.buffer_ = {};
+  }
+}
+
+auto DrainCancelledMultishot(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<void> {
+  {
+    auto receive = context.RecvProvidedMultishot(fd);
+    auto result = co_await receive;
+    EXPECT_GT(result.result_, 0);
+    context.CancelFd(fd);
+    while (true) {
+      auto drained = co_await receive;
+      if (drained.error_code_ == ECANCELED) {
+        EXPECT_TRUE(drained.buffer_.Empty());
+        break;
+      }
+      EXPECT_GT(drained.result_, 0);
+      if (drained.result_ <= 0) {
+        co_return;
+      }
+      drained.buffer_ = {};
+    }
+  }
+  // Reception has drained; Run also drains the cancellation acknowledgement.
+  context.RequestStop();
+}
+
+auto DestroyUndrainedMultishot(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<void> {
+  auto receive = context.RecvProvidedMultishot(fd);
+  auto result = co_await receive;
+  EXPECT_GT(result.result_, 0);
+  context.CancelFd(fd);
+  // A cancellation request alone is not permission to destroy the awaitable.
+}
+
+auto ExhaustMultishot(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<void> {
+  auto receive = context.RecvProvidedMultishot(fd);
+  auto first = co_await receive;
+  EXPECT_EQ(first.result_, 4);
+  auto exhausted = co_await receive;
+  EXPECT_EQ(exhausted.error_code_, ENOBUFS);
+  EXPECT_EQ(exhausted.buffer_group_, 7);
+  const auto bytes = first.buffer_.Bytes();
+  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(bytes.data()), bytes.size()), "abcd");
+  first.buffer_ = {};
+  auto remaining = co_await context.RecvProvided(fd);
+  EXPECT_EQ(remaining.result_, 4);
+  const auto next_bytes = remaining.buffer_.Bytes();
+  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(next_bytes.data()), next_bytes.size()), "efgh");
+}
+
+auto CheckMultishotErrors(xrpc::io::UringContext &context) -> xrpc::runtime::Task<void> {
+  auto invalid = context.RecvProvidedMultishot(-1);
+  auto error = co_await invalid;
+  EXPECT_EQ(error.error_code_, EBADF);
+  auto stopped = context.RecvProvidedMultishot(-1);
+  context.RequestStop();
+  auto after_stop = co_await stopped;
+  EXPECT_EQ(after_stop.error_code_, ECANCELED);
+}
+
 }  // namespace
 
 TEST(IoUringAwaitableTest, MoveBeforeAwaitPreservesOperation) {
@@ -299,4 +395,70 @@ TEST(IoUringAwaitableTest, ProvidedPoolExhaustionPreservesLeaseAndRecoversAfterR
   client_socket.ShutdownWrite();
   xrpc::io::UringContext context(8, {.buffer_count_ = 1, .buffer_size_ = 4, .group_id_ = 7});
   WaitTaskWithContext(ExhaustAndReusePool(context, server_socket.fd()), context);
+}
+
+TEST(IoUringMultishotTest, ReceivesMultipleBuffersAndEof) {
+  xrpc::io::Socket listener;
+  ASSERT_TRUE(listener.Bind("127.0.0.1", 0).ok());
+  ASSERT_TRUE(listener.Listen(1).ok());
+  xrpc::io::Socket client;
+  ASSERT_TRUE(client.Connect("127.0.0.1", listener.LocalPort().value()).ok());
+  auto server = listener.Accept().value();
+  ASSERT_TRUE(client.WriteAll("abcdefghijkl").ok());
+  client.ShutdownWrite();
+  xrpc::io::UringContext context(16, {.buffer_count_ = 16, .buffer_size_ = 4});
+  EXPECT_EQ(WaitTaskWithContext(ReadMultishot(context, server.fd()), context), "abcdefghijkl");
+}
+
+TEST(IoUringMultishotTest, CancellationDrainsBeforeDestruction) {
+  xrpc::io::Socket listener;
+  ASSERT_TRUE(listener.Bind("127.0.0.1", 0).ok());
+  ASSERT_TRUE(listener.Listen(1).ok());
+  xrpc::io::Socket client;
+  ASSERT_TRUE(client.Connect("127.0.0.1", listener.LocalPort().value()).ok());
+  auto server = listener.Accept().value();
+  {
+    xrpc::io::UringContext context(16, {.buffer_count_ = 16, .buffer_size_ = 4});
+    WaitTaskWithContext(CancelMultishot(context, server.fd()), context);
+  }
+  ASSERT_TRUE(client.WriteAll("abcdefghijkl").ok());
+  {
+    xrpc::io::UringContext context(16, {.buffer_count_ = 16, .buffer_size_ = 4});
+    WaitTaskWithContext(DrainCancelledMultishot(context, server.fd()), context);
+  }
+}
+
+TEST(IoUringMultishotTest, CancellationWithoutDrainDoesNotPermitDestruction) {
+  EXPECT_DEATH(
+      {
+        xrpc::io::Socket listener;
+        EXPECT_TRUE(listener.Bind("127.0.0.1", 0).ok());
+        EXPECT_TRUE(listener.Listen(1).ok());
+        xrpc::io::Socket client;
+        EXPECT_TRUE(client.Connect("127.0.0.1", listener.LocalPort().value()).ok());
+        auto server = listener.Accept().value();
+        EXPECT_TRUE(client.WriteAll("abcd").ok());
+        xrpc::io::UringContext context(16, {.buffer_count_ = 16, .buffer_size_ = 4});
+        WaitTaskWithContext(DestroyUndrainedMultishot(context, server.fd()), context);
+      },
+      "UringAwaitable destroyed while an I/O operation is pending");
+}
+
+TEST(IoUringMultishotTest, PoolExhaustionIsTerminalAndLeaseCanBeReused) {
+  xrpc::io::Socket listener;
+  ASSERT_TRUE(listener.Bind("127.0.0.1", 0).ok());
+  ASSERT_TRUE(listener.Listen(1).ok());
+  xrpc::io::Socket client;
+  ASSERT_TRUE(client.Connect("127.0.0.1", listener.LocalPort().value()).ok());
+  auto server = listener.Accept().value();
+  ASSERT_TRUE(client.WriteAll("abcdefgh").ok());
+  xrpc::io::UringContext context(8, {.buffer_count_ = 1, .buffer_size_ = 4, .group_id_ = 7});
+  WaitTaskWithContext(ExhaustMultishot(context, server.fd()), context);
+}
+
+TEST(IoUringMultishotTest, InvalidFdAndCancellationBeforeAdmission) {
+  xrpc::io::UringContext no_pool;
+  EXPECT_THROW((void)no_pool.RecvProvidedMultishot(-1), xrpc::LifecycleException);
+  xrpc::io::UringContext context(8, {.buffer_count_ = 8, .buffer_size_ = 4});
+  WaitTaskWithContext(CheckMultishotErrors(context), context);
 }

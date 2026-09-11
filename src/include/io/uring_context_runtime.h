@@ -43,6 +43,7 @@ struct Operation {
   std::size_t length_ = 0;
   IoResult result_;
   std::coroutine_handle<> continuation_;
+  UringAwaitable *awaitable_ = nullptr;
 };
 
 struct UringContext::Runtime final {

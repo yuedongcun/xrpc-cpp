@@ -1,5 +1,5 @@
 /**
- * @file uring_context.cpp
+ * @file uring_context_loop.cpp
  * @brief Implements `UringContext` lifetime and its completion event loop.
  *
  * This file owns the io_uring ring and wakeup eventfd, and enforces that only
@@ -27,7 +27,7 @@
  * outstanding I/O and the wakeup poll have been drained.
  *
  * Implementation split:
- * - `uring_context.cpp`: ring/eventfd lifetime and the `Run()` loop.
+ * - `uring_context_loop.cpp`: runtime lifetime and the completion event loop.
  * - `uring_context_operations.cpp`: operation submission and CQE handling.
  * - `uring_context_control.cpp`: cross-thread wakeup and posted callbacks.
  */
@@ -53,7 +53,7 @@
 
 #include "common/abort.h"
 #include "common/xrpc_exception.h"
-#include "uring_context_runtime.h"
+#include "io/uring_context_runtime.h"
 
 namespace xrpc::io {
 
@@ -174,16 +174,5 @@ void UringContext::Run() {
     runtime_->FlushSubmissionBatch();
   }
 }
-
-void UringContext::RequestStop() { runtime_->RequestStop(); }
-
-void UringContext::CancelFd(int fd) {
-  if (fd < 0 || !runtime_->IsRunning()) {
-    return;
-  }
-  runtime_->SubmitCancelFd(fd);
-}
-
-void UringContext::Post(std::function<void()> fn) { runtime_->EnqueuePosted(std::move(fn)); }
 
 }  // namespace xrpc::io

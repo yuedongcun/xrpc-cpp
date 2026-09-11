@@ -3,9 +3,10 @@
  * @brief Declares xRPC's single-threaded io_uring event loop.
  *
  * A `UringContext` owns one io_uring ring and drives asynchronous operations
- * on the thread running `Run()`. `Accept`, `Recv`, `RecvProvided`, and `Send`
- * create deferred, move-only awaitables. The operation starts when the
- * coroutine suspends and resumes that coroutine with an `IoResult`.
+ * on the thread running `Run()`. `Accept`, `Recv`, `RecvProvided`,
+ * `RecvProvidedMultishot`, and `Send` create deferred, move-only awaitables.
+ * The operation starts when the coroutine suspends and resumes that coroutine
+ * with an `IoResult`.
  *
  * `Post()` and `RequestStop()` form the cross-thread control boundary. They wake the
  * event loop safely, but callbacks themselves always execute on the run thread.
@@ -54,40 +55,7 @@ struct IoResult {
 
 struct Operation;
 class UringContext;
-
-/**
- * @brief Move-only result of an I/O submission for one coroutine awaiter.
- *
- * An awaitable owns one unstarted operation. `await_suspend()` transfers that
- * operation to the `UringContext`; `await_resume()` moves the completed result
- * out of the operation. Destroying an awaitable while its operation is pending
- * is a programming error.
- */
-class UringAwaitable final {
- public:
-  ~UringAwaitable();
-
-  UringAwaitable(const UringAwaitable &) = delete;
-  auto operator=(const UringAwaitable &) -> UringAwaitable & = delete;
-
-  UringAwaitable(UringAwaitable &&other) noexcept;
-  auto operator=(UringAwaitable &&other) noexcept -> UringAwaitable &;
-
-  auto await_ready() const noexcept -> bool { return false; }
-
-  auto await_suspend(std::coroutine_handle<> continuation) -> bool;
-
-  auto await_resume() -> IoResult;
-
- private:
-  explicit UringAwaitable(UringContext &context, std::unique_ptr<Operation> operation) noexcept;
-
-  friend class UringContext;
-
-  UringContext *context_ = nullptr;
-  std::unique_ptr<Operation> unstarted_operation_;
-  Operation *active_operation_ = nullptr;
-};
+class UringAwaitable;
 
 /**
  * @brief Single-threaded io_uring execution context with cross-thread control.
@@ -139,6 +107,15 @@ class UringContext final {
    */
   [[nodiscard]] auto RecvProvided(int fd) -> UringAwaitable;
 
+  /**
+   * @brief Receives repeatedly into this context's provided-buffer pool.
+   *
+   * The returned awaitable is reused with `co_await` for each completion. It
+   * must remain alive until the final completion and is only suitable for a
+   * synchronous consumer on the context's run thread.
+   */
+  [[nodiscard]] auto RecvProvidedMultishot(int fd) -> UringAwaitable;
+
   [[nodiscard]] auto Send(int fd, const void *buffer, std::size_t len) -> UringAwaitable;
 
   void CancelFd(int fd);
@@ -154,6 +131,44 @@ class UringContext final {
       -> bool;
 
   std::unique_ptr<Runtime> runtime_;
+};
+
+/**
+ * @brief Move-only result of an I/O submission for one coroutine awaiter.
+ *
+ * An awaitable owns one unstarted operation. `await_suspend()` transfers that
+ * operation to the `UringContext`; `await_resume()` moves the completed result
+ * out of the operation. A multishot awaitable keeps its operation alive while
+ * CQEs carry `IORING_CQE_F_MORE`; its final CQE ends the operation.
+ */
+class UringAwaitable final {
+ public:
+  ~UringAwaitable();
+
+  UringAwaitable(const UringAwaitable &) = delete;
+  auto operator=(const UringAwaitable &) -> UringAwaitable & = delete;
+
+  UringAwaitable(UringAwaitable &&other) noexcept;
+  auto operator=(UringAwaitable &&other) noexcept -> UringAwaitable &;
+
+  auto await_ready() const noexcept -> bool { return false; }
+
+  auto await_suspend(std::coroutine_handle<> continuation) -> bool;
+
+  auto await_resume() -> IoResult;
+
+ private:
+  explicit UringAwaitable(UringContext &context, std::unique_ptr<Operation> operation, bool multishot = false) noexcept;
+
+  friend class UringContext;
+  friend struct UringContext::Runtime;
+
+  UringContext *context_ = nullptr;
+  std::unique_ptr<Operation> unstarted_operation_;
+  Operation *active_operation_ = nullptr;
+  IoResult result_;
+  bool multishot_ = false;
+  bool result_ready_ = false;
 };
 
 }  // namespace xrpc::io
