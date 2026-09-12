@@ -1,5 +1,5 @@
 /**
- * @file uring_context.h
+ * @file context.h
  * @brief Declares xRPC's single-threaded io_uring event loop.
  *
  * A `UringContext` owns one io_uring ring and drives asynchronous operations
@@ -15,14 +15,24 @@
 
 #pragma once
 
+#include <atomic>
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <optional>
+#include <queue>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include <liburing.h>
+#include <sys/types.h>
 #include <utility>
 
-#include "io/uring_buffer_pool.h"
+#include "io/uring/buffer_pool.h"
 
 namespace xrpc::io {
 
@@ -54,7 +64,6 @@ struct IoResult {
 };
 
 struct Operation;
-class UringContext;
 class UringAwaitable;
 
 /**
@@ -125,12 +134,55 @@ class UringContext final {
  private:
   friend class UringAwaitable;
 
-  struct Runtime;
+  // Resource lifetime and ownership of the Run thread.
+  UringContext(std::optional<UringBufferPoolConfig> buffer_pool_config, std::uint32_t entries);
+  void BeginRun();
+  void EndRun();
+  void AssertRunThread(std::string_view action) const;
+  [[nodiscard]] auto IsRunning() const -> bool;
+  [[nodiscard]] static auto CurrentThreadId() -> pid_t;
+  [[nodiscard]] static auto MakeErrorMessage(std::string_view action, int error_code) -> std::string;
 
+  // Submission and completion of coroutine I/O.
   [[nodiscard]] auto TryStartOperation(std::unique_ptr<Operation> &operation, std::coroutine_handle<> continuation)
       -> bool;
+  [[nodiscard]] auto AcquireSqe() -> io_uring_sqe *;
+  void SubmitPreparedOperation(std::unique_ptr<Operation> operation, bool counts_as_pending_io) noexcept;
+  void FlushSubmissionBatch();
+  void ProcessCqe(io_uring_cqe *cqe);
+  void ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe);
+  void ProcessCancelCqe(io_uring_cqe *cqe);
+  static auto MakeCancelledResult(const Operation &operation) -> IoResult;
+  void SubmitCancelFd(int fd);
 
-  std::unique_ptr<Runtime> runtime_;
+  // Cross-thread control enters through Post() and RequestStop().
+  void DrainPosted();
+  void SubmitWakeupPoll();
+  void ProcessWakeupCqe(io_uring_cqe *cqe);
+  void SignalWakeup() const;
+  void DrainWakeupCounter() const;
+
+  io_uring ring_{};
+
+  std::unique_ptr<UringProvidedBufferPool> provided_buffer_pool_;
+
+  int wakeup_fd_ = -1;
+
+  std::atomic<pid_t> run_thread_id_{0};
+
+  std::atomic<bool> stop_requested_{false};
+
+  std::size_t pending_io_operations_ = 0;
+
+  std::vector<std::unique_ptr<Operation>> staged_operations_;
+
+  bool wakeup_poll_pending_ = false;
+
+  std::mutex post_mutex_;
+
+  bool accepting_posts_ = true;
+
+  std::queue<std::function<void()>> posted_callbacks_;
 };
 
 /**
@@ -161,7 +213,6 @@ class UringAwaitable final {
   explicit UringAwaitable(UringContext &context, std::unique_ptr<Operation> operation, bool multishot = false) noexcept;
 
   friend class UringContext;
-  friend struct UringContext::Runtime;
 
   UringContext *context_ = nullptr;
   std::unique_ptr<Operation> unstarted_operation_;

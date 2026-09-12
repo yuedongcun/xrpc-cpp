@@ -4,6 +4,12 @@
 
 本文记录 xRPC 从 one-shot 接收到 provided buffer pool、再到 multishot 的优化过程。每一步先建立可理解的生命周期，再用针对性的测试和 benchmark 检查结果。
 
+## 实现组织
+
+内部接口保留在 `src/include/io/uring/context.h` 和 `src/include/io/uring/buffer_pool.h`；实现对应 `src/io/uring/context.cpp` 和 `buffer_pool.cpp`。`UringContext` 直接拥有 ring、buffer pool、eventfd 和操作状态，不再通过 `Runtime` 对象间接管理。
+
+`context.cpp` 按职责分区，相关实现尽量集中；新增机制时可按关联关系调整分区与函数顺序。理解整体调度可从 `Run()` 入手；追踪单个 I/O 可沿 `TryStartOperation()`、`FlushSubmissionBatch()`、`ProcessCqe()` 查看提交、所有权转移与完成处理。buffer 的注册、领取和归还集中在 `buffer_pool.cpp`。
+
 ## 优化起点
 
 原来的 `ServerConnection` 持有一个 16 KiB 的 `std::string read_buffer_`，在连接构造时分配，之后每次 `Recv()` 复用。不存在“每次接收重新分配 16 KiB buffer”的问题。
@@ -113,8 +119,8 @@ multishot recv 要求内核支持该操作，项目内 liburing 手册标注从 
 
 相关代码与文档：
 
-- [buffer pool 接口](../src/include/io/uring_buffer_pool.h)
-- [io_uring 完成处理](../src/io/uring_context_operations.cpp)
+- [buffer pool 接口](../src/include/io/uring/buffer_pool.h)
+- [io_uring context 实现](../src/io/uring/context.cpp)
 - [连接读写协程](../src/server/server_connection.cpp)
 - [I/O runtime 说明](io-runtime.md)
 - [项目内 liburing recv 手册](../third_party/liburing/man/io_uring_prep_recv.3)

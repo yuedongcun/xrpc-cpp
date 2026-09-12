@@ -19,7 +19,7 @@
 #include <vector>
 
 #include "io/socket.h"
-#include "io/uring_context.h"
+#include "io/uring/context.h"
 #include "server/connection_config.h"
 #include "server/server_connection.h"
 #include "server/worker_pool.h"

@@ -22,10 +22,8 @@ endif()
 
 set(XRPC_SOURCES
     io/socket.cpp
-    io/uring_buffer_pool.cpp
-    io/uring_context_loop.cpp
-    io/uring_context_operations.cpp
-    io/uring_context_control.cpp
+    io/uring/buffer_pool.cpp
+    io/uring/context.cpp
     protocol/frame_header.cpp
     protocol/frame_codec.cpp
     common/abort.cpp

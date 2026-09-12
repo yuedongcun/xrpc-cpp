@@ -1,6 +1,13 @@
-/** @file uring_buffer_pool.cpp @brief Implements io_uring provided-buffer ownership. */
+/**
+ * @file buffer_pool.cpp
+ * @brief Implements io_uring provided-buffer registration and buffer leases.
+ *
+ * UringProvidedBufferPool registers buffers for kernel selection. Acquire()
+ * wraps a selected buffer in a move-only UringBuffer lease; destroying or
+ * resetting that lease returns the buffer to the pool for reuse.
+ */
 
-#include "io/uring_buffer_pool.h"
+#include "io/uring/buffer_pool.h"
 
 #include <limits>
 #include <memory>

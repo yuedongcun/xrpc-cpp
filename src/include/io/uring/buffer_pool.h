@@ -1,5 +1,5 @@
 /**
- * @file uring_buffer_pool.h
+ * @file buffer_pool.h
  * @brief Declares a provided-buffer ring and its move-only buffer lease.
  */
 
