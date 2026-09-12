@@ -1,4 +1,5 @@
 #include <protocol/xrpc/frame_metadata.pb.h>
+#include <cstdlib>
 
 #include <algorithm>
 #include <array>
@@ -30,6 +31,7 @@
 #include <unistd.h>
 
 #include "benchmark_stats.h"
+#include "common/log.h"
 #include "proto/echo.pb.h"
 #include "protocol/frame_header.h"
 
@@ -927,6 +929,7 @@ auto RunFirehoseBenchmark(const FirehoseConfig &config) -> BenchmarkStats { retu
 }  // namespace xrpc::benchmark
 
 auto main(int argc, char **argv) -> int {
+  xrpc::LoggingRuntime logging(argv[0]);
   try {
     const xrpc::benchmark::FirehoseConfig config = xrpc::benchmark::ParseConfig(argc, argv);
     std::printf(

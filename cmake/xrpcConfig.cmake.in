@@ -2,13 +2,10 @@
 
 include(CMakeFindDependencyMacro)
 
-find_dependency(Protobuf)
+find_dependency(Protobuf CONFIG)
 find_dependency(Threads)
 find_dependency(nlohmann_json)
-
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
-find_dependency(LibUring)
-list(POP_BACK CMAKE_MODULE_PATH)
+find_dependency(glog 0.7.1 CONFIG)
 
 if(NOT TARGET xrpc_dependencies::protobuf)
     add_library(xrpc_dependencies::protobuf INTERFACE IMPORTED)
@@ -27,10 +24,20 @@ if(NOT TARGET xrpc_dependencies::nlohmann_json)
 endif()
 
 if(NOT TARGET xrpc_dependencies::liburing)
-    add_library(xrpc_dependencies::liburing INTERFACE IMPORTED)
+    add_library(xrpc_dependencies::liburing STATIC IMPORTED)
     set_target_properties(
         xrpc_dependencies::liburing
-        PROPERTIES INTERFACE_LINK_LIBRARIES LibUring::LibUring
+        PROPERTIES
+            IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/liburing.a"
+            INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_INCLUDEDIR@"
+    )
+endif()
+
+if(NOT TARGET xrpc_dependencies::glog)
+    add_library(xrpc_dependencies::glog INTERFACE IMPORTED)
+    set_target_properties(
+        xrpc_dependencies::glog
+        PROPERTIES INTERFACE_LINK_LIBRARIES glog::glog
     )
 endif()
 

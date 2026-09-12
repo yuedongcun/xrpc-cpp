@@ -49,12 +49,13 @@ class UringBuffer final {
 
   [[nodiscard]] auto Empty() const noexcept -> bool;
 
+  /** Returns the buffer to the pool and clears this lease. Empty leases are a no-op. */
+  void Reset() noexcept;
+
  private:
   friend class UringProvidedBufferPool;
 
   UringBuffer(UringProvidedBufferPool &pool, std::uint16_t buffer_id, std::span<const std::byte> bytes) noexcept;
-
-  void Reset() noexcept;
 
   UringProvidedBufferPool *pool_ = nullptr;
   std::uint16_t buffer_id_ = 0;

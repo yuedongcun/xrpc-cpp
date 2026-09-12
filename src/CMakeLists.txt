@@ -70,6 +70,8 @@ target_link_libraries(
         "$<BUILD_INTERFACE:protobuf::libprotobuf>"
         "$<INSTALL_INTERFACE:xrpc_dependencies::protobuf>"
     PRIVATE
+        "$<BUILD_INTERFACE:glog::glog>"
+        "$<INSTALL_INTERFACE:xrpc_dependencies::glog>"
         "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
         "$<INSTALL_INTERFACE:xrpc_dependencies::nlohmann_json>"
         "$<BUILD_INTERFACE:LibUring::LibUring>"

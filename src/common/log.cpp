@@ -1,16 +1,17 @@
 #include "common/log.h"
 
-#include <algorithm>
-#include <cstdio>
-#include <limits>
+#include "common/xrpc_exception.h"
 
 namespace xrpc {
 
-void LogError(std::string_view message) noexcept {
-  const auto length =
-      static_cast<int>(std::min(message.size(), static_cast<std::size_t>(std::numeric_limits<int>::max())));
-  // A single stdio call serializes each line against other stdio writers.
-  (void)std::fprintf(stderr, "[ERROR] %.*s\n", length, message.empty() ? "" : message.data());
+LoggingRuntime::LoggingRuntime(const char *program_name) {
+  if (google::IsGoogleLoggingInitialized()) {
+    throw LifecycleException("LoggingRuntime requires glog to be uninitialized");
+  }
+  google::InitGoogleLogging(program_name);
+  FLAGS_logtostderr = true;
 }
+
+LoggingRuntime::~LoggingRuntime() { google::ShutdownGoogleLogging(); }
 
 }  // namespace xrpc

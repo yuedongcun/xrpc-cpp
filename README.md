@@ -22,11 +22,19 @@ xRPC 将连接管理、网络 I/O 与 RPC 执行分离：客户端通过服务�
 
 ## 快速开始
 
-需要支持 `io_uring` 的 Linux、C++20 编译器、CMake 3.20+ 和 GNU Make；依赖源码已固定在 `third_party/`。
+需要支持 `io_uring` 的 Linux、C++20 编译器、CMake 3.22+ 和 GNU Make；依赖源码已固定在 `third_party/`。
 
 ```bash
 make
 ```
+
+安装到指定目录（同时构建并安装所需三方依赖）：
+
+```bash
+make install INSTALL_PREFIX="$HOME/.local"
+```
+
+下游工程设置 `CMAKE_PREFIX_PATH` 指向该安装目录，即可通过 `find_package(xrpc CONFIG REQUIRED)` 和 `xrpc::xrpc` 使用，无需单独安装三方库。
 
 启动服务端：
 

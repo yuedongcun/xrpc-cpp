@@ -18,7 +18,7 @@
 
 - `naming/consul_discovery_integration_test.cpp`
 
-`tests/package_consumer/` 保留为安装后 `find_package(xrpc CONFIG REQUIRED)` 的消费验证，不算入默认测试集。
+`package_consumer_test` 安装完整产物到临时目录，移动安装目录后仅从该目录查找依赖，再构建并运行 `tests/package_consumer/`。它通过实际创建 `RpcServer` 验证静态库依赖可链接，已纳入默认测试集。
 
 ## 运行方式
 

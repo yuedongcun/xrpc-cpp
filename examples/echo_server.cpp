@@ -6,6 +6,8 @@
 #include <string>
 #include <utility>
 
+#include "common/log.h"
+
 namespace {
 
 auto Echo(const xrpc::example::EchoRequest &request) -> xrpc::example::EchoResponse {
@@ -16,7 +18,9 @@ auto Echo(const xrpc::example::EchoRequest &request) -> xrpc::example::EchoRespo
 
 }  // namespace
 
-auto main() -> int {
+auto main(int argc, char **argv) -> int {
+  xrpc::LoggingRuntime logging(argv[0]);
+  (void)argc;
   constexpr std::uint16_t port = 9000;
 
   auto server_result = xrpc::RpcServer::Create();

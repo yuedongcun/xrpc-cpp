@@ -17,7 +17,7 @@ xrpc_protobuf_generate(
 
 function(xrpc_add_example target source)
     add_executable(${target} ${source})
-    target_link_libraries(${target} PRIVATE xrpc::xrpc xrpc_example_proto)
+    target_link_libraries(${target} PRIVATE xrpc::xrpc xrpc_example_proto glog::glog)
     target_include_directories(
         ${target}
         PRIVATE "${PROJECT_SOURCE_DIR}/src/include" "${PROJECT_SOURCE_DIR}/src"

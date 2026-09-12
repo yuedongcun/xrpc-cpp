@@ -1,6 +1,8 @@
-#include <xrpc/status.h>
+#include <xrpc/rpc_server.h>
 
 auto main() -> int {
-  const xrpc::Status status = xrpc::Status::Ok();
-  return status.ok() ? 0 : 1;
+  xrpc::RpcServerOptions options;
+  options.worker_threads_ = 1;
+  auto server = xrpc::RpcServer::Create(options);
+  return server.ok() ? 0 : 1;
 }

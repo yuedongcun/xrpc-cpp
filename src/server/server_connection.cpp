@@ -3,11 +3,8 @@
 #include "server/server_connection.h"
 
 #include <algorithm>
-#include <array>
 #include <cassert>
 #include <cerrno>
-#include <cinttypes>
-#include <cstdio>
 #include <memory>
 #include <new>
 #include <string>
@@ -108,13 +105,10 @@ auto ServerConnection::ReadLoop() -> runtime::Task<void> {
 
     if (recv_result.result_ < 0) {
       if (recv_result.error_code_ != ECANCELED) {
-        std::array<char, 256> message{};
         const char *reason = recv_result.error_code_ == ENOBUFS ? "recv buffer pool exhausted" : "recv failed";
-        (void)std::snprintf(message.data(), message.size(),
-                            "%s connection_id=%" PRIu64 " fd=%d buffer_group=%u errno=%d action=close_connection",
-                            reason, connection_id_, recv_result.fd_,
-                            static_cast<unsigned int>(recv_result.buffer_group_), recv_result.error_code_);
-        LogError(message.data());
+        LOG(ERROR) << reason << " connection_id=" << connection_id_ << " fd=" << recv_result.fd_
+                   << " buffer_group=" << recv_result.buffer_group_ << " errno=" << recv_result.error_code_
+                   << " action=close_connection";
       }
       Close();
       break;
@@ -124,7 +118,7 @@ auto ServerConnection::ReadLoop() -> runtime::Task<void> {
     const std::string_view received_bytes(reinterpret_cast<const char *>(bytes.data()), bytes.size());
     FrameStreamFeedResult feed_result = frame_stream_.FeedBytes(received_bytes);
     // FeedBytes owns its copied input. Release before dispatch and the next receive.
-    recv_result.buffer_ = {};
+    recv_result.buffer_.Reset();
     if (!HandleFeedResult(std::move(feed_result))) {
       break;
     }

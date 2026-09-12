@@ -193,7 +193,7 @@ auto ConnectionIoLoop::RequestStats(bool start_window) -> std::future<Connection
   }
   auto promise = std::make_shared<std::promise<ConnectionLoopStatsSnapshot>>();
   auto future = promise->get_future();
-  context_.Post([this, promise, start_window]() {
+  context_.Post([this, promise, start_window]() -> void {
     if (start_window) {
       pending_write_bytes_peak_ = pending_write_bytes_;
     }

@@ -5,7 +5,11 @@
 #include <iostream>
 #include <utility>
 
-auto main() -> int {
+#include "common/log.h"
+
+auto main(int argc, char **argv) -> int {
+  xrpc::LoggingRuntime logging(argv[0]);
+  (void)argc;
   constexpr std::uint16_t port = 9000;
 
   xrpc::RpcClientOptions options;

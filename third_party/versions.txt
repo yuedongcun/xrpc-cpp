@@ -45,3 +45,8 @@
 # tag: liburing-2.5
 # commit hash: f4e42a515cd78c8c9cac2be14222834be5f8df2b
 # commit hash date: Nov 29 2023
+
+# glog
+# url: https://github.com/google/glog.git
+# tag: v0.7.1
+# commit hash: 7b134a5c82c0c0b5698bb6bf7a835b230c5638e4

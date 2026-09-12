@@ -11,6 +11,7 @@
 
 #include <xrpc/rpc_server.h>
 
+#include "common/log.h"
 #include "proto/echo.pb.h"
 #include "server/stats_output.h"
 
@@ -125,6 +126,7 @@ auto MakeEchoHandler(std::uint64_t delay_us) {
 }  // namespace xrpc::benchmark
 
 auto main(int argc, char **argv) -> int {
+  xrpc::LoggingRuntime logging(argv[0]);
   try {
     xrpc::benchmark::ServerConfig config = xrpc::benchmark::ParseConfig(argc, argv);
     xrpc::StatusOr<xrpc::RpcServer> server_result = xrpc::RpcServer::Create(config.options_);

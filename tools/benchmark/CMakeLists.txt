@@ -26,7 +26,7 @@ function(xrpc_add_benchmark target)
     )
     target_link_libraries(
         ${target}
-        PRIVATE xrpc::xrpc xrpc_benchmark_proto Threads::Threads
+        PRIVATE xrpc::xrpc xrpc_benchmark_proto Threads::Threads glog::glog
     )
     set_target_properties(
         ${target}

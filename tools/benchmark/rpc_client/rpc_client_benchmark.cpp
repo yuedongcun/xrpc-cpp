@@ -2,6 +2,7 @@
 #include <charconv>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <latch>
 #include <memory>
@@ -15,6 +16,7 @@
 #include <xrpc/rpc_client.h>
 
 #include "benchmark_stats.h"
+#include "common/log.h"
 #include "proto/echo.pb.h"
 
 namespace xrpc::benchmark {
@@ -197,6 +199,7 @@ auto RunRpcClientBenchmark(const ClientConfig &config) -> BenchmarkStats {
 }  // namespace xrpc::benchmark
 
 auto main(int argc, char **argv) -> int {
+  xrpc::LoggingRuntime logging(argv[0]);
   try {
     const xrpc::benchmark::ClientConfig config = xrpc::benchmark::ParseConfig(argc, argv);
     std::printf("client=rpc_client host=%s port=%u duration_s=%llu payload_size=%zu threads=%zu\n",
