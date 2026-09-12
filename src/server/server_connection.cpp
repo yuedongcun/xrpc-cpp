@@ -103,6 +103,17 @@ auto ServerConnection::ReadLoop() -> runtime::Task<void> {
       break;
     }
 
+    if (recv_result.error_code_ == ENOBUFS && !receive_pending) {
+      recv_result.buffer_.Reset();
+      const auto outcome =
+          co_await context_.WaitForBufferReturnSince(socket_.fd(), recv_result.buffer_returns_at_start_);
+      if (outcome == io::BufferReturnWaitOutcome::Cancelled || state_ != State::Active) {
+        break;
+      }
+      receive = context_.RecvProvidedMultishot(socket_.fd());
+      continue;
+    }
+
     if (recv_result.result_ < 0) {
       if (recv_result.error_code_ != ECANCELED) {
         const char *reason = recv_result.error_code_ == ENOBUFS ? "recv buffer pool exhausted" : "recv failed";
@@ -189,6 +200,7 @@ void ServerConnection::BeginDrain() {
   }
 
   state_ = State::Draining;
+  context_.CancelBufferReturnWaitsForFd(socket_.fd());
   if (socket_.valid()) {
     (void)::shutdown(socket_.fd(), SHUT_RD);
   }

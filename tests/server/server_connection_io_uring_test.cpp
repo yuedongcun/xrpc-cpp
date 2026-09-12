@@ -163,6 +163,31 @@ void ExpectPeerClosed(xrpc::io::Socket &socket) {
 
 }  // namespace
 
+TEST(ServerConnectionTest, BufferExhaustionRetriesWithoutClosingTheConnection) {
+  ConnectedPair pair = MakeConnectedPair();
+  xrpc::WorkerPool worker_pool(MakeWorkerConfig(1));
+  xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
+  xrpc::ConnectionIoLoop loop(registry, worker_pool, MakeConnectionConfig(), {.buffer_count_ = 1, .buffer_size_ = 256});
+  const std::string payload(32U * 1024U, 'x');
+  // Queue more data than the entire pool before the receive starts.
+  ASSERT_TRUE(pair.client_socket_.WriteAll(MakeRequestFrame(payload, 1)).ok());
+  loop.Start();
+  loop.PostStartConnection(std::move(pair.server_socket_));
+  std::string received_buffer;
+  EXPECT_EQ(DecodeEchoMessage(RecvFrame(pair.client_socket_, received_buffer), 1), "echo: " + payload);
+  const auto recovered = loop.RequestStats().get();
+  EXPECT_GT(recovered.uring_.counters_.provided_buffer_enobufs_, 0U);
+  EXPECT_GT(recovered.uring_.counters_.prepared_multishot_recv_sqes_, 1U);
+  EXPECT_EQ(recovered.live_connections_, 1U);
+  EXPECT_EQ(recovered.uring_.buffer_pool_->outstanding_leases_, 0U);
+  EXPECT_EQ(recovered.uring_.buffer_pool_->acquires_, recovered.uring_.buffer_pool_->returns_);
+  // The same socket must remain usable after recovery.
+  ASSERT_TRUE(pair.client_socket_.WriteAll(MakeRequestFrame("next", 2)).ok());
+  EXPECT_EQ(DecodeEchoMessage(RecvFrame(pair.client_socket_, received_buffer), 2), "echo: next");
+  EXPECT_TRUE(loop.FinishDrain().ok());
+  ExpectPeerClosed(pair.client_socket_);
+}
+
 TEST(ServerConnectionTest, EchoesSingleFrameAndClosesAfterPeerShutdown) {
   ConnectedPair pair = MakeConnectedPair();
   xrpc::WorkerPool worker_pool(MakeWorkerConfig(1));
@@ -478,8 +503,7 @@ TEST(ServerConnectionTest, HandlesConcurrentResponsesWithWorkerPool) {
 
   xrpc::FrameCodec codec;
   EXPECT_TRUE(pair.client_socket_
-                  .WriteAll(codec.Encode(slow_request_envelope).value() +
-                            codec.Encode(fast_request_envelope).value())
+                  .WriteAll(codec.Encode(slow_request_envelope).value() + codec.Encode(fast_request_envelope).value())
                   .ok());
 
   std::string received_buffer;
@@ -574,8 +598,7 @@ TEST(ServerConnectionTest, RejectsEntireReadBatchWhenInflightLimitWouldBeExceede
   rejected_request_envelope.request_id_ = 52;
   xrpc::FrameCodec codec;
   EXPECT_TRUE(pair.client_socket_
-                  .WriteAll(codec.Encode(request_envelope).value() +
-                            codec.Encode(rejected_request_envelope).value())
+                  .WriteAll(codec.Encode(request_envelope).value() + codec.Encode(rejected_request_envelope).value())
                   .ok());
 
   std::string received_buffer;

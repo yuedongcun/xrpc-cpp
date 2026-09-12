@@ -14,6 +14,7 @@
 
 #include "common/xrpc_exception.h"
 #include "server/rpc_server_impl.h"
+#include "server/runtime_access.h"
 #include "server/runtime_stats.h"
 
 namespace xrpc {
@@ -21,12 +22,17 @@ namespace xrpc {
 RpcServer::RpcServer(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 
 auto RpcServer::Create(const RpcServerOptions &options) -> StatusOr<RpcServer> {
+  return ServerRuntimeAccess::CreateWithBufferPool(options, {});
+}
+
+auto ServerRuntimeAccess::CreateWithBufferPool(const RpcServerOptions &options, io::UringBufferPoolConfig buffer_pool)
+    -> StatusOr<RpcServer> {
   try {
-    StatusOr<ServerConfig> config = ServerConfig::Create(options);
+    StatusOr<ServerConfig> config = ServerConfig::Create(options, buffer_pool);
     if (!config.ok()) {
       return StatusOr<RpcServer>(config.status());
     }
-    return StatusOr<RpcServer>(RpcServer(std::make_unique<Impl>(std::move(config).value())));
+    return StatusOr<RpcServer>(RpcServer(std::make_unique<RpcServer::Impl>(std::move(config).value())));
   } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: public API
     return StatusOr<RpcServer>(CaughtExceptionToStatus("failed to create RPC server"));
   }

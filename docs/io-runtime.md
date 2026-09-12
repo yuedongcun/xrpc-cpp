@@ -103,7 +103,7 @@ auto ServerConnection::ReadLoop() -> runtime::Task<void> {
 
 当前服务端使用单次 provided-buffer receive，尚未启用 multishot。每个 Connection I/O Loop 注册独立的 buffer pool，默认 512 × 16 KiB（8 MiB 数据区），由该 Loop 的连接共享；注册失败会使初始化失败，没有普通 `Recv()` 回退。`FrameStream::FeedBytes()` 仍复制输入，返回后立即归还 buffer，再分发请求，因此这一步还不是零复制。
 
-池耗尽返回 `ENOBUFS` 时，服务端通过 `LogError()` 同步向 stderr 写入一行错误，包含 connection ID、fd、buffer group、errno 和 `action=close_connection`，随后只关闭当前连接。暂不排队、等待 buffer 或自动重试。其他接收错误也记录后关闭；正常 EOF 和取消不记录错误。该日志入口只是最小可观测能力，不包含异步队列、限流或指标，高频错误时可能增加 I/O 线程开销。
+multishot 因池耗尽返回最终 `ENOBUFS` 时，服务端保留连接，通过 `WaitForBufferReturnSince(fd, buffer_returns_at_start)` 等待归还进展，再重新提交接收。请求启动时记录 pool 累计归还数；等待时若计数已增加就直接返回 `ReturnObserved`，否则挂起当前协程。该结果只允许重试，不保证 buffer 仍可用。等待队列由 context 运行线程管理，CQE 批次后按登记顺序、限制数量恢复，不在 buffer 归还函数中直接恢复协程。`CancelFd()`、服务端 drain 和 context 停止会取消等待，返回 `Cancelled`。其他接收错误使用 glog 记录后关闭；正常 EOF 和取消不记录错误。
 
 协程返回类型需要向编译器提供 `promise_type`。在 xRPC 中，`Task<void>::promise_type` 实际指向存放在 coroutine frame 内的 `TaskPromise<void>`。它参与整个协程从创建到结束的过程：
 

@@ -23,6 +23,8 @@ struct UringBufferPoolConfig final {
   std::uint32_t buffer_count_ = 512;
   std::uint32_t buffer_size_ = 16U * 1024U;
   std::uint16_t group_id_ = 1;
+
+  [[nodiscard]] auto Validate() const -> Status;
 };
 
 class UringProvidedBufferPool;
@@ -82,6 +84,9 @@ class UringProvidedBufferPool final {
   auto operator=(UringProvidedBufferPool &&) -> UringProvidedBufferPool & = delete;
 
   [[nodiscard]] auto Acquire(std::uint16_t buffer_id, std::size_t size) -> UringBuffer;
+
+  // Owning-thread-only cumulative count, including repeated returns of one buffer.
+  [[nodiscard]] auto ReturnedBufferCount() const noexcept -> std::uint64_t { return returns_; }
 
   [[nodiscard]] auto BufferSize() const noexcept -> std::uint32_t;
 

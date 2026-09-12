@@ -143,3 +143,13 @@ runner 为 benchmark server 提供临时 `--stats_file`，通过 `SIGUSR1` 请�
 `worker_pool` 独立输出已有 admission 总数 `pending_logical_jobs`（包含容量预留、排队和执行中 RPC），以及逐 worker 的 `queued_batches`、`queued_logical_jobs`、`pending_batches` 当前值和排队窗口峰值。一个 batch 可包含多个 RPC。采集复用既有队列锁，逐 worker 采样不构成全局原子快照；峰值也不跨 worker 求和。总快照 scope 为 `server_runtime`，I/O 计数汇总仍只包含 Connection I/O loops。
 
 开启完整统计后的 one-shot / multishot 对照见 [性能与压力记录](../../docs/multishot-recv-observability.md)。
+
+### Buffer 耗尽恢复的压测入口
+
+benchmark server 支持 `--recv_buffer_count=N` 和 `--recv_buffer_size=BYTES`。省略时，每个 Connection I/O loop 使用 512 个 16 KiB buffer；数量必须是 1 到 32768 之间的二次幂，单 buffer 大小必须为正数且不超过 uint32 范围。参数仅通过内部工厂配置 benchmark，公开 `RpcServerOptions` 不增加 pool 配置项。
+
+runner 配置可分别增加 `server_recv_buffer_count` 和 `server_recv_buffer_size`，例如设置为 1 和 256，配合大于 pool 容量的 payload 强制产生资源压力。省略的参数不传给服务端，仍可运行旧版本。结果保存完整配置，启用 `--collect-io-stats` 后还保存实际 `buffer_capacity` 和 `buffer_size`。
+
+恢复等待的累计计数包括 `buffer_return_waits`（所有实际 await 的等待，含立即满足）、`buffer_return_wait_suspensions`（真正挂起入队）、`buffer_return_waits_completed`（观察到归还进展，含立即满足）和 `buffer_return_waits_cancelled`（fd 取消、停止及销毁挂起的等待）。完成等待不代表拿到 buffer，也不代表 recv 成功。`buffer_return_waiters` 的当前值和窗口峰值分别位于 `gauges` 和 `peaks`；新窗口以当前人数为峰值起点。区间累计计数取差值，当前人数和峰值不取差值。
+
+压力实验应结合成功请求、超时、逐连接推进情况、ENOBUFS、recv SQE 和 CPU 判断有效性；等待计数单独不能证明公平或无忙重试。测量客户端关闭后，期望接收请求、buffer 租约和等待人数归零，buffer 借还平衡。短时间统计冒烟测试只验证链路，不用于得出性能结论。

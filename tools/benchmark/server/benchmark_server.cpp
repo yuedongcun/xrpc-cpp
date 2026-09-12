@@ -4,6 +4,7 @@
 #include <csignal>
 #include <cstdio>
 #include <exception>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -13,6 +14,7 @@
 
 #include "common/log.h"
 #include "proto/echo.pb.h"
+#include "server/runtime_access.h"
 #include "server/stats_output.h"
 
 namespace xrpc::benchmark {
@@ -26,6 +28,7 @@ struct ServerConfig final {
   std::uint16_t port_ = 9010;
   std::uint64_t delay_us_ = 0;
   RpcServerOptions options_;
+  io::UringBufferPoolConfig buffer_pool_;
   std::string stats_file_;
 };
 
@@ -81,6 +84,16 @@ void ParseArg(ServerConfig &config, std::string_view arg) {
     config.options_.worker_threads_ = static_cast<std::size_t>(ParseUnsigned(value, "worker_threads"));
   } else if (key == "io_threads") {
     config.options_.connection_io_threads_ = static_cast<std::size_t>(ParseUnsigned(value, "io_threads"));
+  } else if (key == "recv_buffer_count" || key == "recv_buffer_size") {
+    const auto dimension = ParseUnsigned(value, "receive buffer dimension");
+    if (dimension > std::numeric_limits<std::uint32_t>::max()) {
+      throw std::invalid_argument("receive buffer dimension exceeds uint32 range");
+    }
+    if (key == "recv_buffer_count") {
+      config.buffer_pool_.buffer_count_ = static_cast<std::uint32_t>(dimension);
+    } else {
+      config.buffer_pool_.buffer_size_ = static_cast<std::uint32_t>(dimension);
+    }
   } else if (key == "max_inflight_per_connection") {
     config.options_.max_inflight_per_connection_ =
         static_cast<std::size_t>(ParseUnsigned(value, "max_inflight_per_connection"));
@@ -102,13 +115,18 @@ auto ParseConfig(int argc, char **argv) -> ServerConfig {
   if (config.options_.listen_backlog_ == 0) {
     throw std::invalid_argument("listen_backlog must be greater than 0");
   }
+  const auto pool_status = config.buffer_pool_.Validate();
+  if (!pool_status.ok()) {
+    throw std::invalid_argument(pool_status.message());
+  }
   return config;
 }
 
 auto Usage(const char *program) -> std::string {
   return std::string("Usage: ") + program +
          " [--host=IP] [--port=N] [--delay_us=N] [--worker_threads=N] [--io_threads=N] "
-         "[--max_inflight_per_connection=N] [--listen_backlog=N] [--stats_file=PATH]";
+         "[--max_inflight_per_connection=N] [--listen_backlog=N] [--stats_file=PATH] "
+         "[--recv_buffer_count=N] [--recv_buffer_size=BYTES]";
 }
 
 auto MakeEchoHandler(std::uint64_t delay_us) {
@@ -129,7 +147,8 @@ auto main(int argc, char **argv) -> int {
   xrpc::LoggingRuntime logging(argv[0]);
   try {
     xrpc::benchmark::ServerConfig config = xrpc::benchmark::ParseConfig(argc, argv);
-    xrpc::StatusOr<xrpc::RpcServer> server_result = xrpc::RpcServer::Create(config.options_);
+    xrpc::StatusOr<xrpc::RpcServer> server_result =
+        xrpc::ServerRuntimeAccess::CreateWithBufferPool(config.options_, config.buffer_pool_);
     if (!server_result.ok()) {
       throw std::runtime_error(server_result.status().message());
     }
@@ -161,11 +180,12 @@ auto main(int argc, char **argv) -> int {
 
     std::printf(
         "ready host=%s port=%u worker_threads=%zu connection_io_threads=%zu delay_us=%llu "
-        "max_inflight_per_connection=%zu max_write_queue_bytes_per_connection=%zu max_pending_jobs_global=%zu\n",
+        "max_inflight_per_connection=%zu max_write_queue_bytes_per_connection=%zu max_pending_jobs_global=%zu "
+        "recv_buffer_count=%u recv_buffer_size=%u\n",
         config.host_.c_str(), port_result.value(), config.options_.worker_threads_,
         config.options_.connection_io_threads_, static_cast<unsigned long long>(config.delay_us_),
         config.options_.max_inflight_per_connection_, config.options_.max_write_queue_bytes_per_connection_,
-        config.options_.max_pending_jobs_global_);
+        config.options_.max_pending_jobs_global_, config.buffer_pool_.buffer_count_, config.buffer_pool_.buffer_size_);
     std::fflush(stdout);
 
     while (!xrpc::benchmark::stop_requested.load(std::memory_order_relaxed)) {

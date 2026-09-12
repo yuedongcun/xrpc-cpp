@@ -58,7 +58,12 @@ auto MakeConsulRegistrationConfig(const RpcServerOptions &options) -> StatusOr<C
 
 }  // namespace
 
-auto ServerConfig::Create(const RpcServerOptions &options) -> StatusOr<ServerConfig> {
+auto ServerConfig::Create(const RpcServerOptions &options, io::UringBufferPoolConfig buffer_pool)
+    -> StatusOr<ServerConfig> {
+  const auto pool_status = buffer_pool.Validate();
+  if (!pool_status.ok()) {
+    return StatusOr<ServerConfig>(pool_status);
+  }
   StatusOr<WorkerPoolConfig> worker_pool =
       MakeWorkerPoolConfig(options.worker_threads_, options.max_pending_jobs_global_);
   if (!worker_pool.ok()) {
@@ -74,6 +79,7 @@ auto ServerConfig::Create(const RpcServerOptions &options) -> StatusOr<ServerCon
   if (!connection_io.ok()) {
     return StatusOr<ServerConfig>(connection_io.status());
   }
+  connection_io.value().buffer_pool_ = buffer_pool;
   StatusOr<ConsulRegistrationConfig> consul = MakeConsulRegistrationConfig(options);
   if (!consul.ok()) {
     return StatusOr<ServerConfig>(consul.status());

@@ -22,8 +22,9 @@
 
 namespace xrpc {
 
-ConnectionIoLoop::ConnectionIoLoop(ServiceRegistry &registry, WorkerPool &worker_pool, ServerConnectionConfig config)
-    : context_(256, io::UringBufferPoolConfig{}), registry_(registry), worker_pool_(worker_pool), config_(config) {}
+ConnectionIoLoop::ConnectionIoLoop(ServiceRegistry &registry, WorkerPool &worker_pool, ServerConnectionConfig config,
+                                   io::UringBufferPoolConfig buffer_pool_config)
+    : context_(256, buffer_pool_config), registry_(registry), worker_pool_(worker_pool), config_(config) {}
 
 ConnectionIoLoop::~ConnectionIoLoop() { StopImmediately(); }
 

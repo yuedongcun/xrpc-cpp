@@ -200,6 +200,7 @@ class RpcServer final {
 
  private:
   friend struct ServerStatsAccess;
+  friend struct ServerRuntimeAccess;
   class Impl;
 
   explicit RpcServer(std::unique_ptr<Impl> impl);

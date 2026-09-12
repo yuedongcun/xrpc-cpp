@@ -54,7 +54,8 @@ struct DispatchCompletion final {
  */
 class ConnectionIoLoop final {
  public:
-  ConnectionIoLoop(ServiceRegistry &registry, WorkerPool &worker_pool, ServerConnectionConfig config);
+  ConnectionIoLoop(ServiceRegistry &registry, WorkerPool &worker_pool, ServerConnectionConfig config,
+                   io::UringBufferPoolConfig buffer_pool_config = {});
 
   ~ConnectionIoLoop();
 

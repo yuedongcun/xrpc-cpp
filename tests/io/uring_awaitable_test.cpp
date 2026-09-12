@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "common/task.h"
 #include "common/xrpc_exception.h"
@@ -240,7 +241,8 @@ auto DestroyUndrainedMultishot(xrpc::io::UringContext &context, int fd) -> xrpc:
   // A cancellation request alone is not permission to destroy the awaitable.
 }
 
-auto ExhaustMultishot(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<void> {
+auto ExhaustMultishot(xrpc::io::UringContext &context, int fd, bool return_after_wait = false)
+    -> xrpc::runtime::Task<void> {
   auto receive = context.RecvProvidedMultishot(fd);
   auto first = co_await receive;
   EXPECT_EQ(first.result_, 4);
@@ -258,15 +260,30 @@ auto ExhaustMultishot(xrpc::io::UringContext &context, int fd) -> xrpc::runtime:
   EXPECT_EQ(exhausted.buffer_group_, 7);
   const auto bytes = first.buffer_.Bytes();
   EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(bytes.data()), bytes.size()), "abcd");
-  first.buffer_.Reset();
+  EXPECT_EQ(exhausted.buffer_returns_at_start_, 0U);
+  if (return_after_wait) {
+    auto held = std::make_shared<xrpc::io::UringBuffer>(std::move(first.buffer_));
+    context.Post([held]() -> void { held->Reset(); });
+  } else {
+    first.buffer_.Reset();
+  }
+  EXPECT_EQ(co_await context.WaitForBufferReturnSince(fd, exhausted.buffer_returns_at_start_),
+            xrpc::io::BufferReturnWaitOutcome::ReturnObserved);
   const auto released = context.SnapshotStats();
   EXPECT_EQ(released.buffer_pool_->outstanding_leases_, 0U);
   EXPECT_EQ(released.buffer_pool_->acquires_, released.buffer_pool_->returns_);
+  EXPECT_EQ(released.counters_.buffer_return_waits_, 1U);
+  EXPECT_EQ(released.counters_.buffer_return_wait_suspensions_, return_after_wait ? 1U : 0U);
+  EXPECT_EQ(released.counters_.buffer_return_waits_completed_, 1U);
+  EXPECT_EQ(released.counters_.buffer_return_waits_cancelled_, 0U);
+  EXPECT_EQ(released.buffer_return_waiters_, 0U);
+  EXPECT_EQ(released.peaks_.buffer_return_waiters_, return_after_wait ? 1U : 0U);
 
   // Recovery must exercise a new multishot request, not the oneshot path.
   auto restarted = context.RecvProvidedMultishot(fd);
   auto remaining = co_await restarted;
   EXPECT_EQ(remaining.result_, 4);
+  EXPECT_EQ(remaining.buffer_returns_at_start_, 1U);
   const auto next_bytes = remaining.buffer_.Bytes();
   EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(next_bytes.data()), next_bytes.size()), "efgh");
   remaining.buffer_.Reset();
@@ -293,6 +310,70 @@ auto ExhaustMultishot(xrpc::io::UringContext &context, int fd) -> xrpc::runtime:
   EXPECT_EQ(recovered.buffer_pool_->acquires_, 2U);
   EXPECT_EQ(recovered.buffer_pool_->returns_, 2U);
   EXPECT_EQ(recovered.buffer_pool_->outstanding_leases_, 0U);
+}
+
+auto WaitForReturn(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<xrpc::io::BufferReturnWaitOutcome> {
+  co_return co_await context.WaitForBufferReturnSince(fd, 0);
+}
+
+auto CheckWaitCancellation(xrpc::io::UringContext &context) -> xrpc::runtime::Task<void> {
+  auto first = WaitForReturn(context, 100);
+  auto second = WaitForReturn(context, 101);
+  first.Start();
+  second.Start();
+  EXPECT_FALSE(first.Done());
+  EXPECT_FALSE(second.Done());
+  const auto start = context.SnapshotStats(true);
+  EXPECT_EQ(start.buffer_return_waiters_, 2U);
+  EXPECT_EQ(start.peaks_.buffer_return_waiters_, 2U);
+  context.CancelBufferReturnWaitsForFd(100);
+  EXPECT_TRUE(first.Done());
+  EXPECT_EQ(first.Result(), xrpc::io::BufferReturnWaitOutcome::Cancelled);
+  EXPECT_FALSE(second.Done());
+  context.Post([&context]() -> void { context.RequestStop(); });
+  EXPECT_EQ(co_await context.WaitForBufferReturnSince(102, 0), xrpc::io::BufferReturnWaitOutcome::Cancelled);
+  EXPECT_TRUE(second.Done());
+  EXPECT_EQ(second.Result(), xrpc::io::BufferReturnWaitOutcome::Cancelled);
+  EXPECT_EQ(co_await context.WaitForBufferReturnSince(103, 0), xrpc::io::BufferReturnWaitOutcome::Cancelled);
+  const auto stopped = context.SnapshotStats();
+  EXPECT_EQ(stopped.counters_.buffer_return_waits_, 4U);
+  EXPECT_EQ(stopped.counters_.buffer_return_wait_suspensions_, 3U);
+  EXPECT_EQ(stopped.counters_.buffer_return_waits_completed_, 0U);
+  EXPECT_EQ(stopped.counters_.buffer_return_waits_cancelled_, 4U);
+  EXPECT_EQ(stopped.buffer_return_waiters_, 0U);
+  EXPECT_EQ(stopped.peaks_.buffer_return_waiters_, 2U);
+}
+
+auto CheckFdWaitCancellation(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<void> {
+  context.Post([&context, fd]() -> void { context.CancelFd(fd); });
+  EXPECT_EQ(co_await context.WaitForBufferReturnSince(fd, 0), xrpc::io::BufferReturnWaitOutcome::Cancelled);
+}
+
+auto WakeManyReturnWaiters(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<void> {
+  auto received = co_await context.RecvProvided(fd);
+  EXPECT_EQ(received.result_, 4);
+  std::vector<xrpc::runtime::Task<xrpc::io::BufferReturnWaitOutcome>> waiters;
+  for (int i = 0; i < 32; ++i) {
+    waiters.push_back(WaitForReturn(context, i + 100));
+    waiters.back().Start();
+  }
+  auto held = std::make_shared<xrpc::io::UringBuffer>(std::move(received.buffer_));
+  context.Post([held]() -> void { held->Reset(); });
+  EXPECT_EQ(co_await context.WaitForBufferReturnSince(fd, 0), xrpc::io::BufferReturnWaitOutcome::ReturnObserved);
+  for (auto &waiter : waiters) {
+    EXPECT_TRUE(waiter.Done());
+    EXPECT_EQ(waiter.Result(), xrpc::io::BufferReturnWaitOutcome::ReturnObserved);
+  }
+  const auto completed = context.SnapshotStats();
+  EXPECT_EQ(completed.buffer_pool_->outstanding_leases_, 0U);
+  EXPECT_EQ(completed.counters_.buffer_return_waits_, 33U);
+  EXPECT_EQ(completed.counters_.buffer_return_wait_suspensions_, 33U);
+  EXPECT_EQ(completed.counters_.buffer_return_waits_completed_, 33U);
+  EXPECT_EQ(completed.buffer_return_waiters_, 0U);
+  EXPECT_EQ(completed.peaks_.buffer_return_waiters_, 33U);
+  const auto reset = context.SnapshotStats(true);
+  EXPECT_EQ(reset.peaks_.buffer_return_waiters_, 0U);
+  EXPECT_EQ(reset.counters_.buffer_return_waits_completed_, 33U);
 }
 
 auto CheckMultishotErrors(xrpc::io::UringContext &context) -> xrpc::runtime::Task<void> {
@@ -546,6 +627,46 @@ TEST(IoUringMultishotTest, PoolExhaustionIsTerminalAndMultishotRecoversAfterRele
   ASSERT_TRUE(client.WriteAll("abcdefgh").ok());
   xrpc::io::UringContext context(8, {.buffer_count_ = 1, .buffer_size_ = 4, .group_id_ = 7});
   WaitTaskWithContext(ExhaustMultishot(context, server.fd()), context);
+}
+
+TEST(IoUringMultishotTest, ExhaustionWaitResumesAfterDeferredBufferReturn) {
+  xrpc::io::Socket listener;
+  ASSERT_TRUE(listener.Bind("127.0.0.1", 0).ok());
+  ASSERT_TRUE(listener.Listen(1).ok());
+  xrpc::io::Socket client;
+  ASSERT_TRUE(client.Connect("127.0.0.1", listener.LocalPort().value()).ok());
+  auto server = listener.Accept().value();
+  ASSERT_TRUE(client.WriteAll("abcdefgh").ok());
+  xrpc::io::UringContext context(8, {.buffer_count_ = 1, .buffer_size_ = 4, .group_id_ = 7});
+  WaitTaskWithContext(ExhaustMultishot(context, server.fd(), true), context);
+}
+
+TEST(IoUringBufferReturnWaitTest, FdCancellationIsIsolatedAndStopCancelsRemainingWaiters) {
+  xrpc::io::UringContext context(8, {.buffer_count_ = 1, .buffer_size_ = 4});
+  WaitTaskWithContext(CheckWaitCancellation(context), context);
+}
+
+TEST(IoUringBufferReturnWaitTest, CancelFdAlsoCancelsUserSpaceBufferWait) {
+  xrpc::io::Socket listener;
+  ASSERT_TRUE(listener.Bind("127.0.0.1", 0).ok());
+  ASSERT_TRUE(listener.Listen(1).ok());
+  xrpc::io::Socket client;
+  ASSERT_TRUE(client.Connect("127.0.0.1", listener.LocalPort().value()).ok());
+  auto server = listener.Accept().value();
+  xrpc::io::UringContext context(8, {.buffer_count_ = 1, .buffer_size_ = 4});
+  WaitTaskWithContext(CheckFdWaitCancellation(context, server.fd()), context);
+}
+
+TEST(IoUringBufferReturnWaitTest, OneReturnResumesMoreWaitersThanThePerTurnBudget) {
+  xrpc::io::Socket listener;
+  ASSERT_TRUE(listener.Bind("127.0.0.1", 0).ok());
+  ASSERT_TRUE(listener.Listen(1).ok());
+  xrpc::io::Socket client;
+  ASSERT_TRUE(client.Connect("127.0.0.1", listener.LocalPort().value()).ok());
+  auto server = listener.Accept().value();
+  ASSERT_TRUE(client.WriteAll("abcd").ok());
+  xrpc::io::UringContext context(8, {.buffer_count_ = 1, .buffer_size_ = 4});
+  WaitTaskWithContext(WakeManyReturnWaiters(context, server.fd()), context);
 }
 
 TEST(IoUringMultishotTest, InvalidFdAndCancellationBeforeAdmission) {

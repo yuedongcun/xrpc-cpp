@@ -38,8 +38,8 @@ namespace xrpc {
 RpcServer::Impl::Impl(ServerConfig config) : config_(std::move(config)), worker_pool_(config_.worker_pool_) {
   connection_io_loops_.reserve(config_.connection_io_.threads_);
   for (std::size_t index = 0; index < config_.connection_io_.threads_; ++index) {
-    connection_io_loops_.push_back(
-        std::make_unique<ConnectionIoLoop>(registry_, worker_pool_, config_.connection_io_.connection_));
+    connection_io_loops_.push_back(std::make_unique<ConnectionIoLoop>(
+        registry_, worker_pool_, config_.connection_io_.connection_, config_.connection_io_.buffer_pool_));
   }
 }
 

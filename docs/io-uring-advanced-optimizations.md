@@ -40,7 +40,7 @@ RecvProvided → CQE 携带 buffer ID → 获取租约
 
 池的使用和归还限制在所属 I/O 线程，池必须活得比所有租约更久。正常路径在 `FeedBytes()` 返回后立即归还，提前退出则由租约析构归还。
 
-池耗尽返回 `ENOBUFS` 时，目前采用简单策略：通过 `LogError()` 同步向 stderr 输出连接 ID、fd、buffer group、errno，关闭当前连接。暂不引入资源等待队列或自动重试。正常 EOF 和取消不记录错误。同步日志在高频错误下可能影响 I/O 线程，后续根据实际需要演进。
+multishot 池耗尽返回最终 `ENOBUFS` 时，服务端保留连接，等待 pool 归还进展后重新提交接收。context 提供 `WaitForBufferReturnSince`，基准是该请求启动时的累计归还数；已发生的归还不会漏掉。进展不代表 buffer 预留，重试仍可能耗尽。关闭、drain 和 context 停止均取消等待。其他接收错误通过 glog 记录后关闭；正常 EOF 和取消不记录错误。
 
 这一阶段主要改变内存归属，并为 multishot 做准备。每次 recv 的 `Operation` 分配、提交以及 `FeedBytes()` 复制仍然存在，尚无 benchmark 证明独立性能收益。连接数较少时，预分配共享池甚至可能比原方案占用更多内存。
 
@@ -78,7 +78,7 @@ one-shot 路径仍然每收到一个 awaitable CQE 就减少 pending 计数并�
 5. `CancelFd(fd)` 只请求取消。读协程通过同一个 awaitable 等待原接收操作的最终 CQE，之后得到 `ECANCELED`；晚到的成功完成仍要提取并归还 buffer。取消请求自己的 CQE 不代表接收操作已经释放。
 6. awaitable 直接保存接收状态，`Operation` 只借用 awaitable 指针。awaitable 应保持到最终接收 CQE，不能在活动操作期间移动或销毁；最终完成恢复协程后，runtime 不再访问可能已经被协程销毁的 awaitable。
 7. `RequestStop()` 保持原有的“停止接纳并排空”语义，不替调用方取消活动接收。调用方显式 `CancelFd()` 并通过同一个 awaitable 排空，随后销毁 awaitable、关闭 fd；context 继续存活直至剩余 CQE（包括取消请求的完成）排空。
-8. `ENOBUFS` 和其他接收错误均为终止结果，不自动重试。底层返回错误，不关闭 socket、不打日志；后续服务端接入时沿用日志和关闭当前连接的策略。
+8. `ENOBUFS` 和其他接收错误结束本次请求；底层返回结果，不关闭 socket、不自动重试。服务端对最终 `ENOBUFS` 等待归还进展后提交新请求，其他错误沿用日志和关闭当前连接的策略。
 
 最初实现为支持消费者任意异步挂起，增加了 16 槽结果队列和独立的 `UringReceiver` 类。设计复核后，确认当前 `ReadLoop` 在两次接收等待之间只有同步处理，因此移除队列和独立 receiver 类，复用 `UringAwaitable` 表达持续接收操作。
 

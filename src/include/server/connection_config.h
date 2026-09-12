@@ -2,6 +2,7 @@
 
 #include <cstddef>
 
+#include "io/uring/buffer_pool.h"
 #include "protocol/frame_codec.h"
 #include "server/connection_backpressure.h"
 
@@ -15,6 +16,7 @@ struct ServerConnectionConfig final {
 struct ConnectionIoConfig final {
   std::size_t threads_;
   ServerConnectionConfig connection_;
+  io::UringBufferPoolConfig buffer_pool_;
 };
 
 [[nodiscard]] auto MakeConnectionIoConfig(std::size_t threads, std::size_t max_inflight,

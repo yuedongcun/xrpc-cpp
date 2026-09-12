@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from io_stats import collect_io_snapshot, io_stats_interval
@@ -35,6 +35,8 @@ class Config:
     server_worker_threads: int
     server_connection_io_threads: int
     server_max_inflight_per_connection: int = 0
+    server_recv_buffer_count: int = 0
+    server_recv_buffer_size: int = 0
     warmup_duration: int = 0
     repetitions: int = 1
     threads: int | list[int] = 0
@@ -88,6 +90,8 @@ def load_config(path):
         "payload_size",
         "server_worker_threads",
         "server_connection_io_threads",
+        "server_recv_buffer_count",
+        "server_recv_buffer_size",
     }
     benchmark_type = data.get("type")
     if benchmark_type == "client":
@@ -115,6 +119,13 @@ def load_config(path):
         if has_inflight_per_connection and require_int(data, "inflight_per_connection") <= 0:
             raise RuntimeError("inflight_per_connection must be greater than zero")
 
+    for name in ("server_recv_buffer_count", "server_recv_buffer_size"):
+        if name in data and not 0 < require_int(data, name) <= 0xFFFFFFFF:
+            raise RuntimeError(f"{name} must be in the uint32 positive range")
+    count = data.get("server_recv_buffer_count", 0)
+    if count and (count > 32768 or count & (count - 1)):
+        raise RuntimeError("server_recv_buffer_count must be a power of two not exceeding 32768")
+
     config = Config(
         benchmark_type=benchmark_type,
         duration=require_int(data, "duration"),
@@ -123,6 +134,8 @@ def load_config(path):
         payload_size=require_int(data, "payload_size"),
         server_worker_threads=require_int(data, "server_worker_threads"),
         server_connection_io_threads=require_int(data, "server_connection_io_threads"),
+        server_recv_buffer_count=optional_int(data, "server_recv_buffer_count", 0),
+        server_recv_buffer_size=optional_int(data, "server_recv_buffer_size", 0),
         server_max_inflight_per_connection=(
             require_int(data, "server_max_inflight_per_connection") if benchmark_type == "firehose" else 0
         ),
@@ -173,6 +186,10 @@ def start_server(repo_root, server_bin, config, cpu_list=None, stats_path=None):
     ]
     if config.server_max_inflight_per_connection > 0:
         command.append(f"--max_inflight_per_connection={config.server_max_inflight_per_connection}")
+    if config.server_recv_buffer_count > 0:
+        command.append(f"--recv_buffer_count={config.server_recv_buffer_count}")
+    if config.server_recv_buffer_size > 0:
+        command.append(f"--recv_buffer_size={config.server_recv_buffer_size}")
     if stats_path is not None:
         command.append(f"--stats_file={stats_path}")
     if cpu_list is not None:
@@ -351,6 +368,7 @@ def main(argv=None):
         args.output_json.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "config_path": str(args.config),
+            "config": asdict(config),
             "build_dir": str(build_dir),
             "server_cpus": args.server_cpus,
             "client_cpus": args.client_cpus,

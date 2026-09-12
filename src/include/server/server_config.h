@@ -43,7 +43,8 @@ struct ServerConfig {
   ConnectionIoConfig connection_io_;
   ConsulRegistrationConfig consul_;
 
-  [[nodiscard]] static auto Create(const RpcServerOptions &options) -> StatusOr<ServerConfig>;
+  [[nodiscard]] static auto Create(const RpcServerOptions &options, io::UringBufferPoolConfig buffer_pool = {})
+      -> StatusOr<ServerConfig>;
 };
 
 [[nodiscard]] auto ServiceRegistrationEnabled(const ServerConfig &config) -> bool;

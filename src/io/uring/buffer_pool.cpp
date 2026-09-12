@@ -52,6 +52,8 @@ auto RegistrationError(int error_code) -> Status {
 
 }  // namespace
 
+auto UringBufferPoolConfig::Validate() const -> Status { return ValidateConfig(*this); }
+
 UringBuffer::UringBuffer(UringProvidedBufferPool &pool, std::uint16_t buffer_id,
                          std::span<const std::byte> bytes) noexcept
     : pool_(&pool), buffer_id_(buffer_id), bytes_(bytes) {}
@@ -92,7 +94,7 @@ UringProvidedBufferPool::UringProvidedBufferPool(io_uring &ring, UringBufferPool
 
 auto UringProvidedBufferPool::Register(io_uring &ring, UringBufferPoolConfig config)
     -> StatusOr<std::unique_ptr<UringProvidedBufferPool>> {
-  const Status validation = ValidateConfig(config);
+  const Status validation = config.Validate();
   if (!validation.ok()) {
     return StatusOr<std::unique_ptr<UringProvidedBufferPool>>(validation);
   }
@@ -155,6 +157,7 @@ auto UringProvidedBufferPool::SnapshotStats(bool start_window) noexcept -> Buffe
   return {.acquires_ = acquires_,
           .returns_ = returns_,
           .capacity_ = config_.buffer_count_,
+          .buffer_size_ = config_.buffer_size_,
           .outstanding_leases_ = outstanding_leases_,
           .outstanding_leases_peak_ = outstanding_leases_peak_};
 }
