@@ -3,8 +3,9 @@
  * @brief Declares xRPC's single-threaded io_uring event loop.
  *
  * A `UringContext` owns one io_uring ring and drives asynchronous operations
- * on the thread running `Run()`. `Accept`, `Recv`, `RecvProvided`,
- * `RecvProvidedMultishot`, and `Send` create deferred, move-only awaitables.
+ * on the thread running `Run()`. `Accept`, `AcceptMultishot`, `Recv`,
+ * `RecvProvided`, `RecvProvidedMultishot`, and `Send` create deferred,
+ * move-only awaitables.
  * The operation starts when the coroutine suspends and resumes that coroutine
  * with an `IoResult`.
  *
@@ -116,6 +117,14 @@ class UringContext final {
 
   [[nodiscard]] auto Accept(int listen_fd) -> UringAwaitable;
 
+  /**
+   * @brief Accepts repeatedly from one listening socket.
+   *
+   * Reuse the returned awaitable for each accepted socket. It remains alive
+   * until a final CQE, including cancellation during listener shutdown.
+   */
+  [[nodiscard]] auto AcceptMultishot(int listen_fd) -> UringAwaitable;
+
   [[nodiscard]] auto Recv(int fd, void *buffer, std::size_t len) -> UringAwaitable;
 
   /**
@@ -179,7 +188,7 @@ class UringContext final {
   // Cross-thread control enters through Post() and RequestStop().
   void DrainPosted();
   void SubmitWakeupPoll();
-  void ProcessWakeupCqe(io_uring_cqe *cqe);
+  void ProcessWakeupCqe(io_uring_cqe *cqe, bool has_more);
   void SignalWakeup() const;
   void DrainWakeupCounter() const;
 
@@ -206,6 +215,7 @@ class UringContext final {
   std::vector<std::unique_ptr<Operation>> staged_operations_;
 
   bool wakeup_poll_pending_ = false;
+  bool wakeup_poll_cancel_requested_ = false;
 
   std::mutex post_mutex_;
 
@@ -245,7 +255,8 @@ class BufferReturnAwaitable final {
  * An awaitable owns one unstarted operation. `await_suspend()` transfers that
  * operation to the `UringContext`; `await_resume()` moves the completed result
  * out of the operation. A multishot awaitable keeps its operation alive while
- * CQEs carry `IORING_CQE_F_MORE`; its final CQE ends the operation.
+ * CQEs carry `IORING_CQE_F_MORE`; its final CQE ends the operation. It supports
+ * the synchronous consumer protocol used by multishot accept and receive.
  */
 class UringAwaitable final {
  public:

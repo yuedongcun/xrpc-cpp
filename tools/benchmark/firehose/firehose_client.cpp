@@ -673,6 +673,12 @@ class EpollFirehoseWorker final {
     }
   }
 
+  void AppendConnectionSuccesses(std::vector<std::size_t> &successes) const {
+    for (const auto &connection : connections_) {
+      successes.push_back(connection->Success());
+    }
+  }
+
  private:
   void Run(std::chrono::steady_clock::time_point deadline) {
     epoll_fd_ = ::epoll_create1(EPOLL_CLOEXEC);
@@ -919,7 +925,20 @@ auto RunEpollFirehoseBenchmark(const FirehoseConfig &config) -> BenchmarkStats {
     progress_thread.join();
   }
 
-  return FinalizeFirehoseStats(workers, std::chrono::duration_cast<std::chrono::nanoseconds>(wall_end - wall_start));
+  BenchmarkStats stats =
+      FinalizeFirehoseStats(workers, std::chrono::duration_cast<std::chrono::nanoseconds>(wall_end - wall_start));
+  std::vector<std::size_t> connection_successes;
+  connection_successes.reserve(config.firehose_connections_);
+  for (const auto &worker : workers) {
+    worker->AppendConnectionSuccesses(connection_successes);
+  }
+  assert(connection_successes.size() == config.firehose_connections_);
+  stats.has_connection_progress_ = true;
+  stats.min_connection_success_ = *std::ranges::min_element(connection_successes);
+  stats.max_connection_success_ = *std::ranges::max_element(connection_successes);
+  stats.zero_success_connections_ =
+      static_cast<std::size_t>(std::ranges::count(connection_successes, static_cast<std::size_t>(0)));
+  return stats;
 }
 
 }  // namespace

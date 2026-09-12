@@ -46,7 +46,7 @@ multishot 池耗尽返回最终 `ENOBUFS` 时，服务端保留连接，等待 p
 
 验证记录：构建、8 个默认测试和修改文件的 clang-tidy 已通过；新增单 buffer 测试覆盖持有租约时耗尽、数据未被覆盖、归还后复用及 EOF。
 
-## 第二步：multishot recv（底层已实现，服务端待接入）
+## 第二步：multishot recv（底层与服务端已接入）
 
 目标是通过一次提交持续获得多次接收完成，减少重复提交和操作对象创建。每份接收结果仍需要处理 CQE，输入复制也不会因此自动消失。
 
@@ -55,9 +55,10 @@ multishot 池耗尽返回最终 `ENOBUFS` 时，服务端保留连接，等待 p
 | 路径 | 计划 | 考虑 |
 | --- | --- | --- |
 | recv | 优先实现 multishot | 长连接持续接收，已有 buffer pool 基础 |
-| accept | 后续独立评估 | 主要改善新连接接入，应单独测量 |
+| accept | 已改造，连接建立收益待测 | 主要改善新连接接入，应单独测量 |
 | send | 保持当前队列驱动 | 每次发送的数据和长度由响应决定 |
-| recvmsg / 显式 poll | 暂不引入 | 当前接收路径没有对应需求 |
+| eventfd poll | 已改为 multishot | 减少跨线程唤醒后的重新提交 |
+| recvmsg / 业务 socket poll | 暂不引入 | 当前接收路径没有对应需求 |
 
 ### 当前接口
 
@@ -87,6 +88,37 @@ one-shot 路径仍然每收到一个 awaitable CQE 就减少 pending 计数并�
 底层测试覆盖多次接收、EOF、池耗尽后的租约复用、取消并排空后析构，以及只请求取消却提前析构的协议检查。服务端已接入 multishot，测试覆盖大请求跨 buffer 接收及累计超过池容量的复用、客户端保持打开时的协议错误关闭，以及排空期间工作线程响应的交付。已完成一轮小规模 one-shot 对照，参数、结果范围和测量限制见 [初始性能记录](multishot-recv-smoke.md)；开启提交、队列和 buffer 统计后的对照见 [可观测指标对照](multishot-recv-observability.md)。
 
 multishot recv 要求内核支持该操作，项目内 liburing 手册标注从 Linux 6.0 开始提供；当前接口不自动回退到 one-shot，不支持时通过接收错误返回。后续继续验证关闭与接收交错的边界，再进行对照测量。
+
+### Buffer 耗尽恢复压力记录（2026-09-13）
+
+本次使用 Release firehose，在本机 12 个在线 CPU 上将服务端固定到 CPU 0--5、客户端固定到 CPU 6--11。测量使用 1 个 Connection I/O loop、2 个服务端 worker、2 个客户端 I/O 线程、8 条 TCP 连接、128 个总在途请求、4 KiB payload、1 秒预热和 3 秒测量；每种配置运行 3 次，以下为中位数。默认 pool 是 512 块 16 KiB buffer（8 MiB），受限 pool 是 4 块 1 KiB buffer（4 KiB）。
+
+| pool | QPS | p99 | 失败请求 | ENOBUFS / 成功请求 |
+| --- | ---: | ---: | ---: | ---: |
+| 默认 512 x 16 KiB | 22,350 | 11.17 ms | 0 | 0 |
+| 受限 4 x 1 KiB | 18,551 | 28.40 ms | 0 | 6.9--7.2 |
+
+受限配置的三次测量都没有零推进连接；每次结束时 active recv、用户态租约和 buffer-return waiter 均归零，且 buffer acquire 与 return 计数相等。因此 `ENOBUFS` 后等待归还进展、重提 multishot recv 的链路能恢复，也没有遗留资源。
+
+但 `buffer_return_waits` 与 `ENOBUFS` 次数相等，`buffer_return_wait_suspensions` 为零。这说明处理 `ENOBUFS` CQE 时，同批 CQE 的 buffer 归还往往已经推进 generation；恢复逻辑正确识别到进展后立即重提，而非挂起。它避免了漏通知和死锁，却在极小 pool 下形成高频“最终 ENOBUFS -- 立即重提”的循环，带来吞吐下降和尾延迟上升。
+
+结论：该机制可作为默认大 pool 下的正确性兜底，不能作为小 pool 或严格内存上限下的压力调节方案。若这类配置需要成为常规部署模式，应单独设计接收准入或限速策略；仅把 generation 等待改得更复杂，不能保证重提时有可用 buffer。
+
+## 第三步：multishot accept 与 eventfd poll
+
+`AcceptMultishot(listen_fd)` 为一个监听 socket 创建持续 accept 请求，所有新连接通过同一 awaitable 逐次交付。成功结果中的 `result_` 是新连接 fd，调用方立即交给 `Socket` 管理。它复用 recv 的同步消费协议：处理本次连接后，继续等待同一 awaitable；成功结果也检查 `has_more_`，最终成功完成后若仍接纳连接，就提交新请求。
+
+停止接纳和释放 accept 请求是两个时刻。`StopAcceptingOnContext()` 设置停止状态、取消并关闭 listener，此时内核 CQ 中仍可能有成功 accept。AcceptLoop 必须领取并关闭这些新 fd，继续等待到不带 `MORE` 的最终 CQE，才能销毁 awaitable。分发连接发生异常时，也先取消并排空 accept，再传播原异常。
+
+这里的 poll 专指 context 内部 eventfd 的 `POLLIN` 监听。每个 context 提交一个 multishot poll；`Post()` 将回调放入加锁队列，再写 eventfd。poll CQE 唤醒 Run 线程，读取 eventfd 计数、处理回调队列。计数和回调不要求一一对应，合并唤醒不会丢回调；回调执行期间新增的 Post 会再次写入 eventfd。
+
+CQE 带 `IORING_CQE_F_MORE` 时，原 poll 仍存在，不重提、不销毁 operation。不带 `MORE` 时才释放 operation，若 context 仍运行就重新布置监听。`Operation::multishot_` 明确标记持续请求，包括没有协程消费者的 wakeup poll；不能仅凭 `awaitable_` 是否非空判断生命周期。
+
+`RequestStop()` 写 eventfd 唤醒 Run 线程。停止路径显式取消仍活动的 poll，且只发送一次取消请求。取消请求自己的 CQE 只确认取消命令完成；原 poll 的最终 CQE 才清除 `wakeup_poll_pending_` 并释放其 operation。Run 同时排空取消命令和原请求，不会因为停止标志已设置就提前返回。
+
+验证重点是一次 accept SQE 交付多个连接并取消排空、连续跨线程 Post 使用同一个 poll，以及服务端停止回归。长连接 recv benchmark 无法证明 accept 的性能收益；连接建立负载及高频 Post 的专项性能测量仍待进行。
+
+当前验证：Debug 完整构建、11 个非 Consul CTest 目标通过。新增测试覆盖一个 accept SQE 接收两条连接后取消、积压连接期间取消并消费晚到 CQE、连续 32 次 Post 仍只提交一个 wakeup poll 后正常停止。没有自动回退到 one-shot；部署内核必须支持这两种 multishot 操作。
 
 ## 如何验证收益
 

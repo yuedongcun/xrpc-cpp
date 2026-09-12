@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from run_suite import load_config
+from run_suite import load_config, parse_stats
 
 
 class PoolConfigTest(unittest.TestCase):
@@ -30,6 +30,13 @@ class PoolConfigTest(unittest.TestCase):
                            ("server_recv_buffer_size", 1 << 32)]:
             with self.subTest(key=key, value=value), self.assertRaises(RuntimeError):
                 self.load(**{key: value})
+
+    def test_connection_progress_is_preserved_when_firehose_reports_it(self):
+        stats = parse_stats("total_calls=10 success=10 failed=0\n"
+                            "qps=1.00 avg_us=2.00 p50_us=2.00 p95_us=2.00 p99_us=2.00\n"
+                            "connection_progress min_success=1 max_success=3 zero_success_connections=0\n")
+        self.assertEqual(stats["connection_progress"],
+                         {"min_success": 1, "max_success": 3, "zero_success_connections": 0})
 
 
 if __name__ == "__main__":

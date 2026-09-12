@@ -218,17 +218,36 @@ void RpcServer::Impl::StartAcceptLoop() {
 
 auto RpcServer::Impl::AcceptLoop() -> runtime::Task<void> {
   try {
-    while (!accept_stopped_) {
-      const io::IoResult accept_result = co_await accept_context_.Accept(listen_socket_.fd());
+    auto accept = accept_context_.AcceptMultishot(listen_socket_.fd());
+    std::exception_ptr dispatch_error;
+    // Stop closes admission immediately, but successful CQEs may already be
+    // queued. Keep awaiting until the original request's final CQE arrives.
+    bool has_more = false;
+    while (!accept_stopped_ || has_more) {
+      const io::IoResult accept_result = co_await accept;
+      has_more = accept_result.has_more_;
       if (accept_result.result_ < 0) {
         if (!accept_stopped_) {
           StopAcceptingOnContext();
         }
-        break;
+      } else {
+        io::Socket client_socket(accept_result.result_);
+        if (!accept_stopped_) {
+          try {
+            DispatchAcceptedConnection(std::move(client_socket));
+          } catch (...) {  // XRPC_EXCEPTION_GUARD: drain accept before propagating dispatch failure
+            dispatch_error = std::current_exception();
+            StopAcceptingOnContext();
+          }
+        }
+        // A late successful accept after stop is closed by Socket's destructor.
       }
-
-      io::Socket client_socket(accept_result.result_);
-      DispatchAcceptedConnection(std::move(client_socket));
+      if (!has_more && !accept_stopped_) {
+        accept = accept_context_.AcceptMultishot(listen_socket_.fd());
+      }
+    }
+    if (dispatch_error) {
+      std::rethrow_exception(dispatch_error);
     }
   } catch (const std::exception &) {  // XRPC_EXCEPTION_GUARD: stop context before coroutine propagation
     accept_context_.RequestStop();

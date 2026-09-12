@@ -22,6 +22,9 @@ LATENCY_PATTERN = re.compile(
     r"qps=([0-9.]+) avg_us=([0-9.]+) p50_us=([0-9.]+) "
     r"p95_us=([0-9.]+) p99_us=([0-9.]+)"
 )
+CONNECTION_PROGRESS_PATTERN = re.compile(
+    r"connection_progress min_success=(\d+) max_success=(\d+) zero_success_connections=(\d+)"
+)
 READY_PORT_PATTERN = re.compile(r"\bport=(\d+)\b")
 BENCHMARK_HOST = "127.0.0.1"
 PROCESS_TIMEOUT_MARGIN = 30
@@ -252,7 +255,7 @@ def parse_stats(output):
     latency = LATENCY_PATTERN.search(output)
     if total is None or latency is None:
         raise RuntimeError("benchmark client output did not contain final statistics")
-    return {
+    stats = {
         "total": int(total.group(1)),
         "success": int(total.group(2)),
         "failed": int(total.group(3)),
@@ -262,6 +265,14 @@ def parse_stats(output):
         "p95_us": float(latency.group(4)),
         "p99_us": float(latency.group(5)),
     }
+    progress = CONNECTION_PROGRESS_PATTERN.search(output)
+    if progress is not None:
+        stats["connection_progress"] = {
+            "min_success": int(progress.group(1)),
+            "max_success": int(progress.group(2)),
+            "zero_success_connections": int(progress.group(3)),
+        }
+    return stats
 
 
 def run_client(command, timeout):

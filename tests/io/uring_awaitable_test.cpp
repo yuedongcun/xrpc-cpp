@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstddef>
 #include <exception>
+#include <future>
 #include <memory>
 #include <optional>
 #include <span>
@@ -186,6 +187,25 @@ auto ReadMultishot(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Ta
   EXPECT_GT(after.counters_.submit_calls_, before.counters_.submit_calls_);
   EXPECT_EQ(after.active_recv_requests_, 0U);
   co_return received;
+}
+
+auto AcceptMultishotTwiceAndCancel(xrpc::io::UringContext &context, int listen_fd) -> xrpc::runtime::Task<void> {
+  const auto before = context.SnapshotStats();
+  auto accept = context.AcceptMultishot(listen_fd);
+  for (int accepted = 0; accepted < 2; ++accepted) {
+    const xrpc::io::IoResult result = co_await accept;
+    EXPECT_EQ(result.type_, xrpc::io::OperationType::Accept);
+    EXPECT_EQ(result.error_code_, 0);
+    EXPECT_GE(result.result_, 0);
+    EXPECT_TRUE(result.has_more_);
+    xrpc::io::Socket client_socket(result.result_);
+  }
+
+  context.CancelFd(listen_fd);
+  const xrpc::io::IoResult cancelled = co_await accept;
+  EXPECT_EQ(cancelled.error_code_, ECANCELED);
+  EXPECT_FALSE(cancelled.has_more_);
+  EXPECT_EQ(context.SnapshotStats().counters_.prepared_accept_sqes_ - before.counters_.prepared_accept_sqes_, 1U);
 }
 
 auto CancelMultishot(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<void> {
@@ -583,6 +603,19 @@ TEST(IoUringMultishotTest, ReceivesMultipleBuffersAndEof) {
   EXPECT_EQ(WaitTaskWithContext(ReadMultishot(context, server.fd()), context), "abcdefghijkl");
 }
 
+TEST(IoUringMultishotTest, AcceptsMultipleConnectionsAndDrainsCancellation) {
+  xrpc::io::Socket listener;
+  ASSERT_TRUE(listener.Bind("127.0.0.1", 0).ok());
+  ASSERT_TRUE(listener.Listen(2).ok());
+  xrpc::io::Socket first_client;
+  xrpc::io::Socket second_client;
+  ASSERT_TRUE(first_client.Connect("127.0.0.1", listener.LocalPort().value()).ok());
+  ASSERT_TRUE(second_client.Connect("127.0.0.1", listener.LocalPort().value()).ok());
+
+  xrpc::io::UringContext context(16);
+  WaitTaskWithContext(AcceptMultishotTwiceAndCancel(context, listener.fd()), context);
+}
+
 TEST(IoUringMultishotTest, CancellationDrainsBeforeDestruction) {
   xrpc::io::Socket listener;
   ASSERT_TRUE(listener.Bind("127.0.0.1", 0).ok());
@@ -679,4 +712,58 @@ TEST(IoUringMultishotTest, InvalidFdAndCancellationBeforeAdmission) {
 TEST(IoUringStatsTest, UnawaitedAndRejectedReceivesDoNotCountAsPreparedSqes) {
   xrpc::io::UringContext context(8, {.buffer_count_ = 8, .buffer_size_ = 4});
   WaitTaskWithContext(CheckUnsubmittedStats(context), context);
+}
+
+TEST(IoUringMultishotTest, WakeupPollSurvivesRepeatedPostsAndStops) {
+  xrpc::io::UringContext context(16);
+  std::jthread thread([&context]() -> void { context.Run(); });
+  // Each acknowledged callback precedes the next Post. This exercises wakeups
+  // across turns rather than only draining a single preloaded callback queue.
+  for (int round = 0; round < 32; ++round) {
+    auto promise = std::make_shared<std::promise<std::uint64_t>>();
+    auto future = promise->get_future();
+    context.Post(
+        [&context, promise]() -> void { promise->set_value(context.SnapshotStats().counters_.prepared_wakeup_sqes_); });
+    const auto ready = future.wait_for(WaitTimeout);
+    EXPECT_EQ(ready, std::future_status::ready);
+    if (ready != std::future_status::ready) {
+      break;
+    }
+    EXPECT_EQ(future.get(), 1U);
+  }
+  context.RequestStop();
+  thread.join();
+}
+
+auto CancelAcceptWithQueuedConnections(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<void> {
+  auto accept = context.AcceptMultishot(fd);
+  auto result = co_await accept;
+  EXPECT_GE(result.result_, 0);
+  EXPECT_TRUE(result.has_more_);
+  xrpc::io::Socket first(result.result_);
+  context.CancelFd(fd);
+  // Cancellation can race with successful completions already in the CQ.
+  // Every returned descriptor is owned even though admission is now closed.
+  while (result.has_more_) {
+    result = co_await accept;
+    if (result.result_ >= 0) {
+      xrpc::io::Socket late_connection(result.result_);
+    } else {
+      EXPECT_EQ(result.error_code_, ECANCELED);
+      EXPECT_FALSE(result.has_more_);
+    }
+  }
+  EXPECT_EQ(result.error_code_, ECANCELED);
+}
+
+TEST(IoUringMultishotTest, AcceptCancellationDrainsQueuedConnections) {
+  xrpc::io::Socket listener;
+  ASSERT_TRUE(listener.Bind("127.0.0.1", 0).ok());
+  ASSERT_TRUE(listener.Listen(16).ok());
+  std::array<xrpc::io::Socket, 16> clients;
+  for (auto &client : clients) {
+    ASSERT_TRUE(client.Connect("127.0.0.1", listener.LocalPort().value()).ok());
+  }
+  xrpc::io::UringContext context(32);
+  WaitTaskWithContext(CancelAcceptWithQueuedConnections(context, listener.fd()), context);
 }

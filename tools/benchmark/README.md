@@ -153,3 +153,5 @@ runner 配置可分别增加 `server_recv_buffer_count` 和 `server_recv_buffer_
 恢复等待的累计计数包括 `buffer_return_waits`（所有实际 await 的等待，含立即满足）、`buffer_return_wait_suspensions`（真正挂起入队）、`buffer_return_waits_completed`（观察到归还进展，含立即满足）和 `buffer_return_waits_cancelled`（fd 取消、停止及销毁挂起的等待）。完成等待不代表拿到 buffer，也不代表 recv 成功。`buffer_return_waiters` 的当前值和窗口峰值分别位于 `gauges` 和 `peaks`；新窗口以当前人数为峰值起点。区间累计计数取差值，当前人数和峰值不取差值。
 
 压力实验应结合成功请求、超时、逐连接推进情况、ENOBUFS、recv SQE 和 CPU 判断有效性；等待计数单独不能证明公平或无忙重试。测量客户端关闭后，期望接收请求、buffer 租约和等待人数归零，buffer 借还平衡。短时间统计冒烟测试只验证链路，不用于得出性能结论。
+
+firehose 还会输出并由 runner 保存 `connection_progress`：`min_success`、`max_success` 和 `zero_success_connections`。它们以单次测量中每条 TCP 连接的成功 RPC 数计算，用于排查零推进连接和明显失衡；不能替代更长时间的公平性分析。

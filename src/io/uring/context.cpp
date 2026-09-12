@@ -7,7 +7,7 @@
  * is processed. Run() drives submission and completion on its owning thread;
  * Post() and RequestStop() provide cross-thread control through eventfd.
  *
- * One-shot I/O ends with one CQE. Multishot receive retains its Operation while
+ * One-shot I/O ends with one CQE. Multishot I/O retains its Operation while
  * MORE is set and resumes a synchronous consumer once per CQE. Shutdown returns
  * only after pending I/O and the wakeup poll have drained.
  */
@@ -53,6 +53,7 @@ struct Operation {
   std::uint64_t buffer_returns_at_start_ = 0;
   std::coroutine_handle<> continuation_;
   UringAwaitable *awaitable_ = nullptr;
+  bool multishot_ = false;
 };
 
 // -----------------------------------------------------------------------------
@@ -147,6 +148,13 @@ auto UringContext::Accept(int listen_fd) -> UringAwaitable {
   return UringAwaitable(*this, std::move(operation));
 }
 
+auto UringContext::AcceptMultishot(int listen_fd) -> UringAwaitable {
+  auto operation = std::make_unique<Operation>();
+  operation->type_ = OperationType::Accept;
+  operation->fd_ = listen_fd;
+  return UringAwaitable(*this, std::move(operation), true);
+}
+
 auto UringContext::Recv(int fd, void *buffer, std::size_t len) -> UringAwaitable {
   auto operation = std::make_unique<Operation>();
   operation->type_ = OperationType::Recv;
@@ -191,7 +199,9 @@ auto UringContext::Send(int fd, const void *buffer, std::size_t len) -> UringAwa
 // -----------------------------------------------------------------------------
 
 UringAwaitable::UringAwaitable(UringContext &context, std::unique_ptr<Operation> operation, bool multishot) noexcept
-    : context_(&context), unstarted_operation_(std::move(operation)), multishot_(multishot) {}
+    : context_(&context), unstarted_operation_(std::move(operation)), multishot_(multishot) {
+  unstarted_operation_->multishot_ = multishot;
+}
 
 UringAwaitable::~UringAwaitable() {
   if (active_operation_ != nullptr) {
@@ -241,7 +251,7 @@ auto UringAwaitable::await_suspend(std::coroutine_handle<> continuation) -> bool
       active_operation_ = operation;
     } else {
       if (active_operation_->continuation_) {
-        Abort("multishot receive already has a waiting coroutine");
+        Abort("multishot operation already has a waiting coroutine");
       }
       active_operation_->continuation_ = continuation;
     }
@@ -270,7 +280,7 @@ auto UringAwaitable::await_resume() -> IoResult {
       unstarted_operation_.reset();
       return result;
     }
-    Abort("multishot receive resumed without an operation result");
+    Abort("multishot operation resumed without a result");
   }
   if (active_operation_ != nullptr) {
     IoResult result = std::move(active_operation_->result_);
@@ -320,7 +330,7 @@ void UringContext::SubmitPreparedOperation(std::unique_ptr<Operation> operation,
         case OperationType::Recv:
         case OperationType::RecvProvided:
           ++counters_.prepared_recv_sqes_;
-          counters_.prepared_multishot_recv_sqes_ += static_cast<std::uint64_t>(operation->awaitable_ != nullptr);
+          counters_.prepared_multishot_recv_sqes_ += static_cast<std::uint64_t>(operation->multishot_);
           ++active_recv_requests_;
           break;
         case OperationType::Send:
@@ -401,7 +411,11 @@ auto UringContext::TryStartOperation(std::unique_ptr<Operation> &operation, std:
 
   switch (operation->type_) {
     case OperationType::Accept:
-      io_uring_prep_accept(sqe, operation->fd_, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+      if (operation->multishot_) {
+        io_uring_prep_multishot_accept(sqe, operation->fd_, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+      } else {
+        io_uring_prep_accept(sqe, operation->fd_, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+      }
       break;
     case OperationType::Recv:
       io_uring_prep_recv(sqe, operation->fd_, operation->buffer_, operation->length_, 0);
@@ -411,7 +425,7 @@ auto UringContext::TryStartOperation(std::unique_ptr<Operation> &operation, std:
         Abort("UringContext attempted a provided-buffer receive without a registered pool");
       }
       operation->buffer_returns_at_start_ = provided_buffer_pool_->ReturnedBufferCount();
-      if (operation->awaitable_ != nullptr) {
+      if (operation->multishot_) {
         io_uring_prep_recv_multishot(sqe, operation->fd_, nullptr, 0, 0);
       } else {
         io_uring_prep_recv(sqe, operation->fd_, nullptr, provided_buffer_pool_->BufferSize(), 0);
@@ -446,7 +460,8 @@ void UringContext::ProcessCqe(io_uring_cqe *cqe) {
   }
 
   std::unique_ptr<Operation> operation(raw_operation);
-  const bool keep_multishot_operation = operation->awaitable_ != nullptr && (cqe->flags & IORING_CQE_F_MORE) != 0;
+  const bool has_more = (cqe->flags & IORING_CQE_F_MORE) != 0;
+  const bool keep_multishot_operation = operation->multishot_ && has_more;
   switch (operation->completion_category_) {
     case Operation::CompletionCategory::Awaitable:
       ProcessAwaitableCqe(*operation, cqe);
@@ -458,7 +473,10 @@ void UringContext::ProcessCqe(io_uring_cqe *cqe) {
       ProcessCancelCqe(cqe);
       return;
     case Operation::CompletionCategory::Wakeup:
-      ProcessWakeupCqe(cqe);
+      ProcessWakeupCqe(cqe, has_more);
+      if (keep_multishot_operation) {
+        [[maybe_unused]] Operation *released = operation.release();
+      }
       return;
   }
 }
@@ -468,7 +486,7 @@ void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) 
     io_uring_cqe_seen(&ring_, cqe);
     Abort("UringContext received an awaitable CQE with no pending I/O");
   }
-  const bool is_multishot = operation.awaitable_ != nullptr;
+  const bool is_multishot = operation.multishot_;
   const bool has_more = (cqe->flags & IORING_CQE_F_MORE) != 0;
   if (operation.type_ == OperationType::Recv || operation.type_ == OperationType::RecvProvided) {
     ++counters_.recv_cqes_;
@@ -522,11 +540,11 @@ void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) 
     }
     std::coroutine_handle<> continuation = std::exchange(operation.continuation_, {});
     if (!continuation) {
-      Abort("multishot receive completed without a waiting coroutine");
+      Abort("multishot operation completed without a waiting coroutine");
     }
     continuation.resume();
     if (has_more && !operation.continuation_) {
-      Abort("multishot consumer must await the receive again before yielding");
+      Abort("multishot consumer must await the operation again before yielding");
     }
     return;
   }
@@ -740,8 +758,9 @@ void UringContext::DrainPosted() {
 /**
  * @brief Arms the eventfd poll used to wake the io_uring event loop.
  *
- * At most one wakeup poll may be pending at a time. The submitted operation is
- * released to the completion path and remains alive until its CQE is processed.
+ * One multishot wakeup poll remains pending while the context runs. Its
+ * operation is released to the completion path and survives each CQE carrying
+ * MORE; shutdown explicitly cancels it to obtain the final CQE.
  */
 void UringContext::SubmitWakeupPoll() {
   AssertRunThread("wakeup poll submission attempted outside the owning Run thread");
@@ -752,10 +771,11 @@ void UringContext::SubmitWakeupPoll() {
   auto operation = std::make_unique<Operation>();
   operation->completion_category_ = Operation::CompletionCategory::Wakeup;
   operation->fd_ = wakeup_fd_;
+  operation->multishot_ = true;
 
   io_uring_sqe *sqe = AcquireSqe();
 
-  io_uring_prep_poll_add(sqe, wakeup_fd_, POLLIN);
+  io_uring_prep_poll_multishot(sqe, wakeup_fd_, POLLIN);
   Operation *raw_operation = operation.get();
   io_uring_sqe_set_data(sqe, raw_operation);
 
@@ -766,19 +786,20 @@ void UringContext::SubmitWakeupPoll() {
 /**
  * @brief Handles completion of the eventfd wakeup poll.
  *
- * The wakeup counter and posted callbacks are drained first. During normal
- * operation, a new wakeup poll is staged for the current event-loop turn.
- * During shutdown, the poll is not rearmed.
+ * The wakeup counter and posted callbacks are drained first. The multishot
+ * request stays armed during normal operation. During shutdown it is cancelled
+ * and its final CQE releases the operation.
  */
-void UringContext::ProcessWakeupCqe(io_uring_cqe *cqe) {
-  wakeup_poll_pending_ = false;
+void UringContext::ProcessWakeupCqe(io_uring_cqe *cqe, bool has_more) {
+  wakeup_poll_pending_ = has_more;
 
   const int result = cqe->res;
   const int error_code = result < 0 ? -result : 0;
   io_uring_cqe_seen(&ring_, cqe);
 
   if (result < 0) {
-    if (stop_requested_.load() && error_code == ECANCELED) {
+    if (stop_requested_.load() && error_code == ECANCELED && !has_more) {
+      wakeup_poll_cancel_requested_ = false;
       return;
     }
     throw InternalException(MakeErrorMessage("eventfd poll", error_code));
@@ -789,7 +810,12 @@ void UringContext::ProcessWakeupCqe(io_uring_cqe *cqe) {
 
   DrainWakeupCounter();
   DrainPosted();
-  if (!stop_requested_.load()) {
+  if (stop_requested_.load()) {
+    if (has_more && !wakeup_poll_cancel_requested_) {
+      wakeup_poll_cancel_requested_ = true;
+      SubmitCancelFd(wakeup_fd_);
+    }
+  } else if (!has_more) {
     SubmitWakeupPoll();
   }
 }
