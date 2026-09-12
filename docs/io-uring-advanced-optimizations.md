@@ -61,23 +61,9 @@ RecvProvided → CQE 携带 buffer ID → 获取租约
 
 ### 当前接口
 
-读协程仍然逐次等待数据，底层接收操作可以跨越多次等待存活：
+`ServerConnection::ReadLoop()` 创建 `RecvProvidedMultishot()`，重复 `co_await` 同一个 awaitable 等待数据。`IoResult::has_more_` 表示该操作是否仍在活动，成功收到数据时也必须检查；成功的最终 CQE 处理完数据后，连接若仍为 Active，就创建新的接收操作。
 
-```cpp
-auto receive = context_.RecvProvidedMultishot(socket_.fd());
-while (...) {
-  auto result = co_await receive;
-  // 检查结果、FeedBytes、归还 buffer、处理请求。
-  if (result.result_ <= 0) {
-    break;  // 最终 CQE 已结束这个 awaitable
-  }
-}
-// 提前结束读取时：请求取消，再等最终接收 CQE，之后才销毁 awaitable。
-context_.CancelFd(socket_.fd());
-auto drained = co_await receive;
-```
-
-重复 `co_await` 表示等待下一份结果，不代表每次都重新提交 recv。接收状态属于当前连接，操作和完成事件仍由所属 I/O 线程管理。
+退出读循环时，`Close()` 已请求取消，或 `BeginDrain()` 已通过 `shutdown(SHUT_RD)` 停止读取。只要最近的结果仍有 `has_more_`，读协程就继续等待并归还晚到的 buffer，直到最终 CQE 才销毁 awaitable。业务排空不额外取消发送操作。具体流程见 [ReadLoop 实现](../src/server/server_connection.cpp)。
 
 ### 生命周期与并发协议
 
@@ -98,9 +84,9 @@ one-shot 路径仍然每收到一个 awaitable CQE 就减少 pending 计数并�
 
 关闭采用 I/O 排空语义：请求取消并不立即释放资源，必须等完成事件收尾。业务请求是否执行完、响应是否发送完属于服务端的业务排空策略；超时后的进程强制终止交给部署层。
 
-测试覆盖多次接收、EOF、池耗尽后的租约复用、取消并排空后析构，以及只请求取消却提前析构的协议检查。尚未进行性能测量，服务端仍使用 one-shot `RecvProvided()`。
+底层测试覆盖多次接收、EOF、池耗尽后的租约复用、取消并排空后析构，以及只请求取消却提前析构的协议检查。服务端已接入 multishot，测试覆盖大请求跨 buffer 接收及累计超过池容量的复用、客户端保持打开时的协议错误关闭，以及排空期间工作线程响应的交付。尚未进行性能测量。
 
-multishot recv 要求内核支持该操作，项目内 liburing 手册标注从 Linux 6.0 开始提供；当前接口不自动回退到 one-shot，不支持时通过接收错误返回。下一步是接入 `ServerConnection`，检查关闭路径，再进行对照测量。
+multishot recv 要求内核支持该操作，项目内 liburing 手册标注从 Linux 6.0 开始提供；当前接口不自动回退到 one-shot，不支持时通过接收错误返回。后续继续验证关闭与接收交错的边界，再进行对照测量。
 
 ## 如何验证收益
 

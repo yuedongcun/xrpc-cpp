@@ -57,6 +57,7 @@ auto WaitTaskWithContext(xrpc::runtime::Task<T> task, xrpc::io::UringContext &co
 auto ReadOne(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<xrpc::io::IoResult> {
   auto read_buffer = std::make_shared<std::array<char, 64>>();
   xrpc::io::IoResult result = co_await context.Recv(fd, read_buffer->data(), read_buffer->size());
+  EXPECT_FALSE(result.has_more_);
   co_return result;
 }
 
@@ -141,11 +142,15 @@ auto ReadMultishot(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Ta
     EXPECT_EQ(result.error_code_, 0);
     if (result.result_ <= 0) {
       EXPECT_EQ(result.result_, 0);
+      EXPECT_FALSE(result.has_more_);
       break;
     }
     ++completions;
     const auto bytes = result.buffer_.Bytes();
     received.append(reinterpret_cast<const char *>(bytes.data()), bytes.size());
+    if (!result.has_more_) {
+      receive = context.RecvProvidedMultishot(fd);
+    }
   }
   EXPECT_GE(completions, 3);
   co_return received;
@@ -161,6 +166,7 @@ auto CancelMultishot(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::
     auto result = co_await receive;
     if (result.error_code_ == ECANCELED) {
       EXPECT_TRUE(result.buffer_.Empty());
+      EXPECT_FALSE(result.has_more_);
       break;
     }
     EXPECT_GT(result.result_, 0);
@@ -181,6 +187,7 @@ auto DrainCancelledMultishot(xrpc::io::UringContext &context, int fd) -> xrpc::r
       auto drained = co_await receive;
       if (drained.error_code_ == ECANCELED) {
         EXPECT_TRUE(drained.buffer_.Empty());
+        EXPECT_FALSE(drained.has_more_);
         break;
       }
       EXPECT_GT(drained.result_, 0);
@@ -206,8 +213,10 @@ auto ExhaustMultishot(xrpc::io::UringContext &context, int fd) -> xrpc::runtime:
   auto receive = context.RecvProvidedMultishot(fd);
   auto first = co_await receive;
   EXPECT_EQ(first.result_, 4);
+  EXPECT_TRUE(first.has_more_);
   auto exhausted = co_await receive;
   EXPECT_EQ(exhausted.error_code_, ENOBUFS);
+  EXPECT_FALSE(exhausted.has_more_);
   EXPECT_EQ(exhausted.buffer_group_, 7);
   const auto bytes = first.buffer_.Bytes();
   EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(bytes.data()), bytes.size()), "abcd");
@@ -222,10 +231,12 @@ auto CheckMultishotErrors(xrpc::io::UringContext &context) -> xrpc::runtime::Tas
   auto invalid = context.RecvProvidedMultishot(-1);
   auto error = co_await invalid;
   EXPECT_EQ(error.error_code_, EBADF);
+  EXPECT_FALSE(error.has_more_);
   auto stopped = context.RecvProvidedMultishot(-1);
   context.RequestStop();
   auto after_stop = co_await stopped;
   EXPECT_EQ(after_stop.error_code_, ECANCELED);
+  EXPECT_FALSE(after_stop.has_more_);
 }
 
 }  // namespace

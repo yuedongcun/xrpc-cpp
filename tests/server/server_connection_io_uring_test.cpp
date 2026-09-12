@@ -149,6 +149,17 @@ auto MakeConnectedPair() -> ConnectedPair {
   return ConnectedPair{.client_socket_ = std::move(client_socket), .server_socket_ = listen_socket.Accept().value()};
 }
 
+void ExpectPeerClosed(xrpc::io::Socket &socket) {
+  char byte = 0;
+  auto received = socket.Read(&byte, sizeof(byte));
+  if (received.ok()) {
+    EXPECT_EQ(received.value(), 0);
+  } else {
+    // Closing with unread TCP data may reset the peer; a read timeout is a failure.
+    EXPECT_EQ(received.status().code(), xrpc::StatusCode::Unavailable);
+  }
+}
+
 }  // namespace
 
 TEST(ServerConnectionTest, EchoesSingleFrameAndClosesAfterPeerShutdown) {
@@ -283,10 +294,143 @@ TEST(ServerConnectionTest, ClosesOnInvalidFrame) {
   std::string invalid_request = MakeRequestFrame("hello", 42);
   invalid_request[0] = '\0';
   EXPECT_TRUE(pair.client_socket_.WriteAll(invalid_request).ok());
-  pair.client_socket_.ShutdownWrite();
+  // Keep the peer open: protocol rejection must cancel and drain the receive.
+  char byte = 0;
+  EXPECT_EQ(pair.client_socket_.Read(&byte, sizeof(byte)).value(), 0);
   pair.client_socket_.Close();
 
   EXPECT_TRUE(loop.FinishDrain().ok());
+}
+
+TEST(ServerConnectionTest, ReusesProvidedBuffersAcrossLargeRequests) {
+  ConnectedPair pair = MakeConnectedPair();
+  xrpc::WorkerPool worker_pool(MakeWorkerConfig(1));
+  xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
+  xrpc::ConnectionIoLoop loop(registry, worker_pool, MakeConnectionConfig());
+  loop.Start();
+  loop.PostStartConnection(std::move(pair.server_socket_));
+
+  std::string received_buffer;
+  // Each request spans multiple 16 KiB buffers; the total exceeds the 512-buffer pool.
+  for (std::uint64_t request_id = 1; request_id <= 40; ++request_id) {
+    const std::string message(256U * 1024U, static_cast<char>('a' + request_id % 26));
+    ASSERT_TRUE(pair.client_socket_.WriteAll(MakeRequestFrame(message, request_id)).ok());
+    const std::string response = RecvFrame(pair.client_socket_, received_buffer);
+    ASSERT_EQ(DecodeEchoMessage(response, request_id), "echo: " + message);
+  }
+  EXPECT_TRUE(loop.FinishDrain().ok());
+}
+
+TEST(ServerConnectionTest, DrainsQueuedReceiveDataAfterProtocolClose) {
+  ConnectedPair pair = MakeConnectedPair();
+  std::atomic<std::size_t> handler_calls = 0;
+  xrpc::ServiceRegistry registry = MakeRegistry([&](const xrpc::RequestEnvelope &request) {
+    ++handler_calls;
+    return MakeEchoResponseEnvelope(request);
+  });
+  xrpc::WorkerPool worker_pool(MakeWorkerConfig(1));
+  xrpc::ConnectionIoLoop loop(registry, worker_pool, MakeConnectionConfig());
+
+  std::string burst = MakeRequestFrame("invalid", 101);
+  burst[0] = '\0';
+  burst += MakeRequestFrame(std::string(128U * 1024U, 'x'), 102);
+  // Queue more than one provided buffer before the server starts receiving.
+  ASSERT_TRUE(pair.client_socket_.WriteAll(burst).ok());
+  loop.Start();
+  loop.PostStartConnection(std::move(pair.server_socket_));
+
+  ExpectPeerClosed(pair.client_socket_);
+  EXPECT_TRUE(loop.FinishDrain().ok());
+  EXPECT_EQ(handler_calls.load(), 0U);
+  // Loop destruction also checks that no provided-buffer leases remain outstanding.
+}
+
+TEST(ServerConnectionTest, ClosingOneConnectionPreservesSharedPoolAndOtherReceiver) {
+  ConnectedPair closing = MakeConnectedPair();
+  ConnectedPair surviving = MakeConnectedPair();
+  xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
+  xrpc::WorkerPool worker_pool(MakeWorkerConfig(1));
+  xrpc::ConnectionIoLoop loop(registry, worker_pool, MakeConnectionConfig());
+  loop.Start();
+  loop.PostStartConnection(std::move(closing.server_socket_));
+  loop.PostStartConnection(std::move(surviving.server_socket_));
+
+  std::string closing_buffer;
+  std::string surviving_buffer;
+  ASSERT_TRUE(closing.client_socket_.WriteAll(MakeRequestFrame("closing", 111)).ok());
+  ASSERT_TRUE(surviving.client_socket_.WriteAll(MakeRequestFrame("surviving", 112)).ok());
+  EXPECT_EQ(DecodeEchoMessage(RecvFrame(closing.client_socket_, closing_buffer), 111), "echo: closing");
+  EXPECT_EQ(DecodeEchoMessage(RecvFrame(surviving.client_socket_, surviving_buffer), 112), "echo: surviving");
+
+  std::string invalid = MakeRequestFrame("invalid", 113);
+  invalid[0] = '\0';
+  ASSERT_TRUE(closing.client_socket_.WriteAll(invalid).ok());
+  // Keep the other connection receiving while the first is being cancelled.
+  for (std::uint64_t request_id = 120; request_id < 160; ++request_id) {
+    const std::string message(256U * 1024U, static_cast<char>('a' + request_id % 26));
+    ASSERT_TRUE(surviving.client_socket_.WriteAll(MakeRequestFrame(message, request_id)).ok());
+    ASSERT_EQ(DecodeEchoMessage(RecvFrame(surviving.client_socket_, surviving_buffer), request_id), "echo: " + message);
+  }
+  ExpectPeerClosed(closing.client_socket_);
+  EXPECT_TRUE(loop.FinishDrain().ok());
+  ExpectPeerClosed(surviving.client_socket_);
+}
+
+TEST(ServerConnectionTest, RepeatedConnectionsDrainBeforeCollection) {
+  xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
+  xrpc::WorkerPool worker_pool(MakeWorkerConfig(1));
+  xrpc::ConnectionIoLoop loop(registry, worker_pool, MakeConnectionConfig());
+  loop.Start();
+
+  for (std::uint64_t request_id = 1; request_id <= 64; ++request_id) {
+    SCOPED_TRACE(request_id);
+    ConnectedPair pair = MakeConnectedPair();
+    loop.PostStartConnection(std::move(pair.server_socket_));
+    const std::string message = "connection-" + std::to_string(request_id);
+    ASSERT_TRUE(pair.client_socket_.WriteAll(MakeRequestFrame(message, request_id)).ok());
+    std::string received_buffer;
+    ASSERT_EQ(DecodeEchoMessage(RecvFrame(pair.client_socket_, received_buffer), request_id), "echo: " + message);
+
+    if (request_id % 2 == 0) {
+      pair.client_socket_.ShutdownWrite();
+    } else {
+      std::string invalid = MakeRequestFrame("invalid", request_id);
+      invalid[0] = '\0';
+      ASSERT_TRUE(pair.client_socket_.WriteAll(invalid).ok());
+    }
+    ExpectPeerClosed(pair.client_socket_);
+    // The next admission calls CollectClosedConnections() on the same loop.
+  }
+  EXPECT_TRUE(loop.FinishDrain().ok());
+}
+
+TEST(ServerConnectionTest, DrainPreservesPendingWorkerResponse) {
+  std::promise<void> handler_started;
+  auto started = handler_started.get_future();
+  std::promise<void> release_handler;
+  auto release = release_handler.get_future().share();
+  xrpc::ServiceRegistry registry = MakeRegistry([&](const xrpc::RequestEnvelope &request) {
+    handler_started.set_value();
+    release.wait();
+    return MakeEchoResponseEnvelope(request);
+  });
+  ConnectedPair pair = MakeConnectedPair();
+  xrpc::WorkerPool worker_pool(MakeWorkerConfig(1));
+  xrpc::ConnectionIoLoop loop(registry, worker_pool, MakeConnectionConfig());
+  loop.Start();
+  loop.PostStartConnection(std::move(pair.server_socket_));
+
+  EXPECT_TRUE(pair.client_socket_.WriteAll(MakeRequestFrame("pending", 91)).ok());
+  const auto handler_status = started.wait_for(WaitTimeout);
+  loop.BeginDrain();
+  release_handler.set_value();
+  EXPECT_EQ(handler_status, std::future_status::ready);
+  std::string received_buffer;
+  const std::string response = RecvFrame(pair.client_socket_, received_buffer);
+  EXPECT_EQ(DecodeEchoMessage(response, 91), "echo: pending");
+  EXPECT_TRUE(loop.FinishDrain().ok());
+  char byte = 0;
+  EXPECT_EQ(pair.client_socket_.Read(&byte, sizeof(byte)).value(), 0);
 }
 
 TEST(ServerConnectionTest, HandlesConcurrentResponsesWithWorkerPool) {

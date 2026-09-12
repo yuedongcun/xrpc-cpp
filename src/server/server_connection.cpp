@@ -92,15 +92,13 @@ void ServerConnection::WriteQueueAwaiter::await_suspend(std::coroutine_handle<> 
 }
 
 auto ServerConnection::ReadLoop() -> runtime::Task<void> {
+  auto receive = context_.RecvProvidedMultishot(socket_.fd());
+  bool receive_pending = false;
   while (state_ == State::Active) {
-    io::IoResult recv_result = co_await context_.RecvProvided(socket_.fd());
-    if (state_ == State::Closed) {
-      co_return;
-    }
-
-    if (state_ == State::Draining) {
-      TryFinishDrain();
-      co_return;
+    io::IoResult recv_result = co_await receive;
+    receive_pending = recv_result.has_more_;
+    if (state_ != State::Active) {
+      break;
     }
 
     if (recv_result.result_ == 0) {
@@ -119,7 +117,7 @@ auto ServerConnection::ReadLoop() -> runtime::Task<void> {
         LogError(message.data());
       }
       Close();
-      co_return;
+      break;
     }
 
     const auto bytes = recv_result.buffer_.Bytes();
@@ -128,8 +126,20 @@ auto ServerConnection::ReadLoop() -> runtime::Task<void> {
     // FeedBytes owns its copied input. Release before dispatch and the next receive.
     recv_result.buffer_ = {};
     if (!HandleFeedResult(std::move(feed_result))) {
-      co_return;
+      break;
     }
+    if (!receive_pending && state_ == State::Active) {
+      // A successful final CQE still carries data, but needs a new receive.
+      receive = context_.RecvProvidedMultishot(socket_.fd());
+    }
+  }
+
+  // Close() cancels I/O; BeginDrain() shuts down reads without cancelling sends.
+  // Both can leave queued data CQEs before the final completion. Keep the
+  // awaitable alive and return each discarded buffer before waiting again.
+  while (receive_pending) {
+    io::IoResult discarded = co_await receive;
+    receive_pending = discarded.has_more_;
   }
 
   TryFinishDrain();

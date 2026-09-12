@@ -446,6 +446,7 @@ void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) 
   operation.result_.fd_ = operation.fd_;
   operation.result_.result_ = cqe->res;
   operation.result_.error_code_ = cqe->res < 0 ? -cqe->res : 0;
+  operation.result_.has_more_ = is_multishot && has_more;
   if (operation.type_ == OperationType::Recv || operation.type_ == OperationType::RecvProvided ||
       operation.type_ == OperationType::Send) {
     operation.result_.bytes_transferred_ = cqe->res > 0 ? static_cast<std::size_t>(cqe->res) : 0;
