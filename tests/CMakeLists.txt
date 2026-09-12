@@ -51,6 +51,7 @@ xrpc_add_test(common_task_test common/task_test.cpp TIMEOUT ${XRPC_TEST_UNIT_TIM
 xrpc_add_test(io_uring_awaitable_test io/uring_awaitable_test.cpp TIMEOUT ${XRPC_TEST_INTEGRATION_TIMEOUT})
 xrpc_add_test(protocol_test protocol/protocol_test.cpp TIMEOUT ${XRPC_TEST_UNIT_TIMEOUT})
 xrpc_add_test(server_connection_io_uring_test server/server_connection_io_uring_test.cpp TIMEOUT ${XRPC_TEST_INTEGRATION_TIMEOUT})
+xrpc_add_test(worker_pool_stats_test server/worker_pool_stats_test.cpp TIMEOUT ${XRPC_TEST_UNIT_TIMEOUT})
 xrpc_add_test(rpc_frame_stream_test server/rpc_frame_stream_test.cpp TIMEOUT ${XRPC_TEST_UNIT_TIMEOUT})
 xrpc_add_test(rpc_server_lifecycle_test server/rpc_server_lifecycle_test.cpp TIMEOUT ${XRPC_TEST_INTEGRATION_TIMEOUT})
 xrpc_add_test(rpc_client_endpoint_test client/rpc_client_endpoint_test.cpp TIMEOUT ${XRPC_TEST_INTEGRATION_TIMEOUT})

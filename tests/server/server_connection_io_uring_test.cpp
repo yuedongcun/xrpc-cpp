@@ -200,10 +200,18 @@ TEST(ServerConnectionTest, ServerDrainClosesConnection) {
   auto snapshot_future = loop.RequestStats();
   ASSERT_EQ(snapshot_future.wait_for(WaitTimeout), std::future_status::ready);
   const auto snapshot = snapshot_future.get();
-  EXPECT_GE(snapshot.counters_.prepared_multishot_recv_sqes_, 1U);
-  EXPECT_GE(snapshot.counters_.recv_cqes_, 1U);
-  EXPECT_GT(snapshot.counters_.received_bytes_, 0U);
-  EXPECT_EQ(snapshot.active_recv_requests_, 1U);
+  EXPECT_GE(snapshot.uring_.counters_.prepared_multishot_recv_sqes_, 1U);
+  EXPECT_GE(snapshot.uring_.counters_.recv_cqes_, 1U);
+  EXPECT_GT(snapshot.uring_.counters_.received_bytes_, 0U);
+  EXPECT_EQ(snapshot.uring_.active_recv_requests_, 1U);
+  EXPECT_EQ(snapshot.live_connections_, 1U);
+  EXPECT_GT(snapshot.pending_write_bytes_peak_, 0U);
+
+  auto reset_future = loop.RequestStats(true);
+  ASSERT_EQ(reset_future.wait_for(WaitTimeout), std::future_status::ready);
+  const auto reset = reset_future.get();
+  EXPECT_EQ(reset.pending_write_bytes_peak_, reset.pending_write_bytes_);
+  EXPECT_EQ(reset.uring_.window_id_, snapshot.uring_.window_id_ + 1);
 
   loop.BeginDrain();
 

@@ -14,7 +14,7 @@ def collect_io_snapshot(server, path, start_window=False):
             snapshot = json.loads(path.read_text())
             if "error" in snapshot:
                 raise RuntimeError("I/O statistics: " + snapshot["error"])
-            if snapshot.get("schema_version") != 2 or snapshot.get("scope") != "connection_io_loops":
+            if snapshot.get("schema_version") != 3 or snapshot.get("scope") != "server_runtime":
                 raise RuntimeError("unsupported I/O statistics schema")
             return snapshot
         if server.poll() is not None:
@@ -47,6 +47,7 @@ def io_stats_interval(before, after, success):
     def ratio(numerator, denominator):
         return numerator / denominator if denominator else None
     return {"scope": "connection_io_loops", "before": before, "after": after,
+            "worker_pool": worker_stats_interval(before["worker_pool"], after["worker_pool"]),
             "loops": loops, "counters": totals,
             "ratios": {
                 "sqes_per_submit_call": ratio(totals["submitted_sqes"], totals["submit_calls"]),
@@ -54,3 +55,19 @@ def io_stats_interval(before, after, success):
                 "prepared_recv_sqes_per_1000_success": ratio(totals["prepared_recv_sqes"] * 1000, success),
                 "submit_calls_per_1000_success": ratio(totals["submit_calls"] * 1000, success)}}
 
+
+def worker_stats_interval(before, after):
+    if before["window_id"] != after["window_id"]:
+        raise RuntimeError("worker peak window changed during measurement")
+    start = {queue["worker_id"]: queue for queue in before["queues"]}
+    end = {queue["worker_id"]: queue for queue in after["queues"]}
+    if not start or start.keys() != end.keys():
+        raise RuntimeError("worker set changed during measurement")
+    return {"window_id": after["window_id"],
+            "pending_logical_jobs_before": before["pending_logical_jobs"],
+            "pending_logical_jobs_after": after["pending_logical_jobs"],
+            "queues": [{"worker_id": worker_id,
+                        "gauges_before": start[worker_id]["gauges"],
+                        "gauges_after": end[worker_id]["gauges"],
+                        "peaks": end[worker_id]["peaks"]}
+                       for worker_id in sorted(start)]}

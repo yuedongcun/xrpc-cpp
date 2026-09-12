@@ -10,6 +10,8 @@
 
 #include "server/connection_io_loop.h"
 
+#include <algorithm>
+#include <cassert>
 #include <exception>
 #include <utility>
 
@@ -184,15 +186,29 @@ void ConnectionIoLoop::PostDispatchCompletion(DispatchCompletion completion) {
   });
 }
 
-auto ConnectionIoLoop::RequestStats(bool start_window) -> std::future<io::UringStatsSnapshot> {
+auto ConnectionIoLoop::RequestStats(bool start_window) -> std::future<ConnectionLoopStatsSnapshot> {
   std::lock_guard lock(drain_mutex_);
   if (state_ != State::Running || std::this_thread::get_id() == thread_.get_id()) {
     throw LifecycleException("statistics require a running loop and an external control thread");
   }
-  auto promise = std::make_shared<std::promise<io::UringStatsSnapshot>>();
+  auto promise = std::make_shared<std::promise<ConnectionLoopStatsSnapshot>>();
   auto future = promise->get_future();
-  context_.Post([this, promise, start_window]() { promise->set_value(context_.SnapshotStats(start_window)); });
+  context_.Post([this, promise, start_window]() {
+    if (start_window) {
+      pending_write_bytes_peak_ = pending_write_bytes_;
+    }
+    promise->set_value({.uring_ = context_.SnapshotStats(start_window),
+                        .live_connections_ = live_connections_,
+                        .pending_write_bytes_ = pending_write_bytes_,
+                        .pending_write_bytes_peak_ = pending_write_bytes_peak_});
+  });
   return future;
+}
+
+void ConnectionIoLoop::RecordWriteBytesChange(std::size_t before, std::size_t after) {
+  assert(pending_write_bytes_ >= before);
+  pending_write_bytes_ = pending_write_bytes_ - before + after;
+  pending_write_bytes_peak_ = std::max(pending_write_bytes_peak_, pending_write_bytes_);
 }
 
 void ConnectionIoLoop::HandleDispatchCompletion(DispatchCompletion completion) {

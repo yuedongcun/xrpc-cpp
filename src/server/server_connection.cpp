@@ -179,6 +179,7 @@ void ServerConnection::Close() {
 
   state_ = State::Closed;
   write_queue_.clear();
+  owner_loop_.RecordWriteBytesChange(pending_write_bytes_, 0);
   pending_write_bytes_ = 0;
   WakeWriteLoop();
   context_.CancelFd(socket_.fd());
@@ -244,13 +245,17 @@ auto ServerConnection::TryReserveWriteBytes(std::size_t bytes) -> bool {
     return false;
   }
 
+  const std::size_t before = pending_write_bytes_;
   pending_write_bytes_ += bytes;
+  owner_loop_.RecordWriteBytesChange(before, pending_write_bytes_);
   return true;
 }
 
 void ServerConnection::ReleaseWriteBytes(std::size_t bytes) {
   assert(bytes <= pending_write_bytes_);
+  const std::size_t before = pending_write_bytes_;
   pending_write_bytes_ -= bytes;
+  owner_loop_.RecordWriteBytesChange(before, pending_write_bytes_);
 }
 
 auto ServerConnection::WriteLoop() -> runtime::Task<void> {

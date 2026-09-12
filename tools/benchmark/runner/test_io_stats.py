@@ -1,6 +1,6 @@
 import unittest
 
-from io_stats import io_stats_interval
+from io_stats import io_stats_interval, worker_stats_interval
 
 
 def snapshot(recv, cqes, submits, submitted, active):
@@ -8,7 +8,10 @@ def snapshot(recv, cqes, submits, submitted, active):
                        'peaks': {'staged_operations': 3, 'cq_ready_sampled': 4},
                        'counters': {'prepared_recv_sqes': recv, 'recv_cqes': cqes,
                                     'submit_calls': submits, 'submitted_sqes': submitted},
-                       'gauges': {'active_recv_requests': active}}]}
+                       'gauges': {'active_recv_requests': active}}],
+            'worker_pool': {'window_id': 1, 'pending_logical_jobs': 0,
+                            'queues': [{'worker_id': 0, 'gauges': {'queued_batches': 0},
+                                        'peaks': {'queued_batches': 2}}]}}
 
 
 class IoStatsIntervalTest(unittest.TestCase):
@@ -52,6 +55,17 @@ class IoStatsIntervalTest(unittest.TestCase):
         after['loops'][0]['window_id'] = 2
         with self.assertRaisesRegex(RuntimeError, 'peak window changed'):
             io_stats_interval(before, after, 10)
+
+    def test_worker_peaks_and_gauges_are_preserved(self):
+        before = snapshot(0, 0, 0, 0, 0)['worker_pool']
+        after = snapshot(1, 10, 1, 2, 0)['worker_pool']
+        after['queues'][0]['peaks']['queued_batches'] = 1
+        result = worker_stats_interval(before, after)
+        self.assertEqual(result['queues'][0]['peaks']['queued_batches'], 1)
+        self.assertEqual(result['pending_logical_jobs_after'], 0)
+        after['window_id'] = 2
+        with self.assertRaisesRegex(RuntimeError, 'worker peak window changed'):
+            worker_stats_interval(before, after)
 
 
 if __name__ == '__main__':

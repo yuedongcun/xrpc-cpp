@@ -4,6 +4,7 @@
  */
 #include "server/worker_pool.h"
 
+#include <algorithm>
 #include <exception>
 #include <thread>
 #include <utility>
@@ -65,6 +66,9 @@ auto WorkerPool::TrySubmitBatch(std::function<void()> job, std::size_t logical_j
     }
     queue.jobs_.push(WorkerJob{.run_ = std::move(job), .logical_jobs_ = logical_jobs});
     queue.pending_entries_.fetch_add(1);
+    queue.queued_logical_jobs_ += logical_jobs;
+    queue.queued_batches_peak_ = std::max(queue.queued_batches_peak_, queue.jobs_.size());
+    queue.queued_logical_jobs_peak_ = std::max(queue.queued_logical_jobs_peak_, queue.queued_logical_jobs_);
   } catch (const std::exception &) {  // XRPC_EXCEPTION_GUARD: roll back reserved capacity
     ReleasePendingJobs(logical_jobs);
     throw;
@@ -81,6 +85,26 @@ void WorkerPool::CloseSubmissions() noexcept {
 }
 
 auto WorkerPool::accepting_submissions() const noexcept -> bool { return accepting_submissions_.load(); }
+
+auto WorkerPool::SnapshotStats(bool start_window) -> WorkerPoolStatsSnapshot {
+  if (start_window) {
+    ++stats_window_id_;
+  }
+  WorkerPoolStatsSnapshot snapshot{.pending_logical_jobs_ = pending_jobs_.load(), .window_id_ = stats_window_id_};
+  for (const auto &queue : worker_queues_) {
+    std::lock_guard lock(queue->mutex_);
+    if (start_window) {
+      queue->queued_batches_peak_ = queue->jobs_.size();
+      queue->queued_logical_jobs_peak_ = queue->queued_logical_jobs_;
+    }
+    snapshot.queues_.push_back({.queued_batches_ = queue->jobs_.size(),
+                                .queued_logical_jobs_ = queue->queued_logical_jobs_,
+                                .pending_batches_ = queue->pending_entries_.load(),
+                                .queued_batches_peak_ = queue->queued_batches_peak_,
+                                .queued_logical_jobs_peak_ = queue->queued_logical_jobs_peak_});
+  }
+  return snapshot;
+}
 
 // Start from a round-robin candidate, then prefer a queue with fewer pending
 // WorkerJob entries. An empty queue is already optimal, so probing stops early.
@@ -148,6 +172,7 @@ void WorkerPool::WorkerLoop(WorkerQueue &queue) {
 
       job = std::move(queue.jobs_.front());
       queue.jobs_.pop();
+      queue.queued_logical_jobs_ -= job.logical_jobs_;
     }
 
     job.run_();

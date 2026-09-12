@@ -80,9 +80,13 @@ class ConnectionIoLoop final {
   void PostDispatchCompletion(DispatchCompletion completion);
 
   // Control-thread-only; copy statistics on the context thread via Post().
-  [[nodiscard]] auto RequestStats(bool start_window = false) -> std::future<io::UringStatsSnapshot>;
+  [[nodiscard]] auto RequestStats(bool start_window = false) -> std::future<ConnectionLoopStatsSnapshot>;
 
  private:
+  friend class ServerConnection;
+  // Context-thread-only accounting at reservation, release and close boundaries.
+  void RecordWriteBytesChange(std::size_t before, std::size_t after);
+
   enum class State : std::uint8_t {
     Created,
     Running,
@@ -115,6 +119,9 @@ class ConnectionIoLoop final {
   WorkerPool &worker_pool_;
   ServerConnectionConfig config_;
   std::unordered_map<ConnectionId, std::unique_ptr<ServerConnection>> connections_;
+  // Context-thread-owned write accounting.
+  std::size_t pending_write_bytes_ = 0;
+  std::size_t pending_write_bytes_peak_ = 0;
   ConnectionId next_connection_id_ = 1;
   std::jthread thread_;
   Status error_;

@@ -45,18 +45,42 @@ auto ToJson(const io::UringStatsSnapshot &snapshot, std::size_t loop_id) -> nloh
   return output;
 }
 
+auto ToJson(const WorkerPoolStatsSnapshot &pool) -> nlohmann::json {
+  nlohmann::json worker{{"window_id", pool.window_id_},
+                        {"pending_logical_jobs", pool.pending_logical_jobs_},
+                        {"queues", nlohmann::json::array()}};
+  for (std::size_t index = 0; index < pool.queues_.size(); ++index) {
+    const auto &q = pool.queues_[index];
+    worker["queues"].push_back(
+        {{"worker_id", index},
+         {"gauges",
+          {{"queued_batches", q.queued_batches_},
+           {"queued_logical_jobs", q.queued_logical_jobs_},
+           {"pending_batches", q.pending_batches_}}},
+         {"peaks",
+          {{"queued_batches", q.queued_batches_peak_}, {"queued_logical_jobs", q.queued_logical_jobs_peak_}}}});
+  }
+  return worker;
+}
+
 }  // namespace
 
 auto WriteStatsSnapshot(RpcServer &server, const std::string &path, bool start_window) -> Status {
   try {
     const auto result = ServerStatsAccess::Snapshot(server, start_window);
-    nlohmann::json output{{"schema_version", 2}, {"scope", "connection_io_loops"}};
+    nlohmann::json output{{"schema_version", 3}, {"scope", "server_runtime"}};
     if (!result.ok()) {
       output["error"] = result.status().message();
     } else {
+      output["worker_pool"] = ToJson(result.value().worker_pool_);
       output["loops"] = nlohmann::json::array();
-      for (std::size_t index = 0; index < result.value().size(); ++index) {
-        output["loops"].push_back(ToJson(result.value()[index], index));
+      for (std::size_t index = 0; index < result.value().loops_.size(); ++index) {
+        const auto &loop = result.value().loops_[index];
+        auto encoded = ToJson(loop.uring_, index);
+        encoded["gauges"]["live_connections"] = loop.live_connections_;
+        encoded["gauges"]["pending_write_bytes"] = loop.pending_write_bytes_;
+        encoded["peaks"]["pending_write_bytes"] = loop.pending_write_bytes_peak_;
+        output["loops"].push_back(std::move(encoded));
       }
     }
     const std::string temporary = path + ".tmp";
