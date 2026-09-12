@@ -141,3 +141,5 @@ runner 为 benchmark server 提供临时 `--stats_file`，通过 `SIGUSR1` 请�
 采集代码集中在内部 `server/runtime_stats.h`、benchmark 的 `server/stats_output.cpp` 和 runner 的 `io_stats.py`。本阶段已加入 staged 队列精确峰值、每批 CQE 处理前及快照时采样的 CQ 长度峰值、buffer 借用/归还累计计数、当前及窗口峰值租约数，以及 provided-buffer 接收的 `ENOBUFS` 次数。租约数仅包括用户态已领取的 buffer，不包括内核已选中但 CQE 尚未消费的 buffer，不能用池容量减租约数推算空闲容量。写侧新增逐 loop 的 `pending_write_bytes` 当前值与窗口峰值，包含已预留、排队和正在发送的响应字节，不含 worker 已编码但尚未投递到连接的响应。此峰值是同一 loop 内各连接的同时总量。
 
 `worker_pool` 独立输出已有 admission 总数 `pending_logical_jobs`（包含容量预留、排队和执行中 RPC），以及逐 worker 的 `queued_batches`、`queued_logical_jobs`、`pending_batches` 当前值和排队窗口峰值。一个 batch 可包含多个 RPC。采集复用既有队列锁，逐 worker 采样不构成全局原子快照；峰值也不跨 worker 求和。总快照 scope 为 `server_runtime`，I/O 计数汇总仍只包含 Connection I/O loops。
+
+开启完整统计后的 one-shot / multishot 对照见 [性能与压力记录](../../docs/multishot-recv-observability.md)。
