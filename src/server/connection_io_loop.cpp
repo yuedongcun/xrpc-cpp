@@ -184,6 +184,17 @@ void ConnectionIoLoop::PostDispatchCompletion(DispatchCompletion completion) {
   });
 }
 
+auto ConnectionIoLoop::RequestStats(bool start_window) -> std::future<io::UringStatsSnapshot> {
+  std::lock_guard lock(drain_mutex_);
+  if (state_ != State::Running || std::this_thread::get_id() == thread_.get_id()) {
+    throw LifecycleException("statistics require a running loop and an external control thread");
+  }
+  auto promise = std::make_shared<std::promise<io::UringStatsSnapshot>>();
+  auto future = promise->get_future();
+  context_.Post([this, promise, start_window]() { promise->set_value(context_.SnapshotStats(start_window)); });
+  return future;
+}
+
 void ConnectionIoLoop::HandleDispatchCompletion(DispatchCompletion completion) {
   auto connection = connections_.find(completion.connection_id_);
   if (connection == connections_.end()) {

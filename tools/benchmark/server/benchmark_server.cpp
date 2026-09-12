@@ -12,6 +12,7 @@
 #include <xrpc/rpc_server.h>
 
 #include "proto/echo.pb.h"
+#include "server/stats_output.h"
 
 namespace xrpc::benchmark {
 namespace {
@@ -24,13 +25,23 @@ struct ServerConfig final {
   std::uint16_t port_ = 9010;
   std::uint64_t delay_us_ = 0;
   RpcServerOptions options_;
+  std::string stats_file_;
 };
 
 std::atomic<bool> stop_requested{false};
+std::atomic<bool> stats_requested{false};
+std::atomic<bool> stats_window_requested{false};
 
 void HandleSignal(int signal) {
   (void)signal;
   stop_requested.store(true, std::memory_order_relaxed);
+}
+
+void HandleStatsSignal(int signal) {
+  if (signal == SIGUSR2) {
+    stats_window_requested.store(true, std::memory_order_relaxed);
+  }
+  stats_requested.store(true, std::memory_order_relaxed);
 }
 
 auto ParseUnsigned(std::string_view value, const char *name) -> std::uint64_t {
@@ -56,6 +67,11 @@ void ParseArg(ServerConfig &config, std::string_view arg) {
 
   if (key == "host") {
     config.host_ = std::string(value);
+  } else if (key == "stats_file") {
+    config.stats_file_ = std::string(value);
+    if (config.stats_file_.empty()) {
+      throw std::invalid_argument("stats_file must not be empty");
+    }
   } else if (key == "port") {
     config.port_ = static_cast<std::uint16_t>(ParseUnsigned(value, "port"));
   } else if (key == "delay_us") {
@@ -91,7 +107,7 @@ auto ParseConfig(int argc, char **argv) -> ServerConfig {
 auto Usage(const char *program) -> std::string {
   return std::string("Usage: ") + program +
          " [--host=IP] [--port=N] [--delay_us=N] [--worker_threads=N] [--io_threads=N] "
-         "[--max_inflight_per_connection=N] [--listen_backlog=N]";
+         "[--max_inflight_per_connection=N] [--listen_backlog=N] [--stats_file=PATH]";
 }
 
 auto MakeEchoHandler(std::uint64_t delay_us) {
@@ -125,6 +141,10 @@ auto main(int argc, char **argv) -> int {
 
     std::signal(SIGINT, xrpc::benchmark::HandleSignal);
     std::signal(SIGTERM, xrpc::benchmark::HandleSignal);
+    if (!config.stats_file_.empty()) {
+      std::signal(SIGUSR1, xrpc::benchmark::HandleStatsSignal);
+      std::signal(SIGUSR2, xrpc::benchmark::HandleStatsSignal);
+    }
 
     status = server.Listen(config.host_, config.port_);
     if (!status.ok()) {
@@ -147,6 +167,15 @@ auto main(int argc, char **argv) -> int {
     std::fflush(stdout);
 
     while (!xrpc::benchmark::stop_requested.load(std::memory_order_relaxed)) {
+      if (xrpc::benchmark::stats_requested.exchange(false, std::memory_order_relaxed)) {
+        status = xrpc::benchmark::WriteStatsSnapshot(
+            server, config.stats_file_,
+            xrpc::benchmark::stats_window_requested.exchange(false, std::memory_order_relaxed));
+        if (!status.ok()) {
+          std::fprintf(stderr, "%s\n", status.message().c_str());
+          break;
+        }
+      }
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
@@ -156,7 +185,7 @@ auto main(int argc, char **argv) -> int {
       server_thread.join();
     }
 
-    return 0;
+    return status.ok() ? 0 : 1;
   } catch (const std::exception &ex) {
     std::fprintf(stderr, "%s\n%s\n", ex.what(), xrpc::benchmark::Usage(argv[0]).c_str());
     return 1;

@@ -120,3 +120,22 @@ Firehose 在计时前完成全部连接建立，随后直接进行 30 秒测量�
 | 3,072 | 48,774 | 48,497–52,603 | 113.02 ms | 110.03–118.00 ms | 0 |
 
 4,096 连接探测在 Firehose 建立 RPC 之前由本机 loopback `connect()` 返回 `EADDRNOTAVAIL`，因此不作为服务端结果。要继续扩大连接数，需要使用更多客户端源地址或独立压测机。
+
+## I/O 统计快照
+
+给 runner 增加 `--collect-io-stats` 可在结果 JSON 的每个工作点中输出 `io_stats`：
+
+```bash
+python3 tools/benchmark/runner/run_suite.py \
+  --config tools/benchmark/configs/firehose.json \
+  --build-dir build-release --collect-io-stats \
+  --output-json .local-perf/uring-stats.json
+```
+
+runner 为 benchmark server 提供临时 `--stats_file`，通过 `SIGUSR1` 请求普通快照，通过 `SIGUSR2` 开始新峰值窗口并获取起始快照。信号处理器只设置标志，主控制线程请求各 Connection I/O loop 在所属线程复制数据，然后以临时文件加 rename 发布 JSON。采集请求有超时；失败会使本次测量失败，不会填入假零值。默认不开启采集，便于运行旧版本对照。
+
+`before` 在预热客户端退出后采集，并在每个 loop 上将峰值重置为当时的当前值；已有的 buffer 租约也计入新窗口。累计计数不重置。`after` 在测量客户端退出后采集，同一 loop 的 `window_id` 必须相同，否则拒绝本次结果。窗口包含测量连接的建立、请求处理及关闭，也包含边界采集的唤醒开销；不是仅有业务处理的精确时间窗口。各 loop 独立采样，accept loop 不计入本阶段统计。
+
+输出包含原始 `before/after`、逐 loop 的累计计数差值与边界当前值、计数总和以及派生比例。`prepared_multishot_recv_sqes` 是 `prepared_recv_sqes` 的子集；`recv_cqes` 包含 EOF、错误和取消。`submit_calls` 统计 liburing 调用及重试，不代表 `io_uring_enter` 系统调用数。当前值不取差值，不当作峰值；`peaks` 保留逐 loop 的窗口最大值，不取差值，也不将各 loop 峰值相加冒充全局同时峰值。没有分母的比例输出 `null`。统计 JSON 的 `schema_version` 为 2，runner 与启用统计的服务端应使用匹配版本。
+
+采集代码集中在内部 `server/runtime_stats.h`、benchmark 的 `server/stats_output.cpp` 和 runner 的 `io_stats.py`。本阶段已加入 staged 队列精确峰值、每批 CQE 处理前及快照时采样的 CQ 长度峰值、buffer 借用/归还累计计数、当前及窗口峰值租约数，以及 provided-buffer 接收的 `ENOBUFS` 次数。租约数仅包括用户态已领取的 buffer，不包括内核已选中但 CQE 尚未消费的 buffer，不能用池容量减租约数推算空闲容量。写队列和 worker 队列仍未纳入。

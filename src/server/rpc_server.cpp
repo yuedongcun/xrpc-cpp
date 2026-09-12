@@ -14,6 +14,7 @@
 
 #include "common/xrpc_exception.h"
 #include "server/rpc_server_impl.h"
+#include "server/runtime_stats.h"
 
 namespace xrpc {
 
@@ -62,5 +63,13 @@ auto RpcServer::Run() -> Status {
 void RpcServer::Stop() { impl_->Stop(); }
 
 auto RpcServer::port() const -> StatusOr<std::uint16_t> { return StatusOr<std::uint16_t>(impl_->port()); }
+
+auto ServerStatsAccess::Snapshot(RpcServer &server, bool start_window) -> StatusOr<std::vector<io::UringStatsSnapshot>> {
+  if (!server.impl_) {
+    return StatusOr<std::vector<io::UringStatsSnapshot>>(
+        Status{StatusCode::FailedPrecondition, "statistics requested from a moved-from server"});
+  }
+  return server.impl_->SnapshotStats(start_window);
+}
 
 }  // namespace xrpc

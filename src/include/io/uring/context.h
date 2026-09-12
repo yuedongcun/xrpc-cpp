@@ -33,6 +33,7 @@
 #include <utility>
 
 #include "io/uring/buffer_pool.h"
+#include "io/uring/stats.h"
 
 namespace xrpc::io {
 
@@ -134,6 +135,10 @@ class UringContext final {
 
   void Post(std::function<void()> fn);
 
+  // Run-thread-only; Post() from other threads. Starting a window resets peaks
+  // to current values before copying and increments its ID. Counters never reset.
+  [[nodiscard]] auto SnapshotStats(bool start_window = false) -> UringStatsSnapshot;
+
  private:
   friend class UringAwaitable;
 
@@ -176,6 +181,12 @@ class UringContext final {
   std::atomic<bool> stop_requested_{false};
 
   std::size_t pending_io_operations_ = 0;
+
+  // Run-thread-owned statistics; no atomic updates on the I/O hot path.
+  UringCounters counters_;
+  std::size_t active_recv_requests_ = 0;
+  UringWindowPeaks peaks_;
+  std::uint64_t stats_window_id_ = 0;
 
   std::vector<std::unique_ptr<Operation>> staged_operations_;
 

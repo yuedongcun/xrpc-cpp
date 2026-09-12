@@ -37,7 +37,9 @@ endfunction()
 xrpc_add_benchmark(
     xrpc_benchmark_server
     server/benchmark_server.cpp
+    server/stats_output.cpp
 )
+target_link_libraries(xrpc_benchmark_server PRIVATE nlohmann_json::nlohmann_json)
 xrpc_add_benchmark(
     xrpc_benchmark_firehose
     firehose/firehose_client.cpp

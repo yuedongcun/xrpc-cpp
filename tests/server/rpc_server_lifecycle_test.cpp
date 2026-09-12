@@ -17,6 +17,7 @@
 #include "proto/echo.pb.h"
 #include "protocol/frame_codec.h"
 #include "protocol/rpc_envelope.h"
+#include "server/runtime_stats.h"
 
 namespace {
 
@@ -76,6 +77,7 @@ auto RecvFrame(xrpc::io::Socket &socket) -> std::string {
 
 TEST(RpcServerLifecycleTest, RunBeforeListenReturnsFailedPrecondition) {
   xrpc::RpcServer server = MakeServer();
+  EXPECT_EQ(xrpc::ServerStatsAccess::Snapshot(server).status().code(), xrpc::StatusCode::FailedPrecondition);
   const xrpc::Status status = server.Run();
   EXPECT_EQ(status.code(), xrpc::StatusCode::FailedPrecondition);
 }

@@ -199,6 +199,7 @@ class RpcServer final {
   [[nodiscard]] auto port() const -> StatusOr<std::uint16_t>;
 
  private:
+  friend struct ServerStatsAccess;
   class Impl;
 
   explicit RpcServer(std::unique_ptr<Impl> impl);

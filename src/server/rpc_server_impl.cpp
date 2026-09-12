@@ -22,7 +22,9 @@
 #include "server/rpc_server_impl.h"
 
 #include <cassert>
+#include <chrono>
 #include <exception>
+#include <future>
 #include <memory>
 #include <string_view>
 #include <utility>
@@ -42,6 +44,33 @@ RpcServer::Impl::Impl(ServerConfig config) : config_(std::move(config)), worker_
 }
 
 RpcServer::Impl::~Impl() { Stop(); }
+
+auto RpcServer::Impl::SnapshotStats(bool start_window) -> StatusOr<std::vector<io::UringStatsSnapshot>> {
+  // Serialize the request with startup and shutdown; posted copies take no lifecycle lock.
+  std::lock_guard lock(lifecycle_mutex_);
+  if (state_ != State::Running) {
+    return StatusOr<std::vector<io::UringStatsSnapshot>>(
+        Status{StatusCode::FailedPrecondition, "statistics require a running server"});
+  }
+  try {
+    std::vector<std::future<io::UringStatsSnapshot>> futures;
+    for (auto &loop : connection_io_loops_) {
+      futures.push_back(loop->RequestStats(start_window));
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    std::vector<io::UringStatsSnapshot> snapshots;
+    for (auto &future : futures) {
+      if (future.wait_until(deadline) != std::future_status::ready) {
+        return StatusOr<std::vector<io::UringStatsSnapshot>>(
+            Status{StatusCode::DeadlineExceeded, "I/O statistics snapshot timed out"});
+      }
+      snapshots.push_back(future.get());
+    }
+    return StatusOr<std::vector<io::UringStatsSnapshot>>(std::move(snapshots));
+  } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: internal statistics API
+    return StatusOr<std::vector<io::UringStatsSnapshot>>(CaughtExceptionToStatus("failed to snapshot I/O statistics"));
+  }
+}
 
 auto RpcServer::Impl::RegisterMethod(MethodRegistration registration) -> Status {
   std::lock_guard lock(lifecycle_mutex_);

@@ -20,6 +20,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cassert>
 #include <cerrno>
 #include <exception>
@@ -303,16 +304,44 @@ auto UringContext::AcquireSqe() -> io_uring_sqe * {
 /** @brief Stages a prepared operation for the next submission flush. */
 void UringContext::SubmitPreparedOperation(std::unique_ptr<Operation> operation, bool counts_as_pending_io) noexcept {
   assert(staged_operations_.size() < staged_operations_.capacity());
+  switch (operation->completion_category_) {
+    case Operation::CompletionCategory::Cancel:
+      ++counters_.prepared_cancel_sqes_;
+      break;
+    case Operation::CompletionCategory::Wakeup:
+      ++counters_.prepared_wakeup_sqes_;
+      break;
+    case Operation::CompletionCategory::Awaitable:
+      switch (operation->type_) {
+        case OperationType::Accept:
+          ++counters_.prepared_accept_sqes_;
+          break;
+        case OperationType::Recv:
+        case OperationType::RecvProvided:
+          ++counters_.prepared_recv_sqes_;
+          counters_.prepared_multishot_recv_sqes_ += static_cast<std::uint64_t>(operation->awaitable_ != nullptr);
+          ++active_recv_requests_;
+          break;
+        case OperationType::Send:
+          ++counters_.prepared_send_sqes_;
+          break;
+        case OperationType::Unknown:
+          Abort("UringContext staged an operation with unknown type");
+      }
+      break;
+  }
   if (counts_as_pending_io) {
     ++pending_io_operations_;
   }
   staged_operations_.push_back(std::move(operation));
+  peaks_.staged_operations_ = std::max(peaks_.staged_operations_, staged_operations_.size());
 }
 
 void UringContext::FlushSubmissionBatch() {
   while (!staged_operations_.empty()) {
     int ret = 0;
     do {
+      ++counters_.submit_calls_;
       ret = io_uring_submit(&ring_);
     } while (ret == -EINTR);
 
@@ -327,6 +356,7 @@ void UringContext::FlushSubmissionBatch() {
     if (submitted > staged_operations_.size()) {
       Abort("io_uring_submit reported more operations than were staged");
     }
+    counters_.submitted_sqes_ += submitted;
     for (std::size_t index = 0; index < submitted; ++index) {
       [[maybe_unused]] Operation *released = staged_operations_[index].release();
     }
@@ -438,6 +468,17 @@ void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) 
   }
   const bool is_multishot = operation.awaitable_ != nullptr;
   const bool has_more = (cqe->flags & IORING_CQE_F_MORE) != 0;
+  if (operation.type_ == OperationType::Recv || operation.type_ == OperationType::RecvProvided) {
+    ++counters_.recv_cqes_;
+    counters_.received_bytes_ += cqe->res > 0 ? static_cast<std::uint64_t>(cqe->res) : 0;
+    if (operation.type_ == OperationType::RecvProvided && cqe->res == -ENOBUFS) {
+      ++counters_.provided_buffer_enobufs_;
+    }
+    if (!is_multishot || !has_more) {
+      assert(active_recv_requests_ > 0);
+      --active_recv_requests_;
+    }
+  }
   if (!is_multishot || !has_more) {
     --pending_io_operations_;
   }
@@ -694,6 +735,30 @@ void UringContext::DrainWakeupCounter() const {
 }
 
 // -----------------------------------------------------------------------------
+// Statistics snapshots
+// Copy on the owning thread; formatting and aggregation belong to the caller.
+// -----------------------------------------------------------------------------
+
+auto UringContext::SnapshotStats(bool start_window) -> UringStatsSnapshot {
+  AssertRunThread("UringContext::SnapshotStats called outside the owning Run thread");
+  const std::size_t cq_ready = io_uring_cq_ready(&ring_);
+  if (start_window) {
+    ++stats_window_id_;
+    peaks_ = {.staged_operations_ = staged_operations_.size(), .cq_ready_sampled_ = cq_ready};
+  } else {
+    peaks_.cq_ready_sampled_ = std::max(peaks_.cq_ready_sampled_, cq_ready);
+  }
+  return {.counters_ = counters_,
+          .staged_operations_ = staged_operations_.size(),
+          .active_recv_requests_ = active_recv_requests_,
+          .cq_ready_ = cq_ready,
+          .window_id_ = stats_window_id_,
+          .peaks_ = peaks_,
+          .buffer_pool_ =
+              provided_buffer_pool_ ? std::optional{provided_buffer_pool_->SnapshotStats(start_window)} : std::nullopt};
+}
+
+// -----------------------------------------------------------------------------
 // Event loop
 // Process a bounded CQE batch, then flush staged SQEs until shutdown has drained.
 // -----------------------------------------------------------------------------
@@ -722,6 +787,7 @@ void UringContext::Run() {
 
     // Bound one event-loop turn so newly staged Recv/Send/Accept operations
     // cannot be starved by a continuously replenished completion queue.
+    peaks_.cq_ready_sampled_ = std::max(peaks_.cq_ready_sampled_, static_cast<std::size_t>(io_uring_cq_ready(&ring_)));
     const std::size_t completion_budget = staged_operations_.capacity();
     std::size_t processed_cqes = 0;
     try {

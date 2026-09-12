@@ -11,6 +11,7 @@
 #include <thread>
 #include <utility>
 
+#include "common/xrpc_exception.h"
 #include "io/socket.h"
 #include "proto/echo.pb.h"
 #include "protocol/frame_codec.h"
@@ -196,9 +197,18 @@ TEST(ServerConnectionTest, ServerDrainClosesConnection) {
   const std::string response = RecvFrame(pair.client_socket_, received_buffer);
   EXPECT_EQ(DecodeEchoMessage(response, 8), "echo: before-drain");
 
+  auto snapshot_future = loop.RequestStats();
+  ASSERT_EQ(snapshot_future.wait_for(WaitTimeout), std::future_status::ready);
+  const auto snapshot = snapshot_future.get();
+  EXPECT_GE(snapshot.counters_.prepared_multishot_recv_sqes_, 1U);
+  EXPECT_GE(snapshot.counters_.recv_cqes_, 1U);
+  EXPECT_GT(snapshot.counters_.received_bytes_, 0U);
+  EXPECT_EQ(snapshot.active_recv_requests_, 1U);
+
   loop.BeginDrain();
 
   EXPECT_TRUE(loop.FinishDrain().ok());
+  EXPECT_THROW((void)loop.RequestStats(), xrpc::LifecycleException);
   char byte = 0;
   EXPECT_EQ(pair.client_socket_.Read(&byte, sizeof(byte)).value(), 0);
   pair.client_socket_.Close();

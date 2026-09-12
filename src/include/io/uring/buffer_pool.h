@@ -15,6 +15,8 @@
 
 #include <xrpc/status.h>
 
+#include "io/uring/stats.h"
+
 namespace xrpc::io {
 
 struct UringBufferPoolConfig final {
@@ -84,6 +86,9 @@ class UringProvidedBufferPool final {
 
   [[nodiscard]] auto GroupId() const noexcept -> std::uint16_t;
 
+  // Owning-thread-only. Starting a window seeds the lease peak with current leases.
+  [[nodiscard]] auto SnapshotStats(bool start_window = false) noexcept -> BufferPoolStatsSnapshot;
+
  private:
   friend class UringBuffer;
 
@@ -99,6 +104,9 @@ class UringProvidedBufferPool final {
   std::unique_ptr<std::byte[]> storage_;
   std::vector<std::uint8_t> leased_;
   std::size_t outstanding_leases_ = 0;
+  std::uint64_t acquires_ = 0;
+  std::uint64_t returns_ = 0;
+  std::size_t outstanding_leases_peak_ = 0;
 };
 
 }  // namespace xrpc::io

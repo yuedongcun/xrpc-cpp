@@ -114,17 +114,34 @@ auto ExhaustAndReusePool(xrpc::io::UringContext &context, int fd) -> xrpc::runti
   auto held_buffer = std::move(first.buffer_);
   EXPECT_TRUE(first.buffer_.Empty());
 
+  const auto held = context.SnapshotStats(true);
+  EXPECT_EQ(held.buffer_pool_->capacity_, 1U);
+  EXPECT_EQ(held.buffer_pool_->outstanding_leases_, 1U);
+  EXPECT_EQ(held.buffer_pool_->outstanding_leases_peak_, 1U);
+  EXPECT_EQ(held.buffer_pool_->acquires_, 1U);
+  EXPECT_EQ(held.buffer_pool_->returns_, 0U);
+
   // The only buffer remains leased, so the next receive must fail rather than overwrite it.
   auto exhausted = co_await context.RecvProvided(fd);
   EXPECT_EQ(exhausted.error_code_, ENOBUFS);
   EXPECT_EQ(exhausted.buffer_group_, 7);
   EXPECT_TRUE(exhausted.buffer_.Empty());
+  EXPECT_EQ(context.SnapshotStats().counters_.provided_buffer_enobufs_, 1U);
   const auto bytes = held_buffer.Bytes();
   EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(bytes.data()), bytes.size()), "abcd");
 
   held_buffer = {};
+  const auto reset = context.SnapshotStats(true);
+  EXPECT_EQ(reset.window_id_, held.window_id_ + 1);
+  EXPECT_EQ(reset.buffer_pool_->outstanding_leases_, 0U);
+  EXPECT_EQ(reset.buffer_pool_->outstanding_leases_peak_, 0U);
+  EXPECT_EQ(reset.buffer_pool_->acquires_, 1U);  // Resetting peaks preserves counters.
+  EXPECT_EQ(reset.buffer_pool_->returns_, 1U);
+  EXPECT_EQ(reset.peaks_.staged_operations_, reset.staged_operations_);
+  EXPECT_EQ(reset.peaks_.cq_ready_sampled_, reset.cq_ready_);
   auto next = co_await context.RecvProvided(fd);
   EXPECT_EQ(next.result_, 4);
+  EXPECT_EQ(context.SnapshotStats().buffer_pool_->outstanding_leases_peak_, 1U);
   const auto next_bytes = next.buffer_.Bytes();
   EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(next_bytes.data()), next_bytes.size()), "efgh");
   next.buffer_ = {};
@@ -134,11 +151,13 @@ auto ExhaustAndReusePool(xrpc::io::UringContext &context, int fd) -> xrpc::runti
 }
 
 auto ReadMultishot(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<std::string> {
+  const auto before = context.SnapshotStats();
   auto receive = context.RecvProvidedMultishot(fd);
   std::string received;
   std::size_t completions = 0;
   while (true) {
     auto result = co_await receive;
+    EXPECT_EQ(context.SnapshotStats().active_recv_requests_, result.has_more_ ? 1U : 0U);
     EXPECT_EQ(result.error_code_, 0);
     if (result.result_ <= 0) {
       EXPECT_EQ(result.result_, 0);
@@ -153,6 +172,18 @@ auto ReadMultishot(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Ta
     }
   }
   EXPECT_GE(completions, 3);
+  const auto after = context.SnapshotStats();
+  EXPECT_EQ(after.counters_.recv_cqes_ - before.counters_.recv_cqes_, completions + 1);
+  EXPECT_GE(after.peaks_.staged_operations_, 1U);
+  EXPECT_GE(after.peaks_.cq_ready_sampled_, 1U);
+  EXPECT_EQ(after.buffer_pool_->acquires_, after.buffer_pool_->returns_);
+  EXPECT_EQ(after.buffer_pool_->outstanding_leases_, 0U);
+  EXPECT_EQ(after.counters_.received_bytes_ - before.counters_.received_bytes_, received.size());
+  EXPECT_GT(after.counters_.prepared_multishot_recv_sqes_, before.counters_.prepared_multishot_recv_sqes_);
+  EXPECT_EQ(after.counters_.prepared_recv_sqes_, after.counters_.prepared_multishot_recv_sqes_);
+  EXPECT_GT(after.counters_.submitted_sqes_, before.counters_.submitted_sqes_);
+  EXPECT_GT(after.counters_.submit_calls_, before.counters_.submit_calls_);
+  EXPECT_EQ(after.active_recv_requests_, 0U);
   co_return received;
 }
 
@@ -217,6 +248,10 @@ auto ExhaustMultishot(xrpc::io::UringContext &context, int fd) -> xrpc::runtime:
   auto exhausted = co_await receive;
   EXPECT_EQ(exhausted.error_code_, ENOBUFS);
   EXPECT_FALSE(exhausted.has_more_);
+  const auto pressure = context.SnapshotStats();
+  EXPECT_EQ(pressure.counters_.provided_buffer_enobufs_, 1U);
+  EXPECT_EQ(pressure.buffer_pool_->outstanding_leases_, 1U);
+  EXPECT_EQ(pressure.buffer_pool_->outstanding_leases_peak_, 1U);
   EXPECT_EQ(exhausted.buffer_group_, 7);
   const auto bytes = first.buffer_.Bytes();
   EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(bytes.data()), bytes.size()), "abcd");
@@ -237,6 +272,19 @@ auto CheckMultishotErrors(xrpc::io::UringContext &context) -> xrpc::runtime::Tas
   auto after_stop = co_await stopped;
   EXPECT_EQ(after_stop.error_code_, ECANCELED);
   EXPECT_FALSE(after_stop.has_more_);
+}
+
+auto CheckUnsubmittedStats(xrpc::io::UringContext &context) -> xrpc::runtime::Task<void> {
+  const auto before = context.SnapshotStats();
+  auto unawaited = context.RecvProvidedMultishot(-1);
+  EXPECT_EQ(context.SnapshotStats().counters_.prepared_recv_sqes_, before.counters_.prepared_recv_sqes_);
+  context.RequestStop();
+  auto rejected = co_await context.RecvProvidedMultishot(-1);
+  EXPECT_EQ(rejected.error_code_, ECANCELED);
+  const auto after = context.SnapshotStats();
+  EXPECT_EQ(after.counters_.prepared_recv_sqes_, before.counters_.prepared_recv_sqes_);
+  EXPECT_EQ(after.counters_.recv_cqes_, before.counters_.recv_cqes_);
+  EXPECT_EQ(after.active_recv_requests_, 0U);
 }
 
 }  // namespace
@@ -472,4 +520,9 @@ TEST(IoUringMultishotTest, InvalidFdAndCancellationBeforeAdmission) {
   EXPECT_THROW((void)no_pool.RecvProvidedMultishot(-1), xrpc::LifecycleException);
   xrpc::io::UringContext context(8, {.buffer_count_ = 8, .buffer_size_ = 4});
   WaitTaskWithContext(CheckMultishotErrors(context), context);
+}
+
+TEST(IoUringStatsTest, UnawaitedAndRejectedReceivesDoNotCountAsPreparedSqes) {
+  xrpc::io::UringContext context(8, {.buffer_count_ = 8, .buffer_size_ = 4});
+  WaitTaskWithContext(CheckUnsubmittedStats(context), context);
 }

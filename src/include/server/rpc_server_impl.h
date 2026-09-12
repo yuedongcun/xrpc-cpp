@@ -37,6 +37,8 @@ class RpcServer::Impl final {
 
   [[nodiscard]] auto port() const -> std::uint16_t;
 
+  [[nodiscard]] auto SnapshotStats(bool start_window = false) -> StatusOr<std::vector<io::UringStatsSnapshot>>;
+
  private:
   enum class State : std::uint8_t {
     Created,

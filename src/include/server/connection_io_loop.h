@@ -11,6 +11,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -77,6 +78,9 @@ class ConnectionIoLoop final {
 
   // Worker-thread command. Posts an encoded result to this loop's I/O thread.
   void PostDispatchCompletion(DispatchCompletion completion);
+
+  // Control-thread-only; copy statistics on the context thread via Post().
+  [[nodiscard]] auto RequestStats(bool start_window = false) -> std::future<io::UringStatsSnapshot>;
 
  private:
   enum class State : std::uint8_t {

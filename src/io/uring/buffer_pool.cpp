@@ -9,6 +9,7 @@
 
 #include "io/uring/buffer_pool.h"
 
+#include <algorithm>
 #include <limits>
 #include <memory>
 #include <string>
@@ -137,6 +138,8 @@ auto UringProvidedBufferPool::Acquire(std::uint16_t buffer_id, std::size_t size)
 
   leased_[buffer_id] = 1;
   ++outstanding_leases_;
+  ++acquires_;
+  outstanding_leases_peak_ = std::max(outstanding_leases_peak_, outstanding_leases_);
   std::byte *data = storage_.get() + (static_cast<std::size_t>(buffer_id) * config_.buffer_size_);
   return {*this, buffer_id, std::span<const std::byte>(data, size)};
 }
@@ -144,6 +147,17 @@ auto UringProvidedBufferPool::Acquire(std::uint16_t buffer_id, std::size_t size)
 auto UringProvidedBufferPool::BufferSize() const noexcept -> std::uint32_t { return config_.buffer_size_; }
 
 auto UringProvidedBufferPool::GroupId() const noexcept -> std::uint16_t { return config_.group_id_; }
+
+auto UringProvidedBufferPool::SnapshotStats(bool start_window) noexcept -> BufferPoolStatsSnapshot {
+  if (start_window) {
+    outstanding_leases_peak_ = outstanding_leases_;
+  }
+  return {.acquires_ = acquires_,
+          .returns_ = returns_,
+          .capacity_ = config_.buffer_count_,
+          .outstanding_leases_ = outstanding_leases_,
+          .outstanding_leases_peak_ = outstanding_leases_peak_};
+}
 
 void UringProvidedBufferPool::Release(std::uint16_t buffer_id) noexcept {
   if (buffer_id >= config_.buffer_count_ || leased_[buffer_id] == 0 || outstanding_leases_ == 0) {
@@ -154,6 +168,7 @@ void UringProvidedBufferPool::Release(std::uint16_t buffer_id) noexcept {
   io_uring_buf_ring_advance(buffer_ring_, 1);
   leased_[buffer_id] = 0;
   --outstanding_leases_;
+  ++returns_;
 }
 
 void UringProvidedBufferPool::Provide(std::uint16_t buffer_id, int offset) noexcept {
