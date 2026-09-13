@@ -29,15 +29,6 @@ auto MakeRequestFrame(std::string payload, std::uint64_t request_id) -> std::str
   return codec.Encode(request).value();
 }
 
-auto DecodeResponseFrame(const std::string &frame) -> xrpc::ResponseEnvelope {
-  xrpc::FrameCodec codec;
-  xrpc::FrameDecodeResult decoded = codec.Decode(frame);
-  EXPECT_EQ(decoded.error_, xrpc::ProtocolError::Ok);
-  EXPECT_EQ(decoded.consumed_, frame.size());
-  EXPECT_TRUE(decoded.response_.has_value());
-  return *decoded.response_;
-}
-
 }  // namespace
 
 TEST(RpcFrameStreamTest, FeedBytesCollectsRequestsWithoutDispatching) {
@@ -124,21 +115,5 @@ TEST(RpcFrameStreamTest, ClosesOnOversizedPayload) {
     const auto result = frame_stream.FeedBytes(EncodeFrameHeader(header));
     EXPECT_TRUE(result.closed_);
     EXPECT_TRUE(result.requests_.empty());
-  }
-}
-
-TEST(RpcFrameStreamTest, EncodeResponsePreservesFields) {
-  xrpc::RpcFrameStream frame_stream;
-  for (const auto &status : {xrpc::Status::Ok(), xrpc::Status{xrpc::StatusCode::Internal, "handler failed"}}) {
-    SCOPED_TRACE(static_cast<int>(status.code()));
-    xrpc::ResponseEnvelope response;
-    response.request_id_ = 301;
-    response.status_ = status;
-    response.payload_ = "payload";
-    const auto decoded = DecodeResponseFrame(frame_stream.EncodeResponse(std::move(response)).value());
-    EXPECT_EQ(decoded.request_id_, 301U);
-    EXPECT_EQ(decoded.status_.code(), status.code());
-    EXPECT_EQ(decoded.status_.message(), status.message());
-    EXPECT_EQ(decoded.payload_, "payload");
   }
 }

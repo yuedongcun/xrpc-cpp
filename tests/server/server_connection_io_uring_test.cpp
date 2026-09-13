@@ -354,8 +354,8 @@ TEST(ServerConnectionTest, ReusesProvidedBuffersAcrossLargeRequests) {
   loop.PostStartConnection(std::move(pair.server_socket_));
 
   std::string received_buffer;
-  // Each request spans multiple 16 KiB buffers; the total exceeds the 512-buffer pool.
-  for (std::uint64_t request_id = 1; request_id <= 40; ++request_id) {
+  // Each request spans multiple 16 KiB buffers; the total exceeds the default pool.
+  for (std::uint64_t request_id = 1; request_id <= 132; ++request_id) {
     const std::string message(256U * 1024U, static_cast<char>('a' + request_id % 26));
     ASSERT_TRUE(pair.client_socket_.WriteAll(MakeRequestFrame(message, request_id)).ok());
     const std::string response = RecvFrame(pair.client_socket_, received_buffer);

@@ -17,8 +17,7 @@ auto ToJson(const io::UringStatsSnapshot &snapshot, std::size_t loop_id) -> nloh
                         {"window_id", snapshot.window_id_},
                         {"peaks",
                          {{"staged_operations", snapshot.peaks_.staged_operations_},
-                          {"cq_ready_sampled", snapshot.peaks_.cq_ready_sampled_},
-                          {"buffer_return_waiters", snapshot.peaks_.buffer_return_waiters_}}},
+                          {"cq_ready_sampled", snapshot.peaks_.cq_ready_sampled_}}},
                         {"counters",
                          {{"prepared_accept_sqes", c.prepared_accept_sqes_},
                           {"prepared_recv_sqes", c.prepared_recv_sqes_},
@@ -29,16 +28,11 @@ auto ToJson(const io::UringStatsSnapshot &snapshot, std::size_t loop_id) -> nloh
                           {"submitted_sqes", c.submitted_sqes_},
                           {"recv_cqes", c.recv_cqes_},
                           {"received_bytes", c.received_bytes_},
-                          {"provided_buffer_enobufs", c.provided_buffer_enobufs_},
-                          {"buffer_return_waits", c.buffer_return_waits_},
-                          {"buffer_return_wait_suspensions", c.buffer_return_wait_suspensions_},
-                          {"buffer_return_waits_completed", c.buffer_return_waits_completed_},
-                          {"buffer_return_waits_cancelled", c.buffer_return_waits_cancelled_}}},
+                          {"provided_buffer_enobufs", c.provided_buffer_enobufs_}}},
                         {"gauges",
                          {{"staged_operations", snapshot.staged_operations_},
                           {"active_recv_requests", snapshot.active_recv_requests_},
-                          {"cq_ready", snapshot.cq_ready_},
-                          {"buffer_return_waiters", snapshot.buffer_return_waiters_}}}};
+                          {"cq_ready", snapshot.cq_ready_}}}};
   if (snapshot.buffer_pool_) {
     const auto &pool = *snapshot.buffer_pool_;
     output["counters"]["buffer_acquires"] = pool.acquires_;

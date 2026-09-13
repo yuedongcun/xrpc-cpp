@@ -14,19 +14,20 @@
 #include <sys/socket.h>
 
 #include "common/log.h"
+#include "protocol/frame_codec.h"
 #include "server/connection_io_loop.h"
 #include "server/service_registry.h"
 
 namespace xrpc {
 namespace {
 
-auto MakeMaxWriteBatchBytes() -> std::size_t { return 64U * 1024U; }
+constexpr std::size_t MAX_WRITE_BATCH_BYTES = 64U * 1024U;
 
-void ExecuteDispatchBatchOnWorker(ConnectionId connection_id, ConnectionIoLoop &owner_loop, ServiceRegistry &registry,
-                                  ProtocolLimits protocol_limits, std::vector<RequestEnvelope> &requests) {
+void ExecuteRequestBatchOnWorker(ConnectionId connection_id, ConnectionIoLoop &owner_loop, ServiceRegistry &registry,
+                                 ProtocolLimits protocol_limits, std::vector<RequestEnvelope> &requests) {
   const std::size_t request_count = requests.size();
   std::string batch_response_bytes;
-  std::size_t successful_jobs = 0;
+  std::size_t encoded_responses = 0;
 
   for (RequestEnvelope &request : requests) {
     ResponseEnvelope response = registry.Dispatch(std::move(request));
@@ -36,21 +37,23 @@ void ExecuteDispatchBatchOnWorker(ConnectionId connection_id, ConnectionIoLoop &
       break;
     }
     batch_response_bytes.append(std::move(encoded).value());
-    ++successful_jobs;
+    ++encoded_responses;
   }
 
-  if (successful_jobs > 0) {
-    DispatchCompletion completion{.connection_id_ = connection_id,
-                                  .response_bytes_ = std::move(batch_response_bytes),
-                                  .completed_jobs_ = successful_jobs,
-                                  .encode_failed_ = false};
-    owner_loop.PostDispatchCompletion(std::move(completion));
+  if (encoded_responses > 0) {
+    WorkerResult result{.connection_id_ = connection_id,
+                        .response_bytes_ = std::move(batch_response_bytes),
+                        .released_requests_ = encoded_responses,
+                        .encode_failed_ = false};
+    owner_loop.PostWorkerResult(std::move(result));
   }
 
-  if (successful_jobs < request_count) {
-    DispatchCompletion completion{
-        .connection_id_ = connection_id, .completed_jobs_ = request_count - successful_jobs, .encode_failed_ = true};
-    owner_loop.PostDispatchCompletion(std::move(completion));
+  // Release the failed request and the unexecuted remainder of this batch.
+  if (encoded_responses < request_count) {
+    WorkerResult result{.connection_id_ = connection_id,
+                        .released_requests_ = request_count - encoded_responses,
+                        .encode_failed_ = true};
+    owner_loop.PostWorkerResult(std::move(result));
   }
 }
 
@@ -100,16 +103,6 @@ auto ServerConnection::ReadLoop() -> runtime::Task<void> {
       break;
     }
 
-    if (recv_result.error_code_ == ENOBUFS) {
-      recv_result.buffer_.Reset();
-      const auto outcome =
-          co_await context_.WaitForBufferReturnSince(socket_.fd(), recv_result.buffer_returns_at_start_);
-      if (outcome == io::BufferReturnWaitOutcome::Cancelled || state_ != State::Active) {
-        break;
-      }
-      continue;
-    }
-
     if (recv_result.result_ < 0) {
       if (recv_result.error_code_ != ECANCELED) {
         LOG(ERROR) << "recv failed connection_id=" << connection_id_ << " fd=" << recv_result.fd_
@@ -157,7 +150,7 @@ auto ServerConnection::HandleFeedResult(FrameStreamFeedResult &&feed) -> bool {
     requests.push_back(std::move(request));
     return true;
   });
-  return SubmitDispatchBatch(std::move(requests));
+  return SubmitRequestBatch(std::move(requests));
 }
 
 void ServerConnection::Close() {
@@ -183,15 +176,14 @@ void ServerConnection::BeginDrain() {
   }
 
   state_ = State::Draining;
-  context_.CancelBufferReturnWaitsForFd(socket_.fd());
   if (socket_.valid()) {
     (void)::shutdown(socket_.fd(), SHUT_RD);
   }
   TryFinishDrain();
 }
 
-void ServerConnection::OnEncodedDispatchComplete(std::string &&response_bytes, std::size_t completed_jobs) {
-  ReleaseDispatchJobs(completed_jobs);
+void ServerConnection::OnResponsesEncoded(std::string &&response_bytes, std::size_t released_requests) {
+  ReleaseInflightRequests(released_requests);
   if (state_ == State::Closed) {
     return;
   }
@@ -203,14 +195,14 @@ void ServerConnection::OnEncodedDispatchComplete(std::string &&response_bytes, s
   TryFinishDrain();
 }
 
-void ServerConnection::OnDispatchEncodeFailure(std::size_t completed_jobs) {
-  ReleaseDispatchJobs(completed_jobs);
+void ServerConnection::OnResponseEncodeFailure(std::size_t released_requests) {
+  ReleaseInflightRequests(released_requests);
   Close();
 }
 
-void ServerConnection::ReleaseDispatchJobs(std::size_t completed_jobs) {
-  assert(completed_jobs <= inflight_requests_);
-  inflight_requests_ -= completed_jobs;
+void ServerConnection::ReleaseInflightRequests(std::size_t released_requests) {
+  assert(released_requests <= inflight_requests_);
+  inflight_requests_ -= released_requests;
 }
 
 auto ServerConnection::EnqueueWrite(std::string bytes) -> bool {
@@ -257,9 +249,8 @@ auto ServerConnection::WriteLoop() -> runtime::Task<void> {
       std::string frame = std::move(pending_write.bytes_);
       std::size_t frame_size = frame.size();
       if (!write_queue_.empty()) {
-        const std::size_t max_batch_bytes = MakeMaxWriteBatchBytes();
-        frame.reserve(std::min(pending_write_bytes_, max_batch_bytes));
-        while (!write_queue_.empty() && frame.size() + write_queue_.front().bytes_.size() <= max_batch_bytes) {
+        frame.reserve(std::min(pending_write_bytes_, MAX_WRITE_BATCH_BYTES));
+        while (!write_queue_.empty() && frame.size() + write_queue_.front().bytes_.size() <= MAX_WRITE_BATCH_BYTES) {
           frame_size += write_queue_.front().bytes_.size();
           frame.append(write_queue_.front().bytes_);
           write_queue_.pop_front();
@@ -301,7 +292,7 @@ auto ServerConnection::CanBeCollected() const -> bool {
   return state_ == State::Closed && read_loop_task_.Done() && write_loop_task_.Done();
 }
 
-auto ServerConnection::SubmitDispatchBatch(std::vector<RequestEnvelope> requests) -> bool {
+auto ServerConnection::SubmitRequestBatch(std::vector<RequestEnvelope> requests) -> bool {
   const std::size_t request_count = requests.size();
   assert(request_count > 0);
 
@@ -312,7 +303,7 @@ auto ServerConnection::SubmitDispatchBatch(std::vector<RequestEnvelope> requests
   const ProtocolLimits protocol_limits = protocol_limits_;
   const bool accepted = worker_pool_.TrySubmitBatch(
       [connection_id, owner_loop, registry, protocol_limits, request_batch]() -> void {
-        ExecuteDispatchBatchOnWorker(connection_id, *owner_loop, *registry, protocol_limits, *request_batch);
+        ExecuteRequestBatchOnWorker(connection_id, *owner_loop, *registry, protocol_limits, *request_batch);
       },
       request_count);
 
@@ -338,7 +329,8 @@ auto ServerConnection::RejectForBackpressure(RequestEnvelope &&request, std::str
   response.request_id_ = request.request_id_;
   response.status_ = {StatusCode::ResourceExhausted, std::move(message)};
 
-  StatusOr<std::string> encoded = frame_stream_.EncodeResponse(std::move(response));
+  FrameCodec codec(protocol_limits_);
+  StatusOr<std::string> encoded = codec.Encode(response);
   if (!encoded.ok()) {
     Close();
     return false;

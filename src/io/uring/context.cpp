@@ -50,7 +50,6 @@ struct Operation {
   void *buffer_ = nullptr;
   std::size_t length_ = 0;
   IoResult result_;
-  std::uint64_t buffer_returns_at_start_ = 0;
   std::coroutine_handle<> continuation_;
   UringAwaitable *awaitable_ = nullptr;
   bool multishot_ = false;
@@ -413,7 +412,6 @@ auto UringContext::TryStartOperation(std::unique_ptr<Operation> &operation, std:
       if (!provided_buffer_pool_) {
         Abort("UringContext attempted a provided-buffer receive without a registered pool");
       }
-      operation->buffer_returns_at_start_ = provided_buffer_pool_->ReturnedBufferCount();
       io_uring_prep_recv(sqe, operation->fd_, nullptr, provided_buffer_pool_->BufferSize(), 0);
       sqe->flags |= IOSQE_BUFFER_SELECT;
       sqe->buf_group = provided_buffer_pool_->GroupId();
@@ -496,7 +494,6 @@ void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) 
     operation.result_.bytes_transferred_ = cqe->res > 0 ? static_cast<std::size_t>(cqe->res) : 0;
   }
   if (operation.type_ == OperationType::RecvProvided) {
-    operation.result_.buffer_returns_at_start_ = operation.buffer_returns_at_start_;
     operation.result_.buffer_group_ = provided_buffer_pool_->GroupId();
     const bool has_selected_buffer = (cqe->flags & IORING_CQE_F_BUFFER) != 0;
     if (cqe->res > 0 && !has_selected_buffer) {
@@ -595,98 +592,7 @@ void UringContext::CancelFd(int fd) {
   if (fd < 0 || !IsRunning()) {
     return;
   }
-  CancelBufferReturnWaitsForFd(fd);
   SubmitCancelFd(fd);
-}
-
-// -----------------------------------------------------------------------------
-// Provided-buffer return waits
-// Registration and cancellation share the Run thread; resumption is deferred
-// until the CQE batch has completed, never nested inside a buffer Release().
-// -----------------------------------------------------------------------------
-
-auto UringContext::WaitForBufferReturnSince(int fd, std::uint64_t observed_return_count) -> BufferReturnAwaitable {
-  AssertRunThread("buffer return wait constructed outside the owning Run thread");
-  if (!provided_buffer_pool_) {
-    throw LifecycleException("buffer return waits require a registered provided-buffer pool");
-  }
-  return BufferReturnAwaitable(*this, fd, observed_return_count);
-}
-
-BufferReturnAwaitable::~BufferReturnAwaitable() {
-  if (continuation_) {
-    context_.AssertRunThread("buffer return wait destroyed outside the owning Run thread");
-    context_.buffer_return_waiters_.remove(this);
-    ++context_.counters_.buffer_return_waits_cancelled_;
-  }
-}
-
-auto BufferReturnAwaitable::await_ready() -> bool {
-  context_.AssertRunThread("buffer return wait awaited outside the owning Run thread");
-  ++context_.counters_.buffer_return_waits_;
-  if (context_.stop_requested_.load()) {
-    ++context_.counters_.buffer_return_waits_cancelled_;
-    outcome_ = BufferReturnWaitOutcome::Cancelled;
-    return true;
-  }
-  if (context_.provided_buffer_pool_->ReturnedBufferCount() > observed_return_count_) {
-    ++context_.counters_.buffer_return_waits_completed_;
-    return true;
-  }
-  return false;
-}
-
-void BufferReturnAwaitable::await_suspend(std::coroutine_handle<> continuation) {
-  continuation_ = continuation;
-  context_.buffer_return_waiters_.push_back(this);
-  ++context_.counters_.buffer_return_wait_suspensions_;
-  context_.peaks_.buffer_return_waiters_ =
-      std::max(context_.peaks_.buffer_return_waiters_, context_.buffer_return_waiters_.size());
-}
-
-void UringContext::CancelBufferReturnWaitsForFd(int fd) {
-  AssertRunThread("buffer return cancellation outside the owning Run thread");
-  while (true) {
-    const auto found = std::find_if(buffer_return_waiters_.begin(), buffer_return_waiters_.end(),
-                                    [fd](const auto *waiter) -> bool { return waiter->fd_ == fd; });
-    if (found == buffer_return_waiters_.end()) {
-      return;
-    }
-    auto *waiter = *found;
-    buffer_return_waiters_.erase(found);
-    ++counters_.buffer_return_waits_cancelled_;
-    waiter->outcome_ = BufferReturnWaitOutcome::Cancelled;
-    const auto continuation = std::exchange(waiter->continuation_, {});
-    continuation.resume();
-  }
-}
-
-void UringContext::ResumeBufferReturnWaiters() {
-  if (buffer_return_waiters_.empty()) {
-    return;
-  }
-  const auto returns = provided_buffer_pool_->ReturnedBufferCount();
-  const bool stopping = stop_requested_.load();
-  const auto budget = stopping ? buffer_return_waiters_.size() : staged_operations_.capacity();
-  for (std::size_t resumed = 0; resumed < budget; ++resumed) {
-    const auto found = std::find_if(buffer_return_waiters_.begin(), buffer_return_waiters_.end(),
-                                    [returns, stopping](const auto *waiter) -> bool {
-                                      return stopping || returns > waiter->observed_return_count_;
-                                    });
-    if (found == buffer_return_waiters_.end()) {
-      break;
-    }
-    auto *waiter = *found;
-    buffer_return_waiters_.erase(found);
-    if (stopping) {
-      ++counters_.buffer_return_waits_cancelled_;
-    } else {
-      ++counters_.buffer_return_waits_completed_;
-    }
-    waiter->outcome_ = stopping ? BufferReturnWaitOutcome::Cancelled : BufferReturnWaitOutcome::ReturnObserved;
-    const auto continuation = std::exchange(waiter->continuation_, {});
-    continuation.resume();
-  }
 }
 
 // -----------------------------------------------------------------------------
@@ -847,9 +753,7 @@ auto UringContext::SnapshotStats(bool start_window) -> UringStatsSnapshot {
   const std::size_t cq_ready = io_uring_cq_ready(&ring_);
   if (start_window) {
     ++stats_window_id_;
-    peaks_ = {.buffer_return_waiters_ = buffer_return_waiters_.size(),
-              .staged_operations_ = staged_operations_.size(),
-              .cq_ready_sampled_ = cq_ready};
+    peaks_ = {.staged_operations_ = staged_operations_.size(), .cq_ready_sampled_ = cq_ready};
   } else {
     peaks_.cq_ready_sampled_ = std::max(peaks_.cq_ready_sampled_, cq_ready);
   }
@@ -857,7 +761,6 @@ auto UringContext::SnapshotStats(bool start_window) -> UringStatsSnapshot {
           .staged_operations_ = staged_operations_.size(),
           .active_recv_requests_ = active_recv_requests_,
           .cq_ready_ = cq_ready,
-          .buffer_return_waiters_ = buffer_return_waiters_.size(),
           .window_id_ = stats_window_id_,
           .peaks_ = peaks_,
           .buffer_pool_ =
@@ -879,21 +782,7 @@ void UringContext::Run() {
   SubmitWakeupPoll();
   FlushSubmissionBatch();
 
-  while (!stop_requested_.load() || pending_io_operations_ > 0 || wakeup_poll_pending_ ||
-         !buffer_return_waiters_.empty()) {
-    ResumeBufferReturnWaiters();
-    FlushSubmissionBatch();
-    // A bounded recovery pass must not leave eligible waiters behind while
-    // blocking for a CQE: they may be the only remaining source of new work.
-    if (provided_buffer_pool_ &&
-        std::any_of(buffer_return_waiters_.begin(), buffer_return_waiters_.end(), [this](const auto *waiter) -> bool {
-          return provided_buffer_pool_->ReturnedBufferCount() > waiter->observed_return_count_;
-        })) {
-      continue;
-    }
-    if (stop_requested_.load() && pending_io_operations_ == 0 && !wakeup_poll_pending_) {
-      break;
-    }
+  while (!stop_requested_.load() || pending_io_operations_ > 0 || wakeup_poll_pending_) {
     // No operation may remain staged while the event loop blocks.
     assert(staged_operations_.empty());
     io_uring_cqe *cqe = nullptr;
@@ -921,7 +810,6 @@ void UringContext::Run() {
       FlushSubmissionBatch();
       throw;
     }
-    ResumeBufferReturnWaiters();
     FlushSubmissionBatch();
   }
 }

@@ -237,7 +237,7 @@ void TcpTransport::ReaderLoop(int fd) {
       }
 
       const std::uint64_t request_id = decoded.response_->request_id_;
-      CompletePending(request_id, MakeCallSuccess(std::move(*decoded.response_)));
+      CompletePending(request_id, MakeCallResponse(std::move(*decoded.response_)));
       buffer.erase(0, decoded.consumed_);
     }
 

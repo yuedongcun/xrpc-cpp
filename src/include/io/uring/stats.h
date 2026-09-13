@@ -21,19 +21,11 @@ struct UringCounters {
   std::uint64_t recv_cqes_ = 0;       // Includes data, EOF, errors and cancellation.
   std::uint64_t received_bytes_ = 0;  // Positive receive results only.
   std::uint64_t provided_buffer_enobufs_ = 0;
-  // Awaited return waits, including those satisfied immediately.
-  std::uint64_t buffer_return_waits_ = 0;
-  std::uint64_t buffer_return_wait_suspensions_ = 0;
-  // Completed means return progress observed, not a reserved buffer or successful recv.
-  std::uint64_t buffer_return_waits_completed_ = 0;
-  // Includes stop, fd cancellation, and destruction of a suspended wait.
-  std::uint64_t buffer_return_waits_cancelled_ = 0;
 };
 
 struct UringWindowPeaks {
-  std::size_t buffer_return_waiters_ = 0;  // Updated at every wait registration.
-  std::size_t staged_operations_ = 0;      // Updated on every staging insertion.
-  std::size_t cq_ready_sampled_ = 0;       // Sampled before each CQE batch and at snapshots.
+  std::size_t staged_operations_ = 0;  // Updated on every staging insertion.
+  std::size_t cq_ready_sampled_ = 0;   // Sampled before each CQE batch and at snapshots.
 };
 
 struct BufferPoolStatsSnapshot {
@@ -54,7 +46,6 @@ struct UringStatsSnapshot {
   // This is an operation count, not the number of occupied SQ slots.
   std::size_t active_recv_requests_ = 0;
   std::size_t cq_ready_ = 0;
-  std::size_t buffer_return_waiters_ = 0;
   std::uint64_t window_id_ = 0;
   UringWindowPeaks peaks_;
   std::optional<BufferPoolStatsSnapshot> buffer_pool_;

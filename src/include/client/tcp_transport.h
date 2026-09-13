@@ -86,7 +86,7 @@ struct CallAttemptResult {
   return CallAttemptResult(CallFailure{.status_ = std::move(status), .commit_state_ = commit_state});
 }
 
-[[nodiscard]] inline auto MakeCallSuccess(ResponseEnvelope response) -> CallAttemptResult {
+[[nodiscard]] inline auto MakeCallResponse(ResponseEnvelope response) -> CallAttemptResult {
   return CallAttemptResult(std::move(response));
 }
 

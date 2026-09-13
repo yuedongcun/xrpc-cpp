@@ -47,7 +47,7 @@ sequenceDiagram
 
 ## 事件循环与线程模型
 
-`UringContext::Run()` 在调用线程中执行事件循环：它首先 stage 并提交用于跨线程唤醒的 eventfd poll，然后等待 CQE。每个有界 event-loop turn 至少处理一个 CQE，并继续处理不超过 ring submission capacity 的 ready CQE；turn 中产生的 SQE 最后统一提交。Runtime 绝不会携带 staged SQE 进入下一次 blocking wait。停止请求发出，并且所有普通异步 I/O、eventfd poll 和 buffer 归还等待都结束后，`Run()` 才返回。
+`UringContext::Run()` 在调用线程中执行事件循环：它首先 stage 并提交用于跨线程唤醒的 eventfd poll，然后等待 CQE。每个有界 event-loop turn 至少处理一个 CQE，并继续处理不超过 ring submission capacity 的 ready CQE；turn 中产生的 SQE 最后统一提交。Runtime 绝不会携带 staged SQE 进入下一次 blocking wait。停止请求发出，并且所有普通异步 I/O 和 eventfd poll 都结束后，`Run()` 才返回。
 
 ```mermaid
 flowchart TD
@@ -101,9 +101,9 @@ auto ServerConnection::ReadLoop() -> runtime::Task<void> {
 
 每条服务端连接固定拥有一条读协程和一条写协程。读协程通过 `RecvProvided()` 等待内核网络输入；写协程在有数据时通过 `Send()` 等待 socket，在队列为空时通过一个单等待者 awaiter 等待用户态入队通知。两种等待都只挂起当前协程，不阻塞 Connection I/O 线程。
 
-当前服务端 recv 使用单次 provided-buffer receive；accept 和 eventfd poll 使用 multishot。每个 Connection I/O Loop 注册独立的 buffer pool，默认 512 × 16 KiB（8 MiB 数据区），由该 Loop 的连接共享；注册失败会使初始化失败，没有普通 `Recv()` 回退。`RpcFrameStream::FeedBytes()` 仍复制输入，返回后立即归还 buffer，再分发请求，因此这一步还不是零复制。
+当前服务端 recv 使用单次 provided-buffer receive；accept 和 eventfd poll 使用 multishot。每个 Connection I/O Loop 注册独立的 buffer pool，默认 2048 × 16 KiB（32 MiB 数据区），由该 Loop 的连接共享；注册失败会使初始化失败，没有普通 `Recv()` 回退。`RpcFrameStream::FeedBytes()` 仍复制输入，返回后立即归还 buffer，再分发请求，因此这一步还不是零复制。
 
-单次 provided-buffer recv 因池耗尽返回 `ENOBUFS` 时，服务端保留连接，通过 `WaitForBufferReturnSince(fd, buffer_returns_at_start)` 等待归还进展，再重新提交接收。请求启动时记录 pool 累计归还数；等待时若计数已增加就直接返回 `ReturnObserved`，否则挂起当前协程。该结果只允许重试，不保证 buffer 仍可用。等待队列由 context 运行线程管理，CQE 批次后按登记顺序、限制数量恢复，不在 buffer 归还函数中直接恢复协程。`CancelFd()`、服务端 drain 和 context 停止会取消等待，返回 `Cancelled`。其他接收错误使用 glog 记录后关闭；正常 EOF 和取消不记录错误。
+单次 provided-buffer recv 因池耗尽返回 `ENOBUFS` 时，服务端记录错误并立即关闭连接，不等待归还或重试。保留 `provided_buffer_enobufs` 耗尽计数和 buffer pool 占用统计，用于压测容量配置。其他接收错误同样记录后关闭；正常 EOF 和取消不记录错误。
 
 协程返回类型需要向编译器提供 `promise_type`。在 xRPC 中，`Task<void>::promise_type` 实际指向存放在 coroutine frame 内的 `TaskPromise<void>`。它参与整个协程从创建到结束的过程：
 
@@ -302,7 +302,7 @@ I/O 线程执行 callback
 | `CancelFd(fd)`    | 取消指定 fd 上尚未完成的 I/O，使对应 operation 尽快产生 completion           |
 | `Socket::Close()` | 关闭并释放 socket fd，由 socket owner 负责调用                        |
 
-`RequestStop()` 不会直接终止 pending I/O。它只表达 `UringContext` 的停止意图，并通过 eventfd 唤醒 `Run()`。在停止请求发出后，`Run()` 仍会继续处理已有 CQE，直到 pending operation 归零、wakeup poll 结束且 buffer 归还等待队列清空后才返回。
+`RequestStop()` 不会直接终止 pending I/O。它只表达 `UringContext` 的停止意图，并通过 eventfd 唤醒 `Run()`。在停止请求发出后，`Run()` 仍会继续处理已有 CQE，直到 pending operation 归零且 wakeup poll 结束后才返回。
 
 `CancelFd(fd)` 也不会停止整个 context。它只针对指定 fd 提交取消操作。取消请求本身会产生 Cancel CQE，被取消的原始 I/O 也会产生自己的 CQE，因此这些 completion 仍需要由 `Run()` 正常处理，相关 operation 才能完成回收。
 

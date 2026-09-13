@@ -21,7 +21,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -66,16 +65,11 @@ struct IoResult {
   bool has_more_ = false;
   // Identifies the provided-buffer group even when receive fails without a buffer.
   std::uint16_t buffer_group_ = 0;
-  // Pool return count when this provided-buffer receive was started.
-  std::uint64_t buffer_returns_at_start_ = 0;
   UringBuffer buffer_;
 };
 
 struct Operation;
 class UringAwaitable;
-class BufferReturnAwaitable;
-
-enum class BufferReturnWaitOutcome { ReturnObserved, Cancelled };
 
 /**
  * @brief Single-threaded io_uring execution context with cross-thread control.
@@ -137,10 +131,6 @@ class UringContext final {
 
   [[nodiscard]] auto Send(int fd, const void *buffer, std::size_t len) -> UringAwaitable;
 
-  // Run-thread-only. Progress allows retry; it does not reserve a buffer.
-  [[nodiscard]] auto WaitForBufferReturnSince(int fd, std::uint64_t observed_return_count) -> BufferReturnAwaitable;
-  void CancelBufferReturnWaitsForFd(int fd);
-
   void CancelFd(int fd);
 
   void Post(std::function<void()> fn);
@@ -151,9 +141,6 @@ class UringContext final {
 
  private:
   friend class UringAwaitable;
-  friend class BufferReturnAwaitable;
-
-  void ResumeBufferReturnWaiters();
 
   // Resource lifetime and ownership of the Run thread.
   UringContext(std::optional<UringBufferPoolConfig> buffer_pool_config, std::uint32_t entries);
@@ -187,8 +174,6 @@ class UringContext final {
 
   std::unique_ptr<UringProvidedBufferPool> provided_buffer_pool_;
 
-  std::list<BufferReturnAwaitable *> buffer_return_waiters_;
-
   int wakeup_fd_ = -1;
 
   std::atomic<pid_t> run_thread_id_{0};
@@ -213,31 +198,6 @@ class UringContext final {
   bool accepting_posts_ = true;
 
   std::queue<std::function<void()>> posted_callbacks_;
-};
-
-/** One coroutine waiting for pool returns or cancellation, on the Run thread. */
-class BufferReturnAwaitable final {
- public:
-  ~BufferReturnAwaitable();
-  BufferReturnAwaitable(const BufferReturnAwaitable &) = delete;
-  auto operator=(const BufferReturnAwaitable &) -> BufferReturnAwaitable & = delete;
-  BufferReturnAwaitable(BufferReturnAwaitable &&) = delete;
-  auto operator=(BufferReturnAwaitable &&) -> BufferReturnAwaitable & = delete;
-
-  auto await_ready() -> bool;
-  void await_suspend(std::coroutine_handle<> continuation);
-  auto await_resume() const noexcept -> BufferReturnWaitOutcome { return outcome_; }
-
- private:
-  friend class UringContext;
-  BufferReturnAwaitable(UringContext &context, int fd, std::uint64_t observed_return_count)
-      : context_(context), fd_(fd), observed_return_count_(observed_return_count) {}
-
-  UringContext &context_;
-  int fd_;
-  std::uint64_t observed_return_count_;
-  std::coroutine_handle<> continuation_;
-  BufferReturnWaitOutcome outcome_ = BufferReturnWaitOutcome::ReturnObserved;
 };
 
 /**

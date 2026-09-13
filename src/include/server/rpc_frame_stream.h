@@ -91,8 +91,6 @@ class RpcFrameStream final {
    */
   [[nodiscard]] auto FeedBytes(std::string_view bytes) -> FrameStreamFeedResult;
 
-  [[nodiscard]] auto EncodeResponse(ResponseEnvelope &&response) const -> StatusOr<std::string>;
-
  private:
   /**
    * @brief Append-only byte storage with a movable readable window.

@@ -24,17 +24,17 @@ class IoStatsIntervalTest(unittest.TestCase):
         self.assertEqual(result['loops'][0]['gauges_before']['active_recv_requests'], 2)
         self.assertEqual(result['loops'][0]['gauges_after']['active_recv_requests'], 0)
 
-    def test_buffer_wait_counters_and_current_and_peak_waiters(self):
+    def test_buffer_exhaustion_counters_and_lease_samples(self):
         before = snapshot(10, 100, 20, 40, 0)
         after = snapshot(12, 120, 24, 52, 0)
         for point, count in [(before, 100), (after, 105)]:
-            point['loops'][0]['counters']['buffer_return_waits'] = count
-        after['loops'][0]['gauges']['buffer_return_waiters'] = 0
-        after['loops'][0]['peaks']['buffer_return_waiters'] = 3
+            point['loops'][0]['counters']['provided_buffer_enobufs'] = count
+        after['loops'][0]['gauges']['buffer_outstanding_leases'] = 0
+        after['loops'][0]['peaks']['buffer_outstanding_leases'] = 3
         result = io_stats_interval(before, after, 10)
-        self.assertEqual(result['counters']['buffer_return_waits'], 5)
-        self.assertEqual(result['loops'][0]['gauges_after']['buffer_return_waiters'], 0)
-        self.assertEqual(result['loops'][0]['peaks']['buffer_return_waiters'], 3)
+        self.assertEqual(result['counters']['provided_buffer_enobufs'], 5)
+        self.assertEqual(result['loops'][0]['gauges_after']['buffer_outstanding_leases'], 0)
+        self.assertEqual(result['loops'][0]['peaks']['buffer_outstanding_leases'], 3)
 
     def test_idle_interval_has_null_ratios(self):
         point = snapshot(0, 0, 0, 0, 0)

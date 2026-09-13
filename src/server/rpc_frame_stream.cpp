@@ -6,7 +6,6 @@
 #include "server/rpc_frame_stream.h"
 
 #include <cassert>
-#include <exception>
 #include <string>
 #include <utility>
 
@@ -100,11 +99,6 @@ auto RpcFrameStream::FeedBytes(std::string_view bytes) -> FrameStreamFeedResult 
   buffer_.Append(bytes);
   RequestEnvelopeBatch requests = DecodeAvailableRequests();
   return {.requests_ = std::move(requests), .closed_ = closed_};
-}
-
-auto RpcFrameStream::EncodeResponse(ResponseEnvelope &&response) const -> StatusOr<std::string> {
-  FrameCodec codec(protocol_limits_);
-  return codec.Encode(response);
 }
 
 auto RpcFrameStream::DecodeAvailableRequests() -> RequestEnvelopeBatch {

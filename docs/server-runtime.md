@@ -109,9 +109,11 @@ sequenceDiagram
   IO->>IO: ReadLoop co_await RecvProvided()
   IO->>IO: RpcFrameStream::FeedBytes()
   IO->>IO: 检查单连接 inflight 上限
-  IO->>Pool: TrySubmitBatch(requests)
+  IO->>IO: SubmitRequestBatch(requests)
+  IO->>Pool: TrySubmitBatch(job, request_count)
 
   Pool-->>Worker: 取出已准入的 job
+  Worker->>Worker: ExecuteRequestBatchOnWorker()
 
   Worker->>Handler: Dispatch(RequestEnvelope)
   Handler->>Handler: ParseFromArray()
@@ -120,22 +122,28 @@ sequenceDiagram
   Handler-->>Worker: ResponseEnvelope
 
   Worker->>Worker: FrameCodec::Encode()
-  Worker-->>IO: UringContext::Post(DispatchCompletion)
-  IO->>IO: 根据 ConnectionId 查找连接
-  IO->>IO: 释放 inflight 计数
-  IO->>IO: 加入 response write queue
-  IO->>IO: 唤醒 WriteLoop
-  IO->>IO: WriteLoop co_await Send()
+  Worker-->>IO: PostWorkerResult(WorkerResult)，内部调用 Post(callback)
+  IO->>IO: HandleWorkerResult() 按 ConnectionId 查找连接
+  alt 响应编码成功且连接仍可写
+    IO->>IO: OnResponsesEncoded() → ReleaseInflightRequests()
+    IO->>IO: EnqueueWrite() → WakeWriteLoop()
+    IO->>IO: WriteLoop co_await Send()
+  else 响应编码失败
+    IO->>IO: OnResponseEncodeFailure() → ReleaseInflightRequests()
+    IO->>IO: Close()
+  end
 ```
 
 这里有两个关键线程边界：
 
 - `WorkerPool::TrySubmitBatch()` 把 CPU 和业务工作从 I/O 线程交给 Worker；
-- `UringContext::Post()` 把编码后的响应直接交回产生请求的 Connection I/O 线程。
+- `ConnectionIoLoop::PostWorkerResult()` 通过 `UringContext::Post()` 投递回调，把 worker 结果交回产生请求的 Connection I/O 线程。
 
-Worker 不持有 `ServerConnection`，也不直接访问 socket 或修改连接状态。任务只携带 `ConnectionId`；completion 回到原 `ConnectionIoLoop` 后，由该 loop 查找自己唯一拥有的连接。连接已经释放时，completion 直接丢弃。
+Worker 不持有 `ServerConnection`，也不直接访问 socket 或修改连接状态。任务只携带 `ConnectionId`；`WorkerResult` 回到原 `ConnectionIoLoop` 后，由该 loop 查找自己唯一拥有的连接。连接已经释放时，结果直接丢弃。
 
 一次 `FeedBytes()` 解出的 request batch 采用 all-or-nothing 准入：整批满足单连接 inflight 上限时才提交给 WorkerPool，否则整批返回 `ResourceExhausted`。WorkerPool 再以 batch 中的逻辑 RPC 数检查全局容量。
+
+`WorkerResult::released_requests_` 表示本次结果需要释放的连接 inflight 配额数，不代表成功执行的请求数。编码失败时，它包含失败请求和本批尚未执行的剩余请求；如果前面已有编码成功的响应，会先投递这些响应，再投递剩余请求的编码失败结果。`encoded_responses` 只统计编码成功的响应，业务错误响应也计入其中。`OnResponsesEncoded()` 表示响应已编码，尚未发送完成；`OnResponseEncodeFailure()` 释放对应配额并关闭连接。
 
 Worker 可以把同一 batch 的多个 Response frame 合并后回投；WriteLoop 也会合并写队列中相邻 frame，但单次发送 batch 不超过 64 KiB。合并只减少提交和发送次数，不改变线协议中的 frame 边界。
 
@@ -183,7 +191,7 @@ state == Closed
 → ConnectionIoLoop 可以释放 ServerConnection
 ```
 
-两条协程及连接的全部可变状态都限制在所属 Connection I/O 线程中。Worker 只能通过 `UringContext::Post()` 返回带 `ConnectionId` 的 completion，因此连接字段不需要跨 Worker 加锁。
+两条协程及连接的全部可变状态都限制在所属 Connection I/O 线程中。Worker 只能通过 `UringContext::Post()` 返回带 `ConnectionId` 的 `WorkerResult`，因此连接字段不需要跨 Worker 加锁。
 
 ## 资源边界
 
@@ -195,7 +203,7 @@ state == Closed
 | `max_pending_jobs_global` | `WorkerPool` | 全局已准入的逻辑 RPC | 返回 `ResourceExhausted` |
 | `max_write_queue_bytes_per_connection` | `ServerConnection` | 慢客户端积压的响应字节 | 关闭对应连接 |
 
-这三个限制不能互相替代。尤其是 Worker completion 到达后，RPC 已从 inflight 中释放，但响应仍可能因客户端读取缓慢而停留在写队列，因此写队列必须拥有独立的字节上限。
+这三个限制不能互相替代。尤其是 Worker 结果到达并处理后，RPC 已从 inflight 中释放，但响应仍可能因客户端读取缓慢而停留在写队列，因此写队列必须拥有独立的字节上限。
 
 ## Graceful shutdown
 

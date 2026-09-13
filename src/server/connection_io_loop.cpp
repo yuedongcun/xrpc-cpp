@@ -181,10 +181,8 @@ void ConnectionIoLoop::BeginDrainOnContext() {
   }
 }
 
-void ConnectionIoLoop::PostDispatchCompletion(DispatchCompletion completion) {
-  context_.Post([this, completion = std::move(completion)]() mutable -> void {
-    HandleDispatchCompletion(std::move(completion));
-  });
+void ConnectionIoLoop::PostWorkerResult(WorkerResult result) {
+  context_.Post([this, result = std::move(result)]() mutable -> void { HandleWorkerResult(std::move(result)); });
 }
 
 auto ConnectionIoLoop::RequestStats(bool start_window) -> std::future<ConnectionLoopStatsSnapshot> {
@@ -212,16 +210,16 @@ void ConnectionIoLoop::RecordWriteBytesChange(std::size_t before, std::size_t af
   pending_write_bytes_peak_ = std::max(pending_write_bytes_peak_, pending_write_bytes_);
 }
 
-void ConnectionIoLoop::HandleDispatchCompletion(DispatchCompletion completion) {
-  auto connection = connections_.find(completion.connection_id_);
+void ConnectionIoLoop::HandleWorkerResult(WorkerResult result) {
+  auto connection = connections_.find(result.connection_id_);
   if (connection == connections_.end()) {
     return;
   }
 
-  if (completion.encode_failed_) {
-    connection->second->OnDispatchEncodeFailure(completion.completed_jobs_);
+  if (result.encode_failed_) {
+    connection->second->OnResponseEncodeFailure(result.released_requests_);
   } else {
-    connection->second->OnEncodedDispatchComplete(std::move(completion.response_bytes_), completion.completed_jobs_);
+    connection->second->OnResponsesEncoded(std::move(result.response_bytes_), result.released_requests_);
   }
   CollectClosedConnections();
 }

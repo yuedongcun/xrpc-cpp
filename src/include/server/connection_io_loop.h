@@ -29,13 +29,14 @@ namespace xrpc {
 
 class ServiceRegistry;
 
-/** Encoded worker result returned to the connection's owning I/O loop. */
-struct DispatchCompletion final {
+/** Worker result returned to the connection's owning I/O loop. */
+struct WorkerResult final {
   ConnectionId connection_id_ = 0;
 
   std::string response_bytes_;
 
-  std::size_t completed_jobs_ = 1;
+  // Inflight slots to release, including unexecuted requests after an encoding failure.
+  std::size_t released_requests_ = 1;
 
   bool encode_failed_ = false;
 };
@@ -46,10 +47,10 @@ struct DispatchCompletion final {
  * `RpcServer::Impl` calls the owner-side methods serially; they are not an
  * arbitrary concurrent API. `PostStartConnection()` and `BeginDrain()` post
  * their actual work to the `UringContext` thread. `connections_` is confined
- * to that thread and uniquely owns every connection. Worker completions carry
+ * to that thread and uniquely owns every connection. Worker results carry
  * only a `ConnectionId`; lifecycle state and the live-connection count are
  * synchronized between the owner and context threads. The owning runtime
- * drains `WorkerPool` before destroying this loop, so posted completions and
+ * drains `WorkerPool` before destroying this loop, so posted results and
  * their callbacks cannot outlive it.
  */
 class ConnectionIoLoop final {
@@ -77,8 +78,8 @@ class ConnectionIoLoop final {
   // Accept-thread command. Posts connection creation to the I/O thread.
   void PostStartConnection(io::Socket client_socket);
 
-  // Worker-thread command. Posts an encoded result to this loop's I/O thread.
-  void PostDispatchCompletion(DispatchCompletion completion);
+  // Worker-thread command. Posts a worker result to this loop's I/O thread.
+  void PostWorkerResult(WorkerResult result);
 
   // Control-thread-only; copy statistics on the context thread via Post().
   [[nodiscard]] auto RequestStats(bool start_window = false) -> std::future<ConnectionLoopStatsSnapshot>;
@@ -107,7 +108,7 @@ class ConnectionIoLoop final {
 
   void CloseConnectionsOnContext();
 
-  void HandleDispatchCompletion(DispatchCompletion completion);
+  void HandleWorkerResult(WorkerResult result);
 
   // I/O-context-thread-only drain operation.
   void BeginDrainOnContext();

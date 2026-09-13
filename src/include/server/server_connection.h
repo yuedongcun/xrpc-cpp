@@ -29,8 +29,8 @@ using ConnectionId = std::uint64_t;
  * @brief Owns the state machine for one server-side RPC connection.
  *
  * All mutable connection state is confined to its `UringContext` thread.
- * Worker threads never access it directly: they return encoded completions
- * through `ConnectionIoLoop::PostDispatchCompletion()`, which routes them by
+ * Worker threads never access it directly: they return worker results
+ * through `ConnectionIoLoop::PostWorkerResult()`, which routes them by
  * connection ID on this connection's I/O thread.
  */
 class ServerConnection final {
@@ -88,11 +88,11 @@ class ServerConnection final {
   /** @brief Reads and decodes requests until the connection stops receiving. */
   [[nodiscard]] auto ReadLoop() -> runtime::Task<void>;
 
-  void OnEncodedDispatchComplete(std::string &&response_bytes, std::size_t completed_jobs);
+  void OnResponsesEncoded(std::string &&response_bytes, std::size_t released_requests);
 
-  void OnDispatchEncodeFailure(std::size_t completed_jobs);
+  void OnResponseEncodeFailure(std::size_t released_requests);
 
-  void ReleaseDispatchJobs(std::size_t completed_jobs);
+  void ReleaseInflightRequests(std::size_t released_requests);
 
   [[nodiscard]] auto EnqueueWrite(std::string bytes) -> bool;
 
@@ -115,7 +115,7 @@ class ServerConnection final {
 
   [[nodiscard]] auto HandleFeedResult(FrameStreamFeedResult &&feed) -> bool;
 
-  [[nodiscard]] auto SubmitDispatchBatch(std::vector<RequestEnvelope> requests) -> bool;
+  [[nodiscard]] auto SubmitRequestBatch(std::vector<RequestEnvelope> requests) -> bool;
 
   [[nodiscard]] auto RejectForBackpressure(RequestEnvelope &&request, std::string message) -> bool;
 
