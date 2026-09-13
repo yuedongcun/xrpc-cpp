@@ -163,7 +163,7 @@ void ExpectPeerClosed(xrpc::io::Socket &socket) {
 
 }  // namespace
 
-TEST(ServerConnectionTest, BufferExhaustionRetriesWithoutClosingTheConnection) {
+TEST(ServerConnectionTest, SingleBufferReceivesLargeRequestsWithoutClosingTheConnection) {
   ConnectedPair pair = MakeConnectedPair();
   xrpc::WorkerPool worker_pool(MakeWorkerConfig(1));
   xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
@@ -176,12 +176,12 @@ TEST(ServerConnectionTest, BufferExhaustionRetriesWithoutClosingTheConnection) {
   std::string received_buffer;
   EXPECT_EQ(DecodeEchoMessage(RecvFrame(pair.client_socket_, received_buffer), 1), "echo: " + payload);
   const auto recovered = loop.RequestStats().get();
-  EXPECT_GT(recovered.uring_.counters_.provided_buffer_enobufs_, 0U);
-  EXPECT_GT(recovered.uring_.counters_.prepared_multishot_recv_sqes_, 1U);
+  EXPECT_EQ(recovered.uring_.counters_.provided_buffer_enobufs_, 0U);
+  EXPECT_GT(recovered.uring_.counters_.prepared_recv_sqes_, 1U);
   EXPECT_EQ(recovered.live_connections_, 1U);
   EXPECT_EQ(recovered.uring_.buffer_pool_->outstanding_leases_, 0U);
   EXPECT_EQ(recovered.uring_.buffer_pool_->acquires_, recovered.uring_.buffer_pool_->returns_);
-  // The same socket must remain usable after recovery.
+  // The same socket must remain usable after repeated buffer reuse.
   ASSERT_TRUE(pair.client_socket_.WriteAll(MakeRequestFrame("next", 2)).ok());
   EXPECT_EQ(DecodeEchoMessage(RecvFrame(pair.client_socket_, received_buffer), 2), "echo: next");
   EXPECT_TRUE(loop.FinishDrain().ok());
@@ -225,7 +225,7 @@ TEST(ServerConnectionTest, ServerDrainClosesConnection) {
   auto snapshot_future = loop.RequestStats();
   ASSERT_EQ(snapshot_future.wait_for(WaitTimeout), std::future_status::ready);
   const auto snapshot = snapshot_future.get();
-  EXPECT_GE(snapshot.uring_.counters_.prepared_multishot_recv_sqes_, 1U);
+  EXPECT_GE(snapshot.uring_.counters_.prepared_recv_sqes_, 1U);
   EXPECT_GE(snapshot.uring_.counters_.recv_cqes_, 1U);
   EXPECT_GT(snapshot.uring_.counters_.received_bytes_, 0U);
   EXPECT_EQ(snapshot.uring_.active_recv_requests_, 1U);
@@ -364,7 +364,7 @@ TEST(ServerConnectionTest, ReusesProvidedBuffersAcrossLargeRequests) {
   EXPECT_TRUE(loop.FinishDrain().ok());
 }
 
-TEST(ServerConnectionTest, DrainsQueuedReceiveDataAfterProtocolClose) {
+TEST(ServerConnectionTest, ProtocolErrorClosesConnectionWithUnreadData) {
   ConnectedPair pair = MakeConnectedPair();
   std::atomic<std::size_t> handler_calls = 0;
   xrpc::ServiceRegistry registry = MakeRegistry([&](const xrpc::RequestEnvelope &request) {

@@ -1,5 +1,7 @@
 # Multishot recv 小规模性能对照
 
+历史实验记录：当前生产 recv 使用 one-shot provided buffer，multishot recv 已移除；以下数据与复现步骤仅适用于记录中的测量版本。
+
 测量代码：`dc64f78`。one-shot 对照使用相同代码和库对象，仅将 `ReadLoop()` 替换为 `9a8e891` 的 one-shot 实现；客户端二进制相同。
 
 环境：WSL2，Linux 6.6.87.2，Clang 20，Release（`-O3 -DNDEBUG`），TCP loopback。服务端固定 CPU 0–5，客户端固定 CPU 6–11。服务端 3 个 Connection I/O 线程、3 个 Worker 线程，客户端 3 个 I/O 线程。

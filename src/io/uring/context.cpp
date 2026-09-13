@@ -174,16 +174,6 @@ auto UringContext::RecvProvided(int fd) -> UringAwaitable {
   return UringAwaitable(*this, std::move(operation));
 }
 
-auto UringContext::RecvProvidedMultishot(int fd) -> UringAwaitable {
-  if (!provided_buffer_pool_) {
-    throw LifecycleException("UringContext::RecvProvidedMultishot requires a registered provided-buffer pool");
-  }
-  auto operation = std::make_unique<Operation>();
-  operation->type_ = OperationType::RecvProvided;
-  operation->fd_ = fd;
-  return UringAwaitable(*this, std::move(operation), true);
-}
-
 auto UringContext::Send(int fd, const void *buffer, std::size_t len) -> UringAwaitable {
   auto operation = std::make_unique<Operation>();
   operation->type_ = OperationType::Send;
@@ -330,7 +320,6 @@ void UringContext::SubmitPreparedOperation(std::unique_ptr<Operation> operation,
         case OperationType::Recv:
         case OperationType::RecvProvided:
           ++counters_.prepared_recv_sqes_;
-          counters_.prepared_multishot_recv_sqes_ += static_cast<std::uint64_t>(operation->multishot_);
           ++active_recv_requests_;
           break;
         case OperationType::Send:
@@ -425,11 +414,7 @@ auto UringContext::TryStartOperation(std::unique_ptr<Operation> &operation, std:
         Abort("UringContext attempted a provided-buffer receive without a registered pool");
       }
       operation->buffer_returns_at_start_ = provided_buffer_pool_->ReturnedBufferCount();
-      if (operation->multishot_) {
-        io_uring_prep_recv_multishot(sqe, operation->fd_, nullptr, 0, 0);
-      } else {
-        io_uring_prep_recv(sqe, operation->fd_, nullptr, provided_buffer_pool_->BufferSize(), 0);
-      }
+      io_uring_prep_recv(sqe, operation->fd_, nullptr, provided_buffer_pool_->BufferSize(), 0);
       sqe->flags |= IOSQE_BUFFER_SELECT;
       sqe->buf_group = provided_buffer_pool_->GroupId();
       break;
@@ -494,10 +479,8 @@ void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) 
     if (operation.type_ == OperationType::RecvProvided && cqe->res == -ENOBUFS) {
       ++counters_.provided_buffer_enobufs_;
     }
-    if (!is_multishot || !has_more) {
-      assert(active_recv_requests_ > 0);
-      --active_recv_requests_;
-    }
+    assert(active_recv_requests_ > 0);
+    --active_recv_requests_;
   }
   if (!is_multishot || !has_more) {
     --pending_io_operations_;

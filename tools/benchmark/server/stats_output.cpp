@@ -22,7 +22,6 @@ auto ToJson(const io::UringStatsSnapshot &snapshot, std::size_t loop_id) -> nloh
                         {"counters",
                          {{"prepared_accept_sqes", c.prepared_accept_sqes_},
                           {"prepared_recv_sqes", c.prepared_recv_sqes_},
-                          {"prepared_multishot_recv_sqes", c.prepared_multishot_recv_sqes_},
                           {"prepared_send_sqes", c.prepared_send_sqes_},
                           {"prepared_cancel_sqes", c.prepared_cancel_sqes_},
                           {"prepared_wakeup_sqes", c.prepared_wakeup_sqes_},
@@ -75,7 +74,7 @@ auto ToJson(const WorkerPoolStatsSnapshot &pool) -> nlohmann::json {
 auto WriteStatsSnapshot(RpcServer &server, const std::string &path, bool start_window) -> Status {
   try {
     const auto result = ServerStatsAccess::Snapshot(server, start_window);
-    nlohmann::json output{{"schema_version", 3}, {"scope", "server_runtime"}};
+    nlohmann::json output{{"schema_version", 4}, {"scope", "server_runtime"}};
     if (!result.ok()) {
       output["error"] = result.status().message();
     } else {

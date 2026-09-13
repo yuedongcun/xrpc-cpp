@@ -89,11 +89,8 @@ void ServerConnection::WriteQueueAwaiter::await_suspend(std::coroutine_handle<> 
 }
 
 auto ServerConnection::ReadLoop() -> runtime::Task<void> {
-  auto receive = context_.RecvProvidedMultishot(socket_.fd());
-  bool receive_pending = false;
   while (state_ == State::Active) {
-    io::IoResult recv_result = co_await receive;
-    receive_pending = recv_result.has_more_;
+    io::IoResult recv_result = co_await context_.RecvProvided(socket_.fd());
     if (state_ != State::Active) {
       break;
     }
@@ -103,21 +100,19 @@ auto ServerConnection::ReadLoop() -> runtime::Task<void> {
       break;
     }
 
-    if (recv_result.error_code_ == ENOBUFS && !receive_pending) {
+    if (recv_result.error_code_ == ENOBUFS) {
       recv_result.buffer_.Reset();
       const auto outcome =
           co_await context_.WaitForBufferReturnSince(socket_.fd(), recv_result.buffer_returns_at_start_);
       if (outcome == io::BufferReturnWaitOutcome::Cancelled || state_ != State::Active) {
         break;
       }
-      receive = context_.RecvProvidedMultishot(socket_.fd());
       continue;
     }
 
     if (recv_result.result_ < 0) {
       if (recv_result.error_code_ != ECANCELED) {
-        const char *reason = recv_result.error_code_ == ENOBUFS ? "recv buffer pool exhausted" : "recv failed";
-        LOG(ERROR) << reason << " connection_id=" << connection_id_ << " fd=" << recv_result.fd_
+        LOG(ERROR) << "recv failed connection_id=" << connection_id_ << " fd=" << recv_result.fd_
                    << " buffer_group=" << recv_result.buffer_group_ << " errno=" << recv_result.error_code_
                    << " action=close_connection";
       }
@@ -133,18 +128,6 @@ auto ServerConnection::ReadLoop() -> runtime::Task<void> {
     if (!HandleFeedResult(std::move(feed_result))) {
       break;
     }
-    if (!receive_pending && state_ == State::Active) {
-      // A successful final CQE still carries data, but needs a new receive.
-      receive = context_.RecvProvidedMultishot(socket_.fd());
-    }
-  }
-
-  // Close() cancels I/O; BeginDrain() shuts down reads without cancelling sends.
-  // Both can leave queued data CQEs before the final completion. Keep the
-  // awaitable alive and return each discarded buffer before waiting again.
-  while (receive_pending) {
-    io::IoResult discarded = co_await receive;
-    receive_pending = discarded.has_more_;
   }
 
   TryFinishDrain();

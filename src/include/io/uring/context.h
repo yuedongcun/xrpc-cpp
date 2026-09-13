@@ -4,7 +4,7 @@
  *
  * A `UringContext` owns one io_uring ring and drives asynchronous operations
  * on the thread running `Run()`. `Accept`, `AcceptMultishot`, `Recv`,
- * `RecvProvided`, `RecvProvidedMultishot`, and `Send` create deferred,
+ * `RecvProvided` and `Send` create deferred,
  * move-only awaitables.
  * The operation starts when the coroutine suspends and resumes that coroutine
  * with an `IoResult`.
@@ -135,15 +135,6 @@ class UringContext final {
    */
   [[nodiscard]] auto RecvProvided(int fd) -> UringAwaitable;
 
-  /**
-   * @brief Receives repeatedly into this context's provided-buffer pool.
-   *
-   * The returned awaitable is reused with `co_await` for each completion. It
-   * must remain alive until the final completion and is only suitable for a
-   * synchronous consumer on the context's run thread.
-   */
-  [[nodiscard]] auto RecvProvidedMultishot(int fd) -> UringAwaitable;
-
   [[nodiscard]] auto Send(int fd, const void *buffer, std::size_t len) -> UringAwaitable;
 
   // Run-thread-only. Progress allows retry; it does not reserve a buffer.
@@ -256,7 +247,7 @@ class BufferReturnAwaitable final {
  * operation to the `UringContext`; `await_resume()` moves the completed result
  * out of the operation. A multishot awaitable keeps its operation alive while
  * CQEs carry `IORING_CQE_F_MORE`; its final CQE ends the operation. It supports
- * the synchronous consumer protocol used by multishot accept and receive.
+ * the synchronous consumer protocol used by multishot accept.
  */
 class UringAwaitable final {
  public:

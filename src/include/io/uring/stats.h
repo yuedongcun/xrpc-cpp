@@ -11,8 +11,7 @@ namespace xrpc::io {
 struct UringCounters {
   // Count only operations staged for submission, not awaitable construction.
   std::uint64_t prepared_accept_sqes_ = 0;
-  std::uint64_t prepared_recv_sqes_ = 0;            // Includes ordinary and provided-buffer recv.
-  std::uint64_t prepared_multishot_recv_sqes_ = 0;  // Subset of prepared_recv_sqes_.
+  std::uint64_t prepared_recv_sqes_ = 0;  // Includes ordinary and provided-buffer recv.
   std::uint64_t prepared_send_sqes_ = 0;
   std::uint64_t prepared_cancel_sqes_ = 0;
   std::uint64_t prepared_wakeup_sqes_ = 0;

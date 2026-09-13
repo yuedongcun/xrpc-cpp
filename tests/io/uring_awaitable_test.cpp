@@ -152,43 +152,6 @@ auto ExhaustAndReusePool(xrpc::io::UringContext &context, int fd) -> xrpc::runti
   EXPECT_TRUE(eof.buffer_.Empty());
 }
 
-auto ReadMultishot(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<std::string> {
-  const auto before = context.SnapshotStats();
-  auto receive = context.RecvProvidedMultishot(fd);
-  std::string received;
-  std::size_t completions = 0;
-  while (true) {
-    auto result = co_await receive;
-    EXPECT_EQ(context.SnapshotStats().active_recv_requests_, result.has_more_ ? 1U : 0U);
-    EXPECT_EQ(result.error_code_, 0);
-    if (result.result_ <= 0) {
-      EXPECT_EQ(result.result_, 0);
-      EXPECT_FALSE(result.has_more_);
-      break;
-    }
-    ++completions;
-    const auto bytes = result.buffer_.Bytes();
-    received.append(reinterpret_cast<const char *>(bytes.data()), bytes.size());
-    if (!result.has_more_) {
-      receive = context.RecvProvidedMultishot(fd);
-    }
-  }
-  EXPECT_GE(completions, 3);
-  const auto after = context.SnapshotStats();
-  EXPECT_EQ(after.counters_.recv_cqes_ - before.counters_.recv_cqes_, completions + 1);
-  EXPECT_GE(after.peaks_.staged_operations_, 1U);
-  EXPECT_GE(after.peaks_.cq_ready_sampled_, 1U);
-  EXPECT_EQ(after.buffer_pool_->acquires_, after.buffer_pool_->returns_);
-  EXPECT_EQ(after.buffer_pool_->outstanding_leases_, 0U);
-  EXPECT_EQ(after.counters_.received_bytes_ - before.counters_.received_bytes_, received.size());
-  EXPECT_GT(after.counters_.prepared_multishot_recv_sqes_, before.counters_.prepared_multishot_recv_sqes_);
-  EXPECT_EQ(after.counters_.prepared_recv_sqes_, after.counters_.prepared_multishot_recv_sqes_);
-  EXPECT_GT(after.counters_.submitted_sqes_, before.counters_.submitted_sqes_);
-  EXPECT_GT(after.counters_.submit_calls_, before.counters_.submit_calls_);
-  EXPECT_EQ(after.active_recv_requests_, 0U);
-  co_return received;
-}
-
 auto AcceptMultishotTwiceAndCancel(xrpc::io::UringContext &context, int listen_fd) -> xrpc::runtime::Task<void> {
   const auto before = context.SnapshotStats();
   auto accept = context.AcceptMultishot(listen_fd);
@@ -208,72 +171,18 @@ auto AcceptMultishotTwiceAndCancel(xrpc::io::UringContext &context, int listen_f
   EXPECT_EQ(context.SnapshotStats().counters_.prepared_accept_sqes_ - before.counters_.prepared_accept_sqes_, 1U);
 }
 
-auto CancelMultishot(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<void> {
-  auto receive = context.RecvProvidedMultishot(fd);
-  context.Post([&context, fd]() {
-    context.CancelFd(fd);
-    context.CancelFd(fd);
-  });
-  while (true) {
-    auto result = co_await receive;
-    if (result.error_code_ == ECANCELED) {
-      EXPECT_TRUE(result.buffer_.Empty());
-      EXPECT_FALSE(result.has_more_);
-      break;
-    }
-    EXPECT_GT(result.result_, 0);
-    if (result.result_ <= 0) {
-      co_return;
-    }
-    result.buffer_.Reset();
-  }
-}
-
-auto DrainCancelledMultishot(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<void> {
-  {
-    auto receive = context.RecvProvidedMultishot(fd);
-    auto result = co_await receive;
-    EXPECT_GT(result.result_, 0);
-    context.CancelFd(fd);
-    while (true) {
-      auto drained = co_await receive;
-      if (drained.error_code_ == ECANCELED) {
-        EXPECT_TRUE(drained.buffer_.Empty());
-        EXPECT_FALSE(drained.has_more_);
-        break;
-      }
-      EXPECT_GT(drained.result_, 0);
-      if (drained.result_ <= 0) {
-        co_return;
-      }
-      drained.buffer_.Reset();
-    }
-  }
-  // Reception has drained; Run also drains the cancellation acknowledgement.
-  context.RequestStop();
-}
-
-auto DestroyUndrainedMultishot(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<void> {
-  auto receive = context.RecvProvidedMultishot(fd);
-  auto result = co_await receive;
-  EXPECT_GT(result.result_, 0);
-  context.CancelFd(fd);
-  // A cancellation request alone is not permission to destroy the awaitable.
-}
-
-auto ExhaustMultishot(xrpc::io::UringContext &context, int fd, bool return_after_wait = false)
+auto ExhaustProvidedRecv(xrpc::io::UringContext &context, int fd, bool return_after_wait = false)
     -> xrpc::runtime::Task<void> {
-  auto receive = context.RecvProvidedMultishot(fd);
-  auto first = co_await receive;
+  auto first = co_await context.RecvProvided(fd);
   EXPECT_EQ(first.result_, 4);
-  EXPECT_TRUE(first.has_more_);
-  auto exhausted = co_await receive;
+  EXPECT_FALSE(first.has_more_);
+  auto exhausted = co_await context.RecvProvided(fd);
   EXPECT_EQ(exhausted.error_code_, ENOBUFS);
   EXPECT_FALSE(exhausted.has_more_);
   const auto pressure = context.SnapshotStats();
   EXPECT_EQ(pressure.counters_.provided_buffer_enobufs_, 1U);
   EXPECT_EQ(pressure.active_recv_requests_, 0U);
-  EXPECT_EQ(pressure.counters_.prepared_multishot_recv_sqes_, 1U);
+  EXPECT_EQ(pressure.counters_.prepared_recv_sqes_, 2U);
   EXPECT_TRUE(exhausted.buffer_.Empty());
   EXPECT_EQ(pressure.buffer_pool_->outstanding_leases_, 1U);
   EXPECT_EQ(pressure.buffer_pool_->outstanding_leases_peak_, 1U);
@@ -299,32 +208,15 @@ auto ExhaustMultishot(xrpc::io::UringContext &context, int fd, bool return_after
   EXPECT_EQ(released.buffer_return_waiters_, 0U);
   EXPECT_EQ(released.peaks_.buffer_return_waiters_, return_after_wait ? 1U : 0U);
 
-  // Recovery must exercise a new multishot request, not the oneshot path.
-  auto restarted = context.RecvProvidedMultishot(fd);
-  auto remaining = co_await restarted;
+  auto remaining = co_await context.RecvProvided(fd);
   EXPECT_EQ(remaining.result_, 4);
   EXPECT_EQ(remaining.buffer_returns_at_start_, 1U);
   const auto next_bytes = remaining.buffer_.Bytes();
   EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(next_bytes.data()), next_bytes.size()), "efgh");
   remaining.buffer_.Reset();
 
-  // With only one buffer, the kernel may already have exhausted the restarted
-  // request before this coroutine returns its lease. Cancel and drain either
-  // terminal outcome; cancellation alone does not end the awaitable lifetime.
-  bool pending = remaining.has_more_;
-  if (pending) {
-    context.CancelFd(fd);
-  }
-  while (pending) {
-    auto final = co_await restarted;
-    EXPECT_FALSE(final.has_more_);
-    EXPECT_TRUE(final.error_code_ == ECANCELED || final.error_code_ == ENOBUFS);
-    EXPECT_TRUE(final.buffer_.Empty());
-    pending = final.has_more_;
-  }
   const auto recovered = context.SnapshotStats();
-  EXPECT_EQ(recovered.counters_.prepared_recv_sqes_, 2U);
-  EXPECT_EQ(recovered.counters_.prepared_multishot_recv_sqes_, 2U);
+  EXPECT_EQ(recovered.counters_.prepared_recv_sqes_, 3U);
   EXPECT_EQ(recovered.counters_.received_bytes_, 8U);
   EXPECT_EQ(recovered.active_recv_requests_, 0U);
   EXPECT_EQ(recovered.buffer_pool_->acquires_, 2U);
@@ -396,12 +288,12 @@ auto WakeManyReturnWaiters(xrpc::io::UringContext &context, int fd) -> xrpc::run
   EXPECT_EQ(reset.counters_.buffer_return_waits_completed_, 33U);
 }
 
-auto CheckMultishotErrors(xrpc::io::UringContext &context) -> xrpc::runtime::Task<void> {
-  auto invalid = context.RecvProvidedMultishot(-1);
+auto CheckProvidedRecvErrors(xrpc::io::UringContext &context) -> xrpc::runtime::Task<void> {
+  auto invalid = context.RecvProvided(-1);
   auto error = co_await invalid;
   EXPECT_EQ(error.error_code_, EBADF);
   EXPECT_FALSE(error.has_more_);
-  auto stopped = context.RecvProvidedMultishot(-1);
+  auto stopped = context.RecvProvided(-1);
   context.RequestStop();
   auto after_stop = co_await stopped;
   EXPECT_EQ(after_stop.error_code_, ECANCELED);
@@ -410,10 +302,10 @@ auto CheckMultishotErrors(xrpc::io::UringContext &context) -> xrpc::runtime::Tas
 
 auto CheckUnsubmittedStats(xrpc::io::UringContext &context) -> xrpc::runtime::Task<void> {
   const auto before = context.SnapshotStats();
-  auto unawaited = context.RecvProvidedMultishot(-1);
+  auto unawaited = context.RecvProvided(-1);
   EXPECT_EQ(context.SnapshotStats().counters_.prepared_recv_sqes_, before.counters_.prepared_recv_sqes_);
   context.RequestStop();
-  auto rejected = co_await context.RecvProvidedMultishot(-1);
+  auto rejected = co_await context.RecvProvided(-1);
   EXPECT_EQ(rejected.error_code_, ECANCELED);
   const auto after = context.SnapshotStats();
   EXPECT_EQ(after.counters_.prepared_recv_sqes_, before.counters_.prepared_recv_sqes_);
@@ -590,19 +482,6 @@ TEST(IoUringAwaitableTest, ProvidedPoolExhaustionPreservesLeaseAndRecoversAfterR
   WaitTaskWithContext(ExhaustAndReusePool(context, server_socket.fd()), context);
 }
 
-TEST(IoUringMultishotTest, ReceivesMultipleBuffersAndEof) {
-  xrpc::io::Socket listener;
-  ASSERT_TRUE(listener.Bind("127.0.0.1", 0).ok());
-  ASSERT_TRUE(listener.Listen(1).ok());
-  xrpc::io::Socket client;
-  ASSERT_TRUE(client.Connect("127.0.0.1", listener.LocalPort().value()).ok());
-  auto server = listener.Accept().value();
-  ASSERT_TRUE(client.WriteAll("abcdefghijkl").ok());
-  client.ShutdownWrite();
-  xrpc::io::UringContext context(16, {.buffer_count_ = 16, .buffer_size_ = 4});
-  EXPECT_EQ(WaitTaskWithContext(ReadMultishot(context, server.fd()), context), "abcdefghijkl");
-}
-
 TEST(IoUringMultishotTest, AcceptsMultipleConnectionsAndDrainsCancellation) {
   xrpc::io::Socket listener;
   ASSERT_TRUE(listener.Bind("127.0.0.1", 0).ok());
@@ -616,41 +495,7 @@ TEST(IoUringMultishotTest, AcceptsMultipleConnectionsAndDrainsCancellation) {
   WaitTaskWithContext(AcceptMultishotTwiceAndCancel(context, listener.fd()), context);
 }
 
-TEST(IoUringMultishotTest, CancellationDrainsBeforeDestruction) {
-  xrpc::io::Socket listener;
-  ASSERT_TRUE(listener.Bind("127.0.0.1", 0).ok());
-  ASSERT_TRUE(listener.Listen(1).ok());
-  xrpc::io::Socket client;
-  ASSERT_TRUE(client.Connect("127.0.0.1", listener.LocalPort().value()).ok());
-  auto server = listener.Accept().value();
-  {
-    xrpc::io::UringContext context(16, {.buffer_count_ = 16, .buffer_size_ = 4});
-    WaitTaskWithContext(CancelMultishot(context, server.fd()), context);
-  }
-  ASSERT_TRUE(client.WriteAll("abcdefghijkl").ok());
-  {
-    xrpc::io::UringContext context(16, {.buffer_count_ = 16, .buffer_size_ = 4});
-    WaitTaskWithContext(DrainCancelledMultishot(context, server.fd()), context);
-  }
-}
-
-TEST(IoUringMultishotTest, CancellationWithoutDrainDoesNotPermitDestruction) {
-  EXPECT_DEATH(
-      {
-        xrpc::io::Socket listener;
-        EXPECT_TRUE(listener.Bind("127.0.0.1", 0).ok());
-        EXPECT_TRUE(listener.Listen(1).ok());
-        xrpc::io::Socket client;
-        EXPECT_TRUE(client.Connect("127.0.0.1", listener.LocalPort().value()).ok());
-        auto server = listener.Accept().value();
-        EXPECT_TRUE(client.WriteAll("abcd").ok());
-        xrpc::io::UringContext context(16, {.buffer_count_ = 16, .buffer_size_ = 4});
-        WaitTaskWithContext(DestroyUndrainedMultishot(context, server.fd()), context);
-      },
-      "UringAwaitable destroyed while an I/O operation is pending");
-}
-
-TEST(IoUringMultishotTest, PoolExhaustionIsTerminalAndMultishotRecoversAfterRelease) {
+TEST(IoUringAwaitableTest, ProvidedRecvWaitObservesReturnBeforeSuspension) {
   xrpc::io::Socket listener;
   ASSERT_TRUE(listener.Bind("127.0.0.1", 0).ok());
   ASSERT_TRUE(listener.Listen(1).ok());
@@ -659,10 +504,10 @@ TEST(IoUringMultishotTest, PoolExhaustionIsTerminalAndMultishotRecoversAfterRele
   auto server = listener.Accept().value();
   ASSERT_TRUE(client.WriteAll("abcdefgh").ok());
   xrpc::io::UringContext context(8, {.buffer_count_ = 1, .buffer_size_ = 4, .group_id_ = 7});
-  WaitTaskWithContext(ExhaustMultishot(context, server.fd()), context);
+  WaitTaskWithContext(ExhaustProvidedRecv(context, server.fd()), context);
 }
 
-TEST(IoUringMultishotTest, ExhaustionWaitResumesAfterDeferredBufferReturn) {
+TEST(IoUringAwaitableTest, ProvidedRecvWaitResumesAfterDeferredBufferReturn) {
   xrpc::io::Socket listener;
   ASSERT_TRUE(listener.Bind("127.0.0.1", 0).ok());
   ASSERT_TRUE(listener.Listen(1).ok());
@@ -671,7 +516,7 @@ TEST(IoUringMultishotTest, ExhaustionWaitResumesAfterDeferredBufferReturn) {
   auto server = listener.Accept().value();
   ASSERT_TRUE(client.WriteAll("abcdefgh").ok());
   xrpc::io::UringContext context(8, {.buffer_count_ = 1, .buffer_size_ = 4, .group_id_ = 7});
-  WaitTaskWithContext(ExhaustMultishot(context, server.fd(), true), context);
+  WaitTaskWithContext(ExhaustProvidedRecv(context, server.fd(), true), context);
 }
 
 TEST(IoUringBufferReturnWaitTest, FdCancellationIsIsolatedAndStopCancelsRemainingWaiters) {
@@ -702,11 +547,11 @@ TEST(IoUringBufferReturnWaitTest, OneReturnResumesMoreWaitersThanThePerTurnBudge
   WaitTaskWithContext(WakeManyReturnWaiters(context, server.fd()), context);
 }
 
-TEST(IoUringMultishotTest, InvalidFdAndCancellationBeforeAdmission) {
+TEST(IoUringAwaitableTest, ProvidedRecvInvalidFdAndCancellationBeforeAdmission) {
   xrpc::io::UringContext no_pool;
-  EXPECT_THROW((void)no_pool.RecvProvidedMultishot(-1), xrpc::LifecycleException);
+  EXPECT_THROW((void)no_pool.RecvProvided(-1), xrpc::LifecycleException);
   xrpc::io::UringContext context(8, {.buffer_count_ = 8, .buffer_size_ = 4});
-  WaitTaskWithContext(CheckMultishotErrors(context), context);
+  WaitTaskWithContext(CheckProvidedRecvErrors(context), context);
 }
 
 TEST(IoUringStatsTest, UnawaitedAndRejectedReceivesDoNotCountAsPreparedSqes) {

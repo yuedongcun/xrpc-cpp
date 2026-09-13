@@ -1,5 +1,7 @@
 # Multishot recv：开启统计后的性能与压力对照
 
+历史实验记录：当前生产 recv 使用 one-shot provided buffer，multishot recv 已移除；以下数据与复现步骤仅适用于记录中的测量版本。
+
 测量代码：`9105a0f`。one-shot 对照仅将当前 `ReadLoop()` 替换为 `9a8e891` 的 one-shot 读循环，其余源代码、库对象、写侧统计及客户端二进制保持一致。
 
 环境：WSL2 / Linux 6.6.87.2，Clang 20，Release（`-O3 -DNDEBUG`），TCP loopback。服务端固定 CPU 0–5、客户端固定 CPU 6–11。服务端 3 个 Connection I/O 线程、3 个 Worker；客户端 3 个 I/O 线程。
