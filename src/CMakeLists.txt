@@ -69,12 +69,14 @@ target_link_libraries(
     PUBLIC
         "$<BUILD_INTERFACE:protobuf::libprotobuf>"
         "$<INSTALL_INTERFACE:xrpc_dependencies::protobuf>"
+        # Internal build targets include xRPC's io_uring headers directly.
+        # Propagate vendored liburing's build-tree include directory to them.
+        "$<BUILD_INTERFACE:LibUring::LibUring>"
     PRIVATE
         "$<BUILD_INTERFACE:glog::glog>"
         "$<INSTALL_INTERFACE:xrpc_dependencies::glog>"
         "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
         "$<INSTALL_INTERFACE:xrpc_dependencies::nlohmann_json>"
-        "$<BUILD_INTERFACE:LibUring::LibUring>"
         "$<INSTALL_INTERFACE:xrpc_dependencies::liburing>"
         Threads::Threads
 )
