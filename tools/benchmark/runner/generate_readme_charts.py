@@ -127,10 +127,11 @@ def chart(title, subtitle, points, x_label, path, failed_last=False):
         panel(points, BOTTOM_Y, "p99", "尾延迟（p99）", "p99 延迟（ms）", lambda value: f"{value:.0f}", ORANGE, failed_last),
     ]
     positions = x_positions(points)
-    for x, point in zip(positions, points):
-        chunks.append(f'<line x1="{x:.1f}" y1="{BOTTOM_Y + PANEL_HEIGHT}" x2="{x:.1f}" y2="{BOTTOM_Y + PANEL_HEIGHT + 5}" stroke="{TEXT}"/>')
-        chunks.append(text(x, BOTTOM_Y + PANEL_HEIGHT + 21, f"{point[0]:,}", size=11, anchor="middle"))
-    chunks.append(text(WIDTH / 2, HEIGHT - 16, x_label, size=13, anchor="middle"))
+    for panel_y, label_y, title_y in ((TOP_Y, 341, 365), (BOTTOM_Y, 671, HEIGHT - 16)):
+        for x, point in zip(positions, points):
+            chunks.append(f'<line x1="{x:.1f}" y1="{panel_y + PANEL_HEIGHT}" x2="{x:.1f}" y2="{panel_y + PANEL_HEIGHT + 5}" stroke="{TEXT}"/>')
+            chunks.append(text(x, label_y, f"{point[0]:,}", size=11, anchor="middle"))
+        chunks.append(text(WIDTH / 2, title_y, x_label, size=13, anchor="middle"))
     chunks.append('</svg>')
     path.write_text("\n".join(chunks), encoding="utf-8")
 

@@ -61,6 +61,19 @@
 <line x1="104" y1="453" x2="132" y2="453" stroke="#e89532" stroke-width="2.5"/>
 <circle cx="118" cy="453" r="3.7" fill="#ffffff" stroke="#e89532" stroke-width="1.8"/>
 <text x="140.0" y="457.0" text-anchor="start" style="font-size:11px;font-family:'Noto Sans CJK SC','Microsoft YaHei','DejaVu Sans',sans-serif;fill:#344054">中位数；淡色竖线为三轮最小值–最大值</text>
+<line x1="92.0" y1="320" x2="92.0" y2="325" stroke="#344054"/>
+<text x="92.0" y="341.0" text-anchor="middle" style="font-size:11px;font-family:'Noto Sans CJK SC','Microsoft YaHei','DejaVu Sans',sans-serif;fill:#344054">12</text>
+<line x1="259.2" y1="320" x2="259.2" y2="325" stroke="#344054"/>
+<text x="259.2" y="341.0" text-anchor="middle" style="font-size:11px;font-family:'Noto Sans CJK SC','Microsoft YaHei','DejaVu Sans',sans-serif;fill:#344054">48</text>
+<line x1="426.4" y1="320" x2="426.4" y2="325" stroke="#344054"/>
+<text x="426.4" y="341.0" text-anchor="middle" style="font-size:11px;font-family:'Noto Sans CJK SC','Microsoft YaHei','DejaVu Sans',sans-serif;fill:#344054">192</text>
+<line x1="593.6" y1="320" x2="593.6" y2="325" stroke="#344054"/>
+<text x="593.6" y="341.0" text-anchor="middle" style="font-size:11px;font-family:'Noto Sans CJK SC','Microsoft YaHei','DejaVu Sans',sans-serif;fill:#344054">768</text>
+<line x1="760.8" y1="320" x2="760.8" y2="325" stroke="#344054"/>
+<text x="760.8" y="341.0" text-anchor="middle" style="font-size:11px;font-family:'Noto Sans CJK SC','Microsoft YaHei','DejaVu Sans',sans-serif;fill:#344054">1,536</text>
+<line x1="928.0" y1="320" x2="928.0" y2="325" stroke="#344054"/>
+<text x="928.0" y="341.0" text-anchor="middle" style="font-size:11px;font-family:'Noto Sans CJK SC','Microsoft YaHei','DejaVu Sans',sans-serif;fill:#344054">3,072</text>
+<text x="480.0" y="365.0" text-anchor="middle" style="font-size:13px;font-family:'Noto Sans CJK SC','Microsoft YaHei','DejaVu Sans',sans-serif;fill:#344054">活跃 TCP 连接数</text>
 <line x1="92.0" y1="650" x2="92.0" y2="655" stroke="#344054"/>
 <text x="92.0" y="671.0" text-anchor="middle" style="font-size:11px;font-family:'Noto Sans CJK SC','Microsoft YaHei','DejaVu Sans',sans-serif;fill:#344054">12</text>
 <line x1="259.2" y1="650" x2="259.2" y2="655" stroke="#344054"/>
