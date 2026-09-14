@@ -130,23 +130,19 @@ auto TcpTransport::Call(const RequestEnvelope &request, const EffectiveCallOptio
   };
 
   FrameCodec codec(protocol_limits_);
-  std::string request_frame;
-  try {
-    request_frame = codec.Encode(request);
-  } catch (...) {
-    return fail(CaughtExceptionToStatus("failed to encode request frame"), RequestCommitState::NotSent);
+  StatusOr<std::string> encoded = codec.Encode(request);
+  if (!encoded.ok()) {
+    return fail(encoded.status(), RequestCommitState::NotSent);
   }
+  std::string request_frame = std::move(encoded).value();
 
   if (DeadlineExpired(options)) {
     return fail({StatusCode::DeadlineExceeded, "RPC deadline exceeded"}, RequestCommitState::NotSent);
   }
 
-  try {
-    EnsureConnectedWithTimeout(RemainingTimeout(options));
-  } catch (const io::SocketError &error) {
-    return fail(error.status(), RequestCommitState::NotSent);
-  } catch (...) {
-    return fail(CaughtExceptionToStatus("transport connect failed"), RequestCommitState::NotSent);
+  const Status connect_status = EnsureConnectedWithTimeout(RemainingTimeout(options));
+  if (!connect_status.ok()) {
+    return fail(connect_status, RequestCommitState::NotSent);
   }
 
   auto pending = std::make_shared<PendingCall>();
@@ -164,19 +160,23 @@ auto TcpTransport::Call(const RequestEnvelope &request, const EffectiveCallOptio
   return WaitForResult(pending, request.request_id_, options);
 }
 
-void TcpTransport::EnsureConnectedWithTimeout(std::chrono::milliseconds timeout) {
+auto TcpTransport::EnsureConnectedWithTimeout(std::chrono::milliseconds timeout) -> Status {
   std::unique_lock lock(state_mutex_);
   if (socket_.valid()) {
-    return;
+    return Status::Ok();
   }
 
   JoinReaderIfStopped(lock);
 
   io::Socket socket;
-  socket.Connect(host_, port_, timeout);
+  const Status status = socket.Connect(host_, port_, timeout);
+  if (!status.ok()) {
+    return status;
+  }
   socket_ = std::move(socket);
   const int fd = socket_.fd();
   reader_thread_ = std::jthread([this, fd]() -> void { ReaderLoop(fd); });
+  return Status::Ok();
 }
 
 auto TcpTransport::ConnectedFd() const -> int {
@@ -237,7 +237,7 @@ void TcpTransport::ReaderLoop(int fd) {
       }
 
       const std::uint64_t request_id = decoded.response_->request_id_;
-      CompletePending(request_id, MakeCallSuccess(std::move(*decoded.response_)));
+      CompletePending(request_id, MakeCallResponse(std::move(*decoded.response_)));
       buffer.erase(0, decoded.consumed_);
     }
 
@@ -270,12 +270,7 @@ void TcpTransport::CloseSocketLocked() {
   if (!socket_.valid()) {
     return;
   }
-  try {
-    socket_.ShutdownReadWrite();
-  } catch (...) {
-    const std::exception_ptr ignored = std::current_exception();
-    (void)ignored;
-  }
+  socket_.ShutdownReadWrite();
   socket_.Close();
 }
 

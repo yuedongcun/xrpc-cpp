@@ -10,15 +10,20 @@ import signal
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from io_stats import collect_io_snapshot, io_stats_interval
 
 TOTAL_PATTERN = re.compile(r"total_calls=(\d+) success=(\d+) failed=(\d+)")
 LATENCY_PATTERN = re.compile(
     r"qps=([0-9.]+) avg_us=([0-9.]+) p50_us=([0-9.]+) "
     r"p95_us=([0-9.]+) p99_us=([0-9.]+)"
+)
+CONNECTION_PROGRESS_PATTERN = re.compile(
+    r"connection_progress min_success=(\d+) max_success=(\d+) zero_success_connections=(\d+)"
 )
 READY_PORT_PATTERN = re.compile(r"\bport=(\d+)\b")
 BENCHMARK_HOST = "127.0.0.1"
@@ -33,6 +38,8 @@ class Config:
     server_worker_threads: int
     server_connection_io_threads: int
     server_max_inflight_per_connection: int = 0
+    server_recv_buffer_count: int = 0
+    server_recv_buffer_size: int = 0
     warmup_duration: int = 0
     repetitions: int = 1
     threads: int | list[int] = 0
@@ -86,6 +93,8 @@ def load_config(path):
         "payload_size",
         "server_worker_threads",
         "server_connection_io_threads",
+        "server_recv_buffer_count",
+        "server_recv_buffer_size",
     }
     benchmark_type = data.get("type")
     if benchmark_type == "client":
@@ -113,6 +122,13 @@ def load_config(path):
         if has_inflight_per_connection and require_int(data, "inflight_per_connection") <= 0:
             raise RuntimeError("inflight_per_connection must be greater than zero")
 
+    for name in ("server_recv_buffer_count", "server_recv_buffer_size"):
+        if name in data and not 0 < require_int(data, name) <= 0xFFFFFFFF:
+            raise RuntimeError(f"{name} must be in the uint32 positive range")
+    count = data.get("server_recv_buffer_count", 0)
+    if count and (count > 32768 or count & (count - 1)):
+        raise RuntimeError("server_recv_buffer_count must be a power of two not exceeding 32768")
+
     config = Config(
         benchmark_type=benchmark_type,
         duration=require_int(data, "duration"),
@@ -121,6 +137,8 @@ def load_config(path):
         payload_size=require_int(data, "payload_size"),
         server_worker_threads=require_int(data, "server_worker_threads"),
         server_connection_io_threads=require_int(data, "server_connection_io_threads"),
+        server_recv_buffer_count=optional_int(data, "server_recv_buffer_count", 0),
+        server_recv_buffer_size=optional_int(data, "server_recv_buffer_size", 0),
         server_max_inflight_per_connection=(
             require_int(data, "server_max_inflight_per_connection") if benchmark_type == "firehose" else 0
         ),
@@ -162,7 +180,7 @@ def stop(process):
         process.wait(timeout=5)
 
 
-def start_server(repo_root, server_bin, config):
+def start_server(repo_root, server_bin, config, cpu_list=None, stats_path=None):
     command = [
         str(server_bin),
         "--port=0",
@@ -171,6 +189,14 @@ def start_server(repo_root, server_bin, config):
     ]
     if config.server_max_inflight_per_connection > 0:
         command.append(f"--max_inflight_per_connection={config.server_max_inflight_per_connection}")
+    if config.server_recv_buffer_count > 0:
+        command.append(f"--recv_buffer_count={config.server_recv_buffer_count}")
+    if config.server_recv_buffer_size > 0:
+        command.append(f"--recv_buffer_size={config.server_recv_buffer_size}")
+    if stats_path is not None:
+        command.append(f"--stats_file={stats_path}")
+    if cpu_list is not None:
+        command = ["taskset", "-c", cpu_list, *command]
     process = subprocess.Popen(
         command,
         cwd=repo_root,
@@ -203,7 +229,7 @@ def start_server(repo_root, server_bin, config):
         selector.close()
 
 
-def client_command(client_bin, config, case, port, duration):
+def client_command(client_bin, config, case, port, duration, cpu_list=None):
     command = [
         str(client_bin),
         f"--host={BENCHMARK_HOST}",
@@ -219,6 +245,8 @@ def client_command(client_bin, config, case, port, duration):
             f"--inflight={case.inflight}",
             f"--io_threads={config.io_threads}",
         ]
+    if cpu_list is not None:
+        command = ["taskset", "-c", cpu_list, *command]
     return command
 
 
@@ -227,13 +255,24 @@ def parse_stats(output):
     latency = LATENCY_PATTERN.search(output)
     if total is None or latency is None:
         raise RuntimeError("benchmark client output did not contain final statistics")
-    return {
+    stats = {
         "total": int(total.group(1)),
         "success": int(total.group(2)),
         "failed": int(total.group(3)),
         "qps": float(latency.group(1)),
+        "avg_us": float(latency.group(2)),
+        "p50_us": float(latency.group(3)),
+        "p95_us": float(latency.group(4)),
         "p99_us": float(latency.group(5)),
     }
+    progress = CONNECTION_PROGRESS_PATTERN.search(output)
+    if progress is not None:
+        stats["connection_progress"] = {
+            "min_success": int(progress.group(1)),
+            "max_success": int(progress.group(2)),
+            "zero_success_connections": int(progress.group(3)),
+        }
+    return stats
 
 
 def run_client(command, timeout):
@@ -244,25 +283,35 @@ def run_client(command, timeout):
     return parse_stats(result.stdout)
 
 
-def run_case(repo_root, build_dir, config, case):
+def run_case(repo_root, build_dir, config, case, server_cpus=None, client_cpus=None, collect_io_stats=False):
     server_bin = build_dir / "tools" / "benchmark" / "xrpc_benchmark_server"
     client_bin = build_dir / "tools" / "benchmark" / (
         "xrpc_benchmark_firehose" if config.benchmark_type == "firehose" else "xrpc_benchmark_client"
     )
-    server, port = start_server(repo_root, server_bin, config)
+    temporary = tempfile.TemporaryDirectory(prefix="xrpc-stats-")
+    path = Path(temporary.name) / "snapshot.json"
+    server = None
     try:
+        server, port = start_server(repo_root, server_bin, config, server_cpus, path if collect_io_stats else None)
         if config.warmup_duration > 0:
             print(f"warmup: {case.name}")
             run_client(
-                client_command(client_bin, config, case, port, config.warmup_duration),
+                client_command(client_bin, config, case, port, config.warmup_duration, client_cpus),
                 config.warmup_duration + PROCESS_TIMEOUT_MARGIN,
             )
-        return run_client(
-            client_command(client_bin, config, case, port, config.duration),
+        before = collect_io_snapshot(server, path, start_window=True) if collect_io_stats else None
+        stats = run_client(
+            client_command(client_bin, config, case, port, config.duration, client_cpus),
             config.duration + PROCESS_TIMEOUT_MARGIN,
         )
+        if collect_io_stats:
+            after = collect_io_snapshot(server, path)
+            stats["io_stats"] = io_stats_interval(before, after, stats["success"])
+        return stats
     finally:
-        stop(server)
+        if server is not None:
+            stop(server)
+        temporary.cleanup()
 
 
 def summarize(rows):
@@ -289,6 +338,11 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Run XRPC benchmark cases.")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--build-dir", type=Path, default=Path("build-release"))
+    parser.add_argument("--output-json", type=Path)
+    parser.add_argument("--server-cpus")
+    parser.add_argument("--client-cpus")
+    parser.add_argument("--collect-io-stats", action="store_true",
+                        help="collect connection-loop snapshots around the measurement client")
     return parser.parse_args(argv)
 
 
@@ -308,10 +362,31 @@ def main(argv=None):
         for case in repetition_cases:
             index += 1
             print(f"\n[{index}/{total}] repetition={repetition} {case.name}")
-            stats = run_case(repo_root, build_dir, config, case)
+            stats = run_case(
+                repo_root,
+                build_dir,
+                config,
+                case,
+                args.server_cpus,
+                args.client_cpus,
+                args.collect_io_stats,
+            )
             stats["case"] = case.name
+            stats["repetition"] = repetition
             rows.append(stats)
     summarize(rows)
+    if args.output_json is not None:
+        args.output_json.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "config_path": str(args.config),
+            "config": asdict(config),
+            "build_dir": str(build_dir),
+            "server_cpus": args.server_cpus,
+            "client_cpus": args.client_cpus,
+            "collect_io_stats": args.collect_io_stats,
+            "rows": rows,
+        }
+        args.output_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return 0
 
 

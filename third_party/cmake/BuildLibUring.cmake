@@ -44,3 +44,10 @@ set_target_properties(
 add_dependencies(xrpc_vendor_liburing xrpc_vendor_liburing_build)
 
 add_library(LibUring::LibUring ALIAS xrpc_vendor_liburing)
+
+install(FILES "${XRPC_LIBURING_LIBRARY}" DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(
+    DIRECTORY "${XRPC_LIBURING_STAGE_DIR}/src/include/"
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    FILES_MATCHING PATTERN "*.h"
+)

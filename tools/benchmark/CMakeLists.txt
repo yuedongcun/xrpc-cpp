@@ -26,7 +26,7 @@ function(xrpc_add_benchmark target)
     )
     target_link_libraries(
         ${target}
-        PRIVATE xrpc::xrpc xrpc_benchmark_proto Threads::Threads
+        PRIVATE xrpc::xrpc xrpc_benchmark_proto Threads::Threads glog::glog
     )
     set_target_properties(
         ${target}
@@ -37,7 +37,9 @@ endfunction()
 xrpc_add_benchmark(
     xrpc_benchmark_server
     server/benchmark_server.cpp
+    server/stats_output.cpp
 )
+target_link_libraries(xrpc_benchmark_server PRIVATE nlohmann_json::nlohmann_json)
 xrpc_add_benchmark(
     xrpc_benchmark_firehose
     firehose/firehose_client.cpp

@@ -98,7 +98,7 @@ TEST(FrameCodecRobustTest, EveryPrefixOfAValidFrameNeedsMoreData) {
   req.method_name_ = "Add";
   req.payload_ = "serialized request payload";
 
-  std::string frame = codec.Encode(req);
+  std::string frame = codec.Encode(req).value();
   ASSERT_GT(frame.size(), FrameHeader::SIZE);
 
   for (size_t n = 0; n < frame.size(); ++n) {
@@ -128,8 +128,8 @@ TEST(FrameCodecRobustTest, DecodeTwoFramesFromOneBufferUsingConsumed) {
   resp2.status_ = Status::Ok();
   resp2.payload_ = "payload-2";
 
-  std::string frame1 = codec.Encode(req1);
-  std::string frame2 = codec.Encode(resp2);
+  std::string frame1 = codec.Encode(req1).value();
+  std::string frame2 = codec.Encode(resp2).value();
 
   std::string buffer = frame1 + frame2;
 
@@ -165,7 +165,7 @@ TEST(FrameCodecRobustTest, OkResponseWithEmptyErrorTextUsesEmptyMetadata) {
   response.status_ = Status::Ok();
   response.payload_ = "payload";
 
-  const std::string frame = codec.Encode(response);
+  const std::string frame = codec.Encode(response).value();
   const std::optional<FrameHeader> header = FrameHeader::Decode(std::string_view(frame.data(), FrameHeader::SIZE));
   ASSERT_TRUE(header.has_value());
   EXPECT_EQ(header->message_type_, MessageType::Response);
@@ -192,7 +192,7 @@ TEST(FrameCodecRobustTest, NonOkResponseKeepsEncodedMetadata) {
   response.status_ = {StatusCode::Unavailable, "unavailable"};
   response.payload_ = "";
 
-  const std::string frame = codec.Encode(response);
+  const std::string frame = codec.Encode(response).value();
   const std::optional<FrameHeader> header = FrameHeader::Decode(std::string_view(frame.data(), FrameHeader::SIZE));
   ASSERT_TRUE(header.has_value());
   EXPECT_EQ(header->message_type_, MessageType::Response);
@@ -219,7 +219,7 @@ TEST(FrameCodecRobustTest, DecodeOneFrameAndLeaveTrailingGarbageUnconsumed) {
   req.method_name_ = "Echo";
   req.payload_ = "hello";
 
-  std::string frame = codec.Encode(req);
+  std::string frame = codec.Encode(req).value();
   std::string garbage = "THIS_IS_NOT_A_FRAME";
   std::string buffer = frame + garbage;
 
@@ -301,7 +301,9 @@ TEST(FrameCodecRobustTest, EncodingHonorsPayloadLimit) {
   request.method_name_ = "M";
   request.payload_ = "four";
 
-  EXPECT_THROW(static_cast<void>(codec.Encode(request)), ProtocolException);
+  const StatusOr<std::string> encoded = codec.Encode(request);
+  ASSERT_FALSE(encoded.ok());
+  EXPECT_EQ(encoded.status().code(), StatusCode::ResourceExhausted);
 }
 
 TEST(FrameCodecRobustTest, CorruptedRequestMetadataReturnsDecodeError) {
@@ -370,7 +372,7 @@ TEST(FrameCodecRobustTest, PayloadMayContainNullBytesAndNonTextBytes) {
   req.method_name_ = "Upload";
   req.payload_ = payload;
 
-  std::string frame = codec.Encode(req);
+  std::string frame = codec.Encode(req).value();
 
   auto result = codec.Decode(frame);
   ASSERT_EQ(result.error_, ProtocolError::Ok);
@@ -382,50 +384,6 @@ TEST(FrameCodecRobustTest, PayloadMayContainNullBytesAndNonTextBytes) {
   EXPECT_EQ(decoded.method_name_, "Upload");
   EXPECT_EQ(decoded.payload_.size(), payload.size());
   EXPECT_EQ(decoded.payload_, payload);
-}
-
-TEST(FrameCodecRobustTest, CompleteFrameHeaderButIncompleteMetadataNeedsMoreData) {
-  FrameCodec codec;
-
-  RequestEnvelope req;
-  req.request_id_ = 9;
-  req.service_name_ = "S";
-  req.method_name_ = "M";
-  req.payload_ = "P";
-
-  std::string frame = codec.Encode(req);
-  ASSERT_GT(frame.size(), FrameHeader::SIZE);
-
-  // Provide only the complete FrameHeader, without the protobuf metadata or
-  // payload bytes that follow it.
-  auto result = codec.Decode(std::string_view(frame.data(), FrameHeader::SIZE));
-  EXPECT_EQ(result.error_, ProtocolError::NeedMoreData);
-  EXPECT_EQ(result.consumed_, 0U);
-  EXPECT_FALSE(result.HasEnvelope());
-}
-
-TEST(FrameCodecRobustTest, IncompletePayloadNeedsMoreData) {
-  FrameCodec codec;
-
-  RequestEnvelope req;
-  req.request_id_ = 10;
-  req.service_name_ = "S";
-  req.method_name_ = "M";
-  req.payload_ = "long-payload";
-
-  std::string frame = codec.Encode(req);
-  ASSERT_GT(frame.size(), FrameHeader::SIZE);
-
-  auto decoded_header = FrameHeader::Decode(std::string_view(frame.data(), FrameHeader::SIZE));
-  ASSERT_TRUE(decoded_header.has_value());
-
-  const size_t full_size = frame.size();
-  const size_t missing_one_byte = full_size - 1;
-
-  auto result = codec.Decode(std::string_view(frame.data(), missing_one_byte));
-  EXPECT_EQ(result.error_, ProtocolError::NeedMoreData);
-  EXPECT_EQ(result.consumed_, 0U);
-  EXPECT_FALSE(result.HasEnvelope());
 }
 
 }  // namespace xrpc

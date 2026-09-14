@@ -120,9 +120,9 @@ class RpcClient final {
     std::string payload;
     try {
       payload = request.SerializeAsString();
-    } catch (const std::exception &exception) {
+    } catch (const std::exception &exception) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: user request type
       return StatusOr<Resp>(Status{StatusCode::Internal, exception.what()});
-    } catch (...) {
+    } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: user-supplied request type
       return StatusOr<Resp>(Status{StatusCode::Internal, "failed to serialize Protobuf request"});
     }
 
@@ -138,9 +138,9 @@ class RpcClient final {
         return StatusOr<Resp>(Status(StatusCode::DataLoss, "failed to decode Protobuf response"));
       }
       return StatusOr<Resp>(std::move(response));
-    } catch (const std::exception &exception) {
+    } catch (const std::exception &exception) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: user response type
       return StatusOr<Resp>(Status{StatusCode::Internal, exception.what()});
-    } catch (...) {
+    } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: user-supplied response type
       return StatusOr<Resp>(Status{StatusCode::Internal, "failed to decode Protobuf response"});
     }
   }

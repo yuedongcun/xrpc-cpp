@@ -11,17 +11,17 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <exception>
+#include <future>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "io/socket.h"
-#include "io/uring_context.h"
-#include "protocol/frame_codec.h"
-#include "server/connection_backpressure.h"
-#include "server/dispatch_mailbox.h"
+#include "io/uring/context.h"
+#include "server/connection_config.h"
 #include "server/server_connection.h"
 #include "server/worker_pool.h"
 
@@ -29,19 +29,34 @@ namespace xrpc {
 
 class ServiceRegistry;
 
+/** Worker result returned to the connection's owning I/O loop. */
+struct WorkerResult final {
+  ConnectionId connection_id_ = 0;
+
+  std::string response_bytes_;
+
+  // Inflight slots to release, including unexecuted requests after an encoding failure.
+  std::size_t released_requests_ = 1;
+
+  bool encode_failed_ = false;
+};
+
 /**
  * @brief Owns one server connection I/O execution domain.
  *
  * `RpcServer::Impl` calls the owner-side methods serially; they are not an
  * arbitrary concurrent API. `PostStartConnection()` and `BeginDrain()` post
  * their actual work to the `UringContext` thread. `connections_` is confined
- * to that thread, while lifecycle state and the live-connection count are
- * synchronized between the owner and context threads.
+ * to that thread and uniquely owns every connection. Worker results carry
+ * only a `ConnectionId`; lifecycle state and the live-connection count are
+ * synchronized between the owner and context threads. The owning runtime
+ * drains `WorkerPool` before destroying this loop, so posted results and
+ * their callbacks cannot outlive it.
  */
 class ConnectionIoLoop final {
  public:
-  ConnectionIoLoop(ServiceRegistry &registry, WorkerPool &worker_pool, ConnectionBackpressureLimits limits,
-                   ProtocolLimits protocol_limits);
+  ConnectionIoLoop(ServiceRegistry &registry, WorkerPool &worker_pool, ServerConnectionConfig config,
+                   io::UringBufferPoolConfig buffer_pool_config = {});
 
   ~ConnectionIoLoop();
 
@@ -58,12 +73,22 @@ class ConnectionIoLoop final {
   void BeginDrain();
 
   // Owner-thread graceful shutdown operation. Not concurrent with Start().
-  void FinishDrain();
+  [[nodiscard]] auto FinishDrain() -> Status;
 
   // Accept-thread command. Posts connection creation to the I/O thread.
   void PostStartConnection(io::Socket client_socket);
 
+  // Worker-thread command. Posts a worker result to this loop's I/O thread.
+  void PostWorkerResult(WorkerResult result);
+
+  // Control-thread-only; copy statistics on the context thread via Post().
+  [[nodiscard]] auto RequestStats(bool start_window = false) -> std::future<ConnectionLoopStatsSnapshot>;
+
  private:
+  friend class ServerConnection;
+  // Context-thread-only accounting at reservation, release and close boundaries.
+  void RecordWriteBytesChange(std::size_t before, std::size_t after);
+
   enum class State : std::uint8_t {
     Created,
     Running,
@@ -77,9 +102,13 @@ class ConnectionIoLoop final {
   // I/O-context-thread-only operations. They do not take a state lock.
   void StartConnectionOnContext(io::Socket client_socket);
 
+  [[nodiscard]] auto AllocateConnectionId() -> ConnectionId;
+
   void CollectClosedConnections();
 
   void CloseConnectionsOnContext();
+
+  void HandleWorkerResult(WorkerResult result);
 
   // I/O-context-thread-only drain operation.
   void BeginDrainOnContext();
@@ -88,14 +117,16 @@ class ConnectionIoLoop final {
   void OnConnectionClosed();
 
   io::UringContext context_;
-  std::shared_ptr<DispatchMailbox> dispatch_mailbox_;
-  ServiceRegistry *registry_;
-  WorkerPool *worker_pool_;
-  ConnectionBackpressureLimits limits_;
-  ProtocolLimits protocol_limits_;
-  std::vector<std::shared_ptr<ServerConnection>> connections_;
+  ServiceRegistry &registry_;
+  WorkerPool &worker_pool_;
+  ServerConnectionConfig config_;
+  std::unordered_map<ConnectionId, std::unique_ptr<ServerConnection>> connections_;
+  // Context-thread-owned write accounting.
+  std::size_t pending_write_bytes_ = 0;
+  std::size_t pending_write_bytes_peak_ = 0;
+  ConnectionId next_connection_id_ = 1;
   std::jthread thread_;
-  std::exception_ptr error_;
+  Status error_;
   std::mutex drain_mutex_;
   std::condition_variable drain_cv_;
   std::size_t live_connections_ = 0;

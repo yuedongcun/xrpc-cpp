@@ -34,7 +34,7 @@ class ConsulRegistrar final {
     std::uint16_t service_port_ = 0;
   };
 
-  explicit ConsulRegistrar(const std::string &consul_address);
+  explicit ConsulRegistrar(ConsulHttpClient http_client);
 
   /** Registers or replaces this instance and its TCP health check. */
   [[nodiscard]] auto Register(const Options &options) -> Status;

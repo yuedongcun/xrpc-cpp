@@ -14,7 +14,8 @@
 
 #include "naming/consul/consul_registrar.h"
 #include "protocol/frame_codec.h"
-#include "server/connection_backpressure.h"
+#include "server/connection_config.h"
+#include "server/worker_pool.h"
 
 namespace xrpc {
 
@@ -26,6 +27,10 @@ struct ConsulRegistrationConfig {
   std::string agent_address_;
 };
 
+struct ListenConfig final {
+  int backlog_;
+};
+
 /**
  * @brief Validated internal configuration consumed by the server runtime.
  *
@@ -33,20 +38,14 @@ struct ConsulRegistrationConfig {
  * reinterpret public defaults or repeat configuration validation.
  */
 struct ServerConfig {
-  std::size_t worker_threads_;
-  std::size_t max_pending_jobs_;
-  int backlog_;
-  std::size_t io_threads_;
-  ConnectionBackpressureLimits connection_limits_;
-  ProtocolLimits protocol_limits_;
+  WorkerPoolConfig worker_pool_;
+  ListenConfig listen_;
+  ConnectionIoConfig connection_io_;
   ConsulRegistrationConfig consul_;
-};
 
-/**
- * @brief Validates public server options and produces the internal runtime
- * configuration.
- */
-[[nodiscard]] auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerConfig;
+  [[nodiscard]] static auto Create(const RpcServerOptions &options, io::UringBufferPoolConfig buffer_pool = {})
+      -> StatusOr<ServerConfig>;
+};
 
 [[nodiscard]] auto ServiceRegistrationEnabled(const ServerConfig &config) -> bool;
 
@@ -58,6 +57,6 @@ struct ServerConfig {
  * concrete registration always uses the actual listening port.
  */
 [[nodiscard]] auto ResolveRegistrarOptions(const ServerConfig &config, std::string_view host, std::uint16_t listen_port)
-    -> ConsulRegistrar::Options;
+    -> StatusOr<ConsulRegistrar::Options>;
 
 }  // namespace xrpc

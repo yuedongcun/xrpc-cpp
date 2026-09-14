@@ -22,11 +22,12 @@ endif()
 
 set(XRPC_SOURCES
     io/socket.cpp
-    io/uring_context.cpp
-    io/uring_context_operations.cpp
-    io/uring_context_control.cpp
+    io/uring/buffer_pool.cpp
+    io/uring/context.cpp
     protocol/frame_header.cpp
     protocol/frame_codec.cpp
+    common/abort.cpp
+    common/log.cpp
     common/xrpc_exception.cpp
     client/tcp_transport.cpp
     client/rpc_client_impl.cpp
@@ -37,12 +38,13 @@ set(XRPC_SOURCES
     naming/consul/consul_discovery.cpp
     naming/consul/consul_registrar.cpp
     server/service_registry.cpp
+    server/connection_backpressure.cpp
+    server/connection_config.cpp
     server/server_config.cpp
     server/rpc_frame_stream.cpp
     server/rpc_server.cpp
     server/rpc_server_impl.cpp
     server/connection_io_loop.cpp
-    server/dispatch_mailbox.cpp
     server/worker_pool.cpp
     server/server_connection.cpp
 )
@@ -68,6 +70,8 @@ target_link_libraries(
         "$<BUILD_INTERFACE:protobuf::libprotobuf>"
         "$<INSTALL_INTERFACE:xrpc_dependencies::protobuf>"
     PRIVATE
+        "$<BUILD_INTERFACE:glog::glog>"
+        "$<INSTALL_INTERFACE:xrpc_dependencies::glog>"
         "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
         "$<INSTALL_INTERFACE:xrpc_dependencies::nlohmann_json>"
         "$<BUILD_INTERFACE:LibUring::LibUring>"

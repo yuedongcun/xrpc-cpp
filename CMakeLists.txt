@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.22)
 
 project(xrpc VERSION 0.1.0 LANGUAGES C CXX)
 
@@ -76,6 +76,5 @@ install(
     FILES
         "${CMAKE_CURRENT_BINARY_DIR}/xrpcConfig.cmake"
         "${CMAKE_CURRENT_BINARY_DIR}/xrpcConfigVersion.cmake"
-        cmake/FindLibUring.cmake
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/xrpc
 )

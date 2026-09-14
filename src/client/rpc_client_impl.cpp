@@ -14,8 +14,6 @@
 #include <string>
 #include <utility>
 
-#include "common/xrpc_exception.h"
-
 namespace xrpc {
 
 namespace {
@@ -24,18 +22,19 @@ constexpr std::size_t VIRTUAL_NODE_COUNT = 128;
 constexpr std::uint64_t FNV1A_OFFSET_BASIS = 14695981039346656037ULL;
 constexpr std::uint64_t FNV1A_PRIME = 1099511628211ULL;
 
-auto ValidateClientOptions(const RpcClientOptions &options) -> ProtocolLimits {
+auto ValidateClientOptions(const RpcClientOptions &options) -> StatusOr<ProtocolLimits> {
   if (options.target_.empty()) {
-    throw ConfigException("RpcClient target must not be empty");
+    return StatusOr<ProtocolLimits>(Status{StatusCode::InvalidArgument, "RpcClient target must not be empty"});
   }
   if (options.consul_address_.empty()) {
-    throw ConfigException("RpcClient consul_address must not be empty");
+    return StatusOr<ProtocolLimits>(Status{StatusCode::InvalidArgument, "RpcClient consul_address must not be empty"});
   }
   if (options.timeout_ < std::chrono::milliseconds::zero()) {
-    throw ConfigException("RpcClient timeout must not be negative");
+    return StatusOr<ProtocolLimits>(Status{StatusCode::InvalidArgument, "RpcClient timeout must not be negative"});
   }
   if (options.max_inflight_per_endpoint_ == 0) {
-    throw ConfigException("RpcClient max_inflight_per_endpoint must be greater than 0");
+    return StatusOr<ProtocolLimits>(
+        Status{StatusCode::InvalidArgument, "RpcClient max_inflight_per_endpoint must be greater than 0"});
   }
   return MakeProtocolLimits(options.max_payload_size_);
 }
@@ -60,11 +59,26 @@ auto ResolveCallOptions(std::chrono::milliseconds default_timeout, const CallOpt
 
 }  // namespace
 
-RpcClient::Impl::Impl(const RpcClientOptions &options)
-    : protocol_limits_(ValidateClientOptions(options)),
+auto RpcClient::Impl::Create(const RpcClientOptions &options) -> StatusOr<std::unique_ptr<Impl>> {
+  StatusOr<ProtocolLimits> protocol_limits = ValidateClientOptions(options);
+  if (!protocol_limits.ok()) {
+    return StatusOr<std::unique_ptr<Impl>>(protocol_limits.status());
+  }
+  StatusOr<std::unique_ptr<ServiceDiscovery>> discovery =
+      MakeServiceDiscovery(options.target_, options.consul_address_);
+  if (!discovery.ok()) {
+    return StatusOr<std::unique_ptr<Impl>>(discovery.status());
+  }
+  return StatusOr<std::unique_ptr<Impl>>(
+      std::unique_ptr<Impl>(new Impl(options, std::move(protocol_limits).value(), std::move(discovery).value())));
+}
+
+RpcClient::Impl::Impl(const RpcClientOptions &options, ProtocolLimits protocol_limits,
+                      std::unique_ptr<ServiceDiscovery> discovery)
+    : protocol_limits_(protocol_limits),
       default_timeout_(options.timeout_),
       max_inflight_per_endpoint_(options.max_inflight_per_endpoint_),
-      discovery_(MakeServiceDiscovery(options.target_, options.consul_address_)) {
+      discovery_(std::move(discovery)) {
   (void)discovery_->Start();
 }
 
@@ -134,12 +148,8 @@ auto RpcClient::Impl::ResolveRoutingSnapshot() -> StatusOr<std::shared_ptr<const
     // An unchanged endpoint keeps its transport and established connection.
     std::shared_ptr<TcpTransport> transport = FindReusableTransport(current, endpoint);
     if (!transport) {
-      try {
-        transport = std::make_shared<TcpTransport>(endpoint.host_, endpoint.port_, protocol_limits_,
-                                                   max_inflight_per_endpoint_);
-      } catch (...) {
-        return StatusOr<std::shared_ptr<const RoutingSnapshot>>(CaughtExceptionToStatus("failed to create transport"));
-      }
+      transport =
+          std::make_shared<TcpTransport>(endpoint.host_, endpoint.port_, protocol_limits_, max_inflight_per_endpoint_);
     }
 
     next->transports_.push_back(std::move(transport));

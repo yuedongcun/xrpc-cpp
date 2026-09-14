@@ -19,8 +19,6 @@
 
 #include <nlohmann/json.hpp>
 
-#include "common/xrpc_exception.h"
-
 namespace xrpc {
 
 namespace {
@@ -49,35 +47,61 @@ auto ParseConsulIndex(const ConsulHttpResponse &response) -> std::uint64_t {
   return parsed;
 }
 
-auto ParseEndpoints(const std::string &body) -> std::vector<Endpoint> {
-  const nlohmann::json root = nlohmann::json::parse(body);
-  if (!root.is_array()) {
-    throw ProtocolException(StatusCode::DataLoss, "Consul health response is not an array");
+auto ParseEndpoints(const std::string &body) -> StatusOr<std::vector<Endpoint>> {
+  const nlohmann::json root = nlohmann::json::parse(body, nullptr, false);
+  if (root.is_discarded() || !root.is_array()) {
+    return StatusOr<std::vector<Endpoint>>(Status{StatusCode::DataLoss, "Consul health response is not an array"});
   }
 
   std::vector<Endpoint> endpoints;
   for (const nlohmann::json &entry : root) {
-    const nlohmann::json &service = entry.at("Service");
-    const nlohmann::json &node = entry.at("Node");
-
-    std::string host = service.value("Address", "");
-    if (host.empty()) {
-      host = node.value("Address", "");
+    if (!entry.is_object() || !entry.contains("Service") || !entry["Service"].is_object() || !entry.contains("Node") ||
+        !entry["Node"].is_object()) {
+      return StatusOr<std::vector<Endpoint>>(
+          Status{StatusCode::DataLoss, "Consul health response contains an invalid service entry"});
     }
-    const int port = service.value("Port", 0);
+    const nlohmann::json &service = entry["Service"];
+    const nlohmann::json &node = entry["Node"];
+
+    std::string host;
+    if (const auto address = service.find("Address"); address != service.end()) {
+      if (!address->is_string()) {
+        return StatusOr<std::vector<Endpoint>>(
+            Status{StatusCode::DataLoss, "Consul health response contains an invalid service address"});
+      }
+      host = address->get<std::string>();
+    }
+    if (host.empty()) {
+      if (const auto address = node.find("Address"); address != node.end()) {
+        if (!address->is_string()) {
+          return StatusOr<std::vector<Endpoint>>(
+              Status{StatusCode::DataLoss, "Consul health response contains an invalid node address"});
+        }
+        host = address->get<std::string>();
+      }
+    }
+    if (!service.contains("Port") || (!service["Port"].is_number_integer() && !service["Port"].is_number_unsigned())) {
+      return StatusOr<std::vector<Endpoint>>(
+          Status{StatusCode::DataLoss, "Consul health response contains an invalid service port"});
+    }
+    const std::int64_t port = service["Port"].is_number_unsigned()
+                                  ? (service["Port"].get<std::uint64_t>() <= 65535
+                                         ? static_cast<std::int64_t>(service["Port"].get<std::uint64_t>())
+                                         : 0)
+                                  : service["Port"].get<std::int64_t>();
     if (host.empty() || port <= 0 || port > 65535) {
       continue;
     }
 
     endpoints.push_back(Endpoint{.host_ = std::move(host), .port_ = static_cast<std::uint16_t>(port)});
   }
-  return CanonicalizeEndpoints(std::move(endpoints));
+  return StatusOr<std::vector<Endpoint>>(CanonicalizeEndpoints(std::move(endpoints)));
 }
 
 }  // namespace
 
-ConsulDiscovery::ConsulDiscovery(std::string service_name, const std::string &consul_address)
-    : service_name_(std::move(service_name)), http_client_(consul_address) {}
+ConsulDiscovery::ConsulDiscovery(std::string service_name, ConsulHttpClient http_client)
+    : service_name_(std::move(service_name)), http_client_(std::move(http_client)) {}
 
 ConsulDiscovery::~ConsulDiscovery() { Stop(); }
 
@@ -117,16 +141,14 @@ auto ConsulDiscovery::Fetch(bool use_blocking_query) -> Status {
     return {StatusCode::Unavailable, std::move(error)};
   }
 
-  try {
-    std::vector<Endpoint> endpoints = ParseEndpoints(response.body_);
-    SetSnapshot(std::move(endpoints), ParseConsulIndex(response));
-    SetLastError({});
-    return Status::Ok();
-  } catch (...) {
-    Status status = CaughtExceptionToStatus(StatusCode::DataLoss, "failed to parse Consul response");
-    SetLastError(status.message());
-    return status;
+  StatusOr<std::vector<Endpoint>> endpoints = ParseEndpoints(response.body_);
+  if (!endpoints.ok()) {
+    SetLastError(endpoints.status().message());
+    return endpoints.status();
   }
+  SetSnapshot(std::move(endpoints).value(), ParseConsulIndex(response));
+  SetLastError({});
+  return Status::Ok();
 }
 
 void ConsulDiscovery::RefreshLoop(const std::stop_token &stop_token) {

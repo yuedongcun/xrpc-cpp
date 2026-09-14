@@ -1,0 +1,6 @@
+# Disable clang-tidy lint checks for test files.
+If:
+  PathMatch: tests/.*
+Diagnostics:
+  ClangTidy:
+    Remove: '*'

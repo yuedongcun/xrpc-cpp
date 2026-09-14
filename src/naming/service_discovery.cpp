@@ -11,7 +11,6 @@
 #include <string_view>
 #include <utility>
 
-#include "common/xrpc_exception.h"
 #include "naming/consul/consul_discovery.h"
 #include "naming/static_discovery.h"
 
@@ -48,21 +47,32 @@ auto CanonicalizeEndpoints(std::vector<Endpoint> endpoints) -> std::vector<Endpo
 }
 
 auto MakeServiceDiscovery(std::string_view target, const std::string &consul_address)
-    -> std::unique_ptr<ServiceDiscovery> {
+    -> StatusOr<std::unique_ptr<ServiceDiscovery>> {
   target = Trim(target);
 
   if (target.starts_with(LIST_SCHEME)) {
-    return std::make_unique<StaticDiscovery>(target);
+    StatusOr<DiscoverySnapshot> endpoints = StaticDiscovery::ParseTarget(target);
+    if (!endpoints.ok()) {
+      return StatusOr<std::unique_ptr<ServiceDiscovery>>(endpoints.status());
+    }
+    return StatusOr<std::unique_ptr<ServiceDiscovery>>(std::make_unique<StaticDiscovery>(std::move(endpoints).value()));
   }
 
   if (target.starts_with(CONSUL_SCHEME)) {
     std::string service_name(Trim(target.substr(CONSUL_SCHEME.size())));
     if (service_name.empty()) {
-      throw ConfigException("consul target requires a service name");
+      return StatusOr<std::unique_ptr<ServiceDiscovery>>(
+          Status{StatusCode::InvalidArgument, "consul target requires a service name"});
     }
-    return std::make_unique<ConsulDiscovery>(std::move(service_name), consul_address);
+    StatusOr<ConsulHttpClient> http_client = ConsulHttpClient::Create(consul_address);
+    if (!http_client.ok()) {
+      return StatusOr<std::unique_ptr<ServiceDiscovery>>(http_client.status());
+    }
+    return StatusOr<std::unique_ptr<ServiceDiscovery>>(
+        std::make_unique<ConsulDiscovery>(std::move(service_name), std::move(http_client).value()));
   }
-  throw ConfigException("unsupported RpcClient target scheme");
+  return StatusOr<std::unique_ptr<ServiceDiscovery>>(
+      Status{StatusCode::InvalidArgument, "unsupported RpcClient target scheme"});
 }
 
 }  // namespace xrpc

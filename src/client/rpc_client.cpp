@@ -19,8 +19,12 @@ namespace xrpc {
 
 auto RpcClient::Create(const RpcClientOptions &options) -> StatusOr<RpcClient> {
   try {
-    return StatusOr<RpcClient>(RpcClient(std::make_unique<Impl>(options)));
-  } catch (...) {
+    StatusOr<std::unique_ptr<Impl>> impl = Impl::Create(options);
+    if (!impl.ok()) {
+      return StatusOr<RpcClient>(impl.status());
+    }
+    return StatusOr<RpcClient>(RpcClient(std::move(impl).value()));
+  } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: public API
     return StatusOr<RpcClient>(CaughtExceptionToStatus("failed to create RPC client"));
   }
 }
@@ -37,7 +41,7 @@ auto RpcClient::CallPayload(std::string service_name, std::string method_name, s
                             const CallOptions &options) -> StatusOr<std::string> {
   try {
     return impl_->Call(std::move(service_name), std::move(method_name), std::move(payload), options);
-  } catch (...) {
+  } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: public API
     return StatusOr<std::string>(CaughtExceptionToStatus("RPC call failed"));
   }
 }

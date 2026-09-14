@@ -12,15 +12,17 @@
 
 namespace xrpc {
 
-void ServiceRegistry::Register(const std::string &service, const std::string &method, RequestHandler handler) {
+auto ServiceRegistry::Register(const std::string &service, const std::string &method, RequestHandler handler)
+    -> Status {
   MethodMap &methods = services_[service];
   if (methods.contains(method)) {
     std::ostringstream oss;
     oss << "method already registered: service=" << service << ", method=" << method;
-    throw ConfigException(oss.str());
+    return {StatusCode::InvalidArgument, oss.str()};
   }
 
   methods.emplace(method, std::move(handler));
+  return Status::Ok();
 }
 
 auto ServiceRegistry::Dispatch(RequestEnvelope request) const -> ResponseEnvelope {
@@ -43,7 +45,7 @@ auto ServiceRegistry::Dispatch(RequestEnvelope request) const -> ResponseEnvelop
   const std::uint64_t request_id = request.request_id_;
   try {
     return method->second(std::move(request));
-  } catch (...) {
+  } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: user handler
     ResponseEnvelope resp;
     resp.request_id_ = request_id;
     resp.status_ = CaughtExceptionToStatus("handler threw unknown exception");

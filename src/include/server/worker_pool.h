@@ -13,7 +13,6 @@
 #include <condition_variable>
 #include <cstddef>
 #include <functional>
-#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -21,7 +20,19 @@
 #include <thread>
 #include <vector>
 
+#include <xrpc/status.h>
+
+#include "server/stats.h"
+
 namespace xrpc {
+
+struct WorkerPoolConfig final {
+  std::size_t threads_;
+  std::size_t max_pending_jobs_;
+};
+
+[[nodiscard]] auto MakeWorkerPoolConfig(std::size_t requested_threads, std::size_t max_pending_jobs)
+    -> StatusOr<WorkerPoolConfig>;
 
 /**
  * @brief Worker pool for server RPC dispatch processing.
@@ -36,7 +47,7 @@ namespace xrpc {
  */
 class WorkerPool final {
  public:
-  explicit WorkerPool(std::size_t worker_count, std::size_t max_pending_jobs = std::numeric_limits<std::size_t>::max());
+  explicit WorkerPool(WorkerPoolConfig config);
 
   ~WorkerPool();
 
@@ -68,6 +79,11 @@ class WorkerPool final {
 
   [[nodiscard]] auto accepting_submissions() const noexcept -> bool;
 
+  [[nodiscard]] auto pending_jobs() const noexcept -> std::size_t { return pending_jobs_.load(); }
+
+  // Control-thread-only. Uses existing queue locks; samples are not globally atomic.
+  [[nodiscard]] auto SnapshotStats(bool start_window = false) -> WorkerPoolStatsSnapshot;
+
   /**
    * @brief Drains admitted work and joins all worker threads.
    *
@@ -88,6 +104,9 @@ class WorkerPool final {
     std::mutex mutex_;
     std::condition_variable cv_;
     std::queue<WorkerJob> jobs_;
+    std::size_t queued_logical_jobs_ = 0;
+    std::size_t queued_batches_peak_ = 0;
+    std::size_t queued_logical_jobs_peak_ = 0;
 
     // Number of WorkerJob entries queued or currently executing on this worker.
     std::atomic<std::size_t> pending_entries_{0};
@@ -111,6 +130,7 @@ class WorkerPool final {
   std::atomic_bool accepting_submissions_{true};
   // Set when workers should drain queued jobs and then exit.
   std::atomic_bool drain_requested_{false};
+  std::uint64_t stats_window_id_ = 0;  // Serialized control-thread snapshots only.
 };
 
 }  // namespace xrpc

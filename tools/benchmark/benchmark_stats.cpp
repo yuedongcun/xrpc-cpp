@@ -81,6 +81,10 @@ void PrintStats(const BenchmarkStats &stats) {
   std::printf("total_calls=%zu success=%zu failed=%zu\n", stats.total_calls_, stats.success_calls_,
               stats.failed_calls_);
   std::printf("qps=%.2f avg_us=%.2f p50_us=%.2f p95_us=%.2f p99_us=%.2f\n", stats.qps_, avg_us, p50_us, p95_us, p99_us);
+  if (stats.has_connection_progress_) {
+    std::printf("connection_progress min_success=%zu max_success=%zu zero_success_connections=%zu\n",
+                stats.min_connection_success_, stats.max_connection_success_, stats.zero_success_connections_);
+  }
 }
 
 }  // namespace xrpc::benchmark

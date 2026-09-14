@@ -13,8 +13,6 @@
 #include <string_view>
 #include <utility>
 
-#include "common/xrpc_exception.h"
-
 namespace xrpc {
 namespace {
 
@@ -30,37 +28,45 @@ auto Trim(std::string_view value) -> std::string_view {
   return value;
 }
 
-auto ParsePort(std::string_view port_text) -> std::uint16_t {
+auto ParsePort(std::string_view port_text) -> StatusOr<std::uint16_t> {
   int parsed_port = 0;
   const auto result = std::from_chars(port_text.data(), port_text.data() + port_text.size(), parsed_port);
   if (result.ec != std::errc{} || result.ptr != port_text.data() + port_text.size() || parsed_port <= 0 ||
       parsed_port > 65535) {
-    throw ConfigException("invalid endpoint port");
+    return StatusOr<std::uint16_t>(Status{StatusCode::InvalidArgument, "invalid endpoint port"});
   }
-  return static_cast<std::uint16_t>(parsed_port);
+  return StatusOr<std::uint16_t>(static_cast<std::uint16_t>(parsed_port));
 }
 
-auto ParseEndpoint(std::string_view endpoint_text) -> Endpoint {
+auto ParseEndpoint(std::string_view endpoint_text) -> StatusOr<Endpoint> {
   endpoint_text = Trim(endpoint_text);
   const std::size_t colon = endpoint_text.rfind(':');
   if (colon == std::string_view::npos || colon == 0 || colon + 1 >= endpoint_text.size()) {
-    throw ConfigException("invalid list target endpoint");
+    return StatusOr<Endpoint>(Status{StatusCode::InvalidArgument, "invalid list target endpoint"});
   }
 
   std::string_view host = Trim(endpoint_text.substr(0, colon));
   std::string_view port = Trim(endpoint_text.substr(colon + 1));
   if (host.empty() || port.empty()) {
-    throw ConfigException("invalid list target endpoint");
+    return StatusOr<Endpoint>(Status{StatusCode::InvalidArgument, "invalid list target endpoint"});
   }
-  return Endpoint{.host_ = std::string(host), .port_ = ParsePort(port)};
+  StatusOr<std::uint16_t> parsed_port = ParsePort(port);
+  if (!parsed_port.ok()) {
+    return StatusOr<Endpoint>(parsed_port.status());
+  }
+  return StatusOr<Endpoint>(Endpoint{.host_ = std::string(host), .port_ = std::move(parsed_port).value()});
 }
 
-auto ParseListTarget(std::string_view target) -> std::vector<Endpoint> {
+auto ParseListTarget(std::string_view target) -> StatusOr<std::vector<Endpoint>> {
   std::vector<Endpoint> endpoints;
   std::string_view rest = target.substr(LIST_SCHEME.size());
   while (true) {
     const std::size_t comma = rest.find(',');
-    endpoints.push_back(ParseEndpoint(comma == std::string_view::npos ? rest : rest.substr(0, comma)));
+    StatusOr<Endpoint> endpoint = ParseEndpoint(comma == std::string_view::npos ? rest : rest.substr(0, comma));
+    if (!endpoint.ok()) {
+      return StatusOr<std::vector<Endpoint>>(endpoint.status());
+    }
+    endpoints.push_back(std::move(endpoint).value());
     if (comma == std::string_view::npos) {
       break;
     }
@@ -68,15 +74,20 @@ auto ParseListTarget(std::string_view target) -> std::vector<Endpoint> {
   }
 
   if (endpoints.empty()) {
-    throw ConfigException("list target requires at least one endpoint");
+    return StatusOr<std::vector<Endpoint>>(
+        Status{StatusCode::InvalidArgument, "list target requires at least one endpoint"});
   }
-  return CanonicalizeEndpoints(std::move(endpoints));
+  return StatusOr<std::vector<Endpoint>>(CanonicalizeEndpoints(std::move(endpoints)));
 }
 
 }  // namespace
 
-StaticDiscovery::StaticDiscovery(std::string_view target)
-    : snapshot_(std::make_shared<const DiscoverySnapshot>(ParseListTarget(target))) {}
+StaticDiscovery::StaticDiscovery(DiscoverySnapshot endpoints)
+    : snapshot_(std::make_shared<const DiscoverySnapshot>(std::move(endpoints))) {}
+
+auto StaticDiscovery::ParseTarget(std::string_view target) -> StatusOr<DiscoverySnapshot> {
+  return ParseListTarget(target);
+}
 
 auto StaticDiscovery::Start() -> Status { return Status::Ok(); }
 

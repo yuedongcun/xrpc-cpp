@@ -22,11 +22,19 @@ xRPC 将连接管理、网络 I/O 与 RPC 执行分离：客户端通过服务�
 
 ## 快速开始
 
-需要支持 `io_uring` 的 Linux、C++20 编译器、CMake 3.20+ 和 GNU Make；依赖源码已固定在 `third_party/`。
+需要支持 `io_uring` 的 Linux、C++20 编译器、CMake 3.22+ 和 GNU Make；依赖源码已固定在 `third_party/`。
 
 ```bash
 make
 ```
+
+安装到指定目录（同时构建并安装所需三方依赖）：
+
+```bash
+make install INSTALL_PREFIX="$HOME/.local"
+```
+
+下游工程设置 `CMAKE_PREFIX_PATH` 指向该安装目录，即可通过 `find_package(xrpc CONFIG REQUIRED)` 和 `xrpc::xrpc` 使用，无需单独安装三方库。
 
 启动服务端：
 
@@ -81,11 +89,11 @@ if (!response.ok()) return 1;
 
 ![xRPC 服务端负载曲线](docs/assets/server-performance.svg)
 
-- **低延迟**：96 个并发请求，QPS 中位数为 173,328，p99 中位数为 0.95 ms。
-- **零失败容量**：8,192 个并发请求，QPS 中位数为 606,053，p99 中位数为 26.16 ms。
-- **过载边界**：12,288 个并发请求超过服务端 10,000 个 RPC 的全局 Worker 准入上限，触发 `ResourceExhausted` 背压响应，三轮共出现 32,902 次失败。该点不作为有效容量成绩。
+- **低延迟**：96 个并发请求，QPS 中位数为 181,768，p99 中位数为 0.88 ms。
+- **零失败容量**：8,192 个并发请求，QPS 中位数为 652,368，p99 中位数为 26.02 ms。
+- **过载边界**：12,288 个并发请求超过服务端 10,000 个 RPC 的全局 Worker 准入上限，触发 `ResourceExhausted` 背压响应，三轮共出现 709 次失败。该点不作为有效容量成绩。
 
-连接规模测试让每条 TCP 连接保持一个在途 RPC，并将活跃连接数从 12 增加到 3,072；所有工作点均为零失败。3,072 条连接时，QPS 中位数为 52,852，p99 中位数为 109.25 ms。
+连接规模测试让每条 TCP 连接保持一个在途 RPC，并将活跃连接数从 12 增加到 3,072；所有工作点均为零失败。3,072 条连接时，QPS 中位数为 48,774，p99 中位数为 113.02 ms。
 
 ![xRPC 活跃连接规模](docs/assets/connection-scale.svg)
 

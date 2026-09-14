@@ -22,7 +22,9 @@
 #include "server/rpc_server_impl.h"
 
 #include <cassert>
+#include <chrono>
 #include <exception>
+#include <future>
 #include <memory>
 #include <string_view>
 #include <utility>
@@ -33,21 +35,46 @@
 
 namespace xrpc {
 
-RpcServer::Impl::Impl(const RpcServerOptions &options)
-    : config_(NormalizeServerOptions(options)), worker_pool_(config_.worker_threads_, config_.max_pending_jobs_) {
-  connection_io_loops_.reserve(config_.io_threads_);
-  for (std::size_t index = 0; index < config_.io_threads_; ++index) {
+RpcServer::Impl::Impl(ServerConfig config) : config_(std::move(config)), worker_pool_(config_.worker_pool_) {
+  connection_io_loops_.reserve(config_.connection_io_.threads_);
+  for (std::size_t index = 0; index < config_.connection_io_.threads_; ++index) {
     connection_io_loops_.push_back(std::make_unique<ConnectionIoLoop>(
-        registry_, worker_pool_, config_.connection_limits_, config_.protocol_limits_));
+        registry_, worker_pool_, config_.connection_io_.connection_, config_.connection_io_.buffer_pool_));
   }
 }
 
 RpcServer::Impl::~Impl() { Stop(); }
 
-void RpcServer::Impl::RegisterMethod(MethodRegistration registration) {
+auto RpcServer::Impl::SnapshotStats(bool start_window) -> StatusOr<ServerStatsSnapshot> {
+  // Serialize the request with startup and shutdown; posted copies take no lifecycle lock.
+  std::lock_guard lock(lifecycle_mutex_);
+  if (state_ != State::Running) {
+    return StatusOr<ServerStatsSnapshot>(Status{StatusCode::FailedPrecondition, "statistics require a running server"});
+  }
+  try {
+    std::vector<std::future<ConnectionLoopStatsSnapshot>> futures;
+    for (auto &loop : connection_io_loops_) {
+      futures.push_back(loop->RequestStats(start_window));
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    ServerStatsSnapshot snapshot;
+    snapshot.worker_pool_ = worker_pool_.SnapshotStats(start_window);
+    for (auto &future : futures) {
+      if (future.wait_until(deadline) != std::future_status::ready) {
+        return StatusOr<ServerStatsSnapshot>(Status{StatusCode::DeadlineExceeded, "I/O statistics snapshot timed out"});
+      }
+      snapshot.loops_.push_back(future.get());
+    }
+    return StatusOr<ServerStatsSnapshot>(std::move(snapshot));
+  } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: internal statistics API
+    return StatusOr<ServerStatsSnapshot>(CaughtExceptionToStatus("failed to snapshot I/O statistics"));
+  }
+}
+
+auto RpcServer::Impl::RegisterMethod(MethodRegistration registration) -> Status {
   std::lock_guard lock(lifecycle_mutex_);
   if (state_ != State::Created && state_ != State::Listening) {
-    throw LifecycleException("RpcServer::RegisterMethod must be called before Run");
+    return {StatusCode::FailedPrecondition, "RpcServer::RegisterMethod must be called before Run"};
   }
 
   auto invoke = std::move(registration.invoke_);
@@ -63,41 +90,64 @@ void RpcServer::Impl::RegisterMethod(MethodRegistration registration) {
     return response;
   };
 
-  registry_.Register(registration.service_name_, registration.method_name_, std::move(handler));
+  return registry_.Register(registration.service_name_, registration.method_name_, std::move(handler));
 }
 
-void RpcServer::Impl::Listen(std::string_view host, std::uint16_t port) {
+auto RpcServer::Impl::Listen(std::string_view host, std::uint16_t port) -> Status {
   std::lock_guard lock(lifecycle_mutex_);
   if (state_ != State::Created) {
-    throw LifecycleException("RpcServer::Listen requires a newly created server");
+    return {StatusCode::FailedPrecondition, "RpcServer::Listen requires a newly created server"};
   }
 
-  try {
-    listen_socket_.Bind(host, port);
-    listen_socket_.Listen(config_.backlog_);
-    listen_host_ = host;
-    port_ = listen_socket_.LocalPort();
-  } catch (...) {
-    ShutdownComponentsBestEffort();
+  io::Socket socket;
+  Status status = socket.Bind(host, port);
+  if (!status.ok()) {
     state_ = State::Stopped;
-    throw;
+    return status;
+  }
+  status = socket.Listen(config_.listen_.backlog_);
+  if (!status.ok()) {
+    state_ = State::Stopped;
+    return status;
+  }
+  StatusOr<std::uint16_t> local_port = socket.LocalPort();
+  if (!local_port.ok()) {
+    state_ = State::Stopped;
+    return local_port.status();
   }
 
+  std::string listen_host(host);
+  listen_socket_ = std::move(socket);
+  listen_host_ = std::move(listen_host);
+  port_ = std::move(local_port).value();
   state_ = State::Listening;
+  return Status::Ok();
 }
 
-void RpcServer::Impl::Run() {
+auto RpcServer::Impl::Run() -> Status {
   {
     std::lock_guard lock(lifecycle_mutex_);
     if (state_ != State::Listening) {
-      throw LifecycleException("RpcServer::Run must be called once after Listen");
+      return {StatusCode::FailedPrecondition, "RpcServer::Run must be called once after Listen"};
     }
 
     try {
       std::optional<ConsulRegistrar::Options> registration_options;
       if (ServiceRegistrationEnabled(config_)) {
-        registration_options.emplace(ResolveRegistrarOptions(config_, listen_host_, port_));
-        registrar_ = std::make_unique<ConsulRegistrar>(config_.consul_.agent_address_);
+        StatusOr<ConsulRegistrar::Options> resolved = ResolveRegistrarOptions(config_, listen_host_, port_);
+        if (!resolved.ok()) {
+          ShutdownComponentsBestEffort();
+          state_ = State::Stopped;
+          return resolved.status();
+        }
+        registration_options.emplace(std::move(resolved).value());
+        StatusOr<ConsulHttpClient> http_client = ConsulHttpClient::Create(config_.consul_.agent_address_);
+        if (!http_client.ok()) {
+          ShutdownComponentsBestEffort();
+          state_ = State::Stopped;
+          return http_client.status();
+        }
+        registrar_ = std::make_unique<ConsulRegistrar>(std::move(http_client).value());
       }
 
       StartConnectionLoops();
@@ -106,36 +156,33 @@ void RpcServer::Impl::Run() {
       if (registration_options.has_value()) {
         const Status status = registrar_->Register(*registration_options);
         if (!status.ok()) {
-          throw TransportException(status.code(), "Consul service registration failed: " + status.message());
+          ShutdownComponentsBestEffort();
+          state_ = State::Stopped;
+          return {status.code(), "Consul service registration failed: " + status.message()};
         }
       }
-    } catch (...) {
+    } catch (const std::exception &) {  // XRPC_EXCEPTION_GUARD: translate startup failure after rollback
       ShutdownComponentsBestEffort();
       state_ = State::Stopped;
-      throw;
+      return CaughtExceptionToStatus("server startup failed");
     }
     state_ = State::Running;
   }
 
-  std::exception_ptr failure;
+  Status failure = Status::Ok();
   try {
     accept_context_.Run();
     accept_task_->Wait();
     accept_task_->Result();
-  } catch (...) {
-    failure = std::current_exception();
+  } catch (const std::exception &) {  // XRPC_EXCEPTION_GUARD: preserve runtime failure through shutdown
+    failure = CaughtExceptionToStatus("server runtime failed");
   }
 
-  try {
-    CompleteShutdown();
-  } catch (...) {
-    if (!failure) {
-      failure = std::current_exception();
-    }
+  Status shutdown_status = CompleteShutdown();
+  if (failure.ok() && !shutdown_status.ok()) {
+    failure = std::move(shutdown_status);
   }
-  if (failure) {
-    std::rethrow_exception(failure);
-  }
+  return failure;
 }
 
 void RpcServer::Impl::Stop() {
@@ -171,19 +218,38 @@ void RpcServer::Impl::StartAcceptLoop() {
 
 auto RpcServer::Impl::AcceptLoop() -> runtime::Task<void> {
   try {
-    while (!accept_stopped_) {
-      const io::IoResult accept_result = co_await accept_context_.Accept(listen_socket_.fd());
+    auto accept = accept_context_.AcceptMultishot(listen_socket_.fd());
+    std::exception_ptr dispatch_error;
+    // Stop closes admission immediately, but successful CQEs may already be
+    // queued. Keep awaiting until the original request's final CQE arrives.
+    bool has_more = false;
+    while (!accept_stopped_ || has_more) {
+      const io::IoResult accept_result = co_await accept;
+      has_more = accept_result.has_more_;
       if (accept_result.result_ < 0) {
         if (!accept_stopped_) {
           StopAcceptingOnContext();
         }
-        break;
+      } else {
+        io::Socket client_socket(accept_result.result_);
+        if (!accept_stopped_) {
+          try {
+            DispatchAcceptedConnection(std::move(client_socket));
+          } catch (...) {  // XRPC_EXCEPTION_GUARD: drain accept before propagating dispatch failure
+            dispatch_error = std::current_exception();
+            StopAcceptingOnContext();
+          }
+        }
+        // A late successful accept after stop is closed by Socket's destructor.
       }
-
-      io::Socket client_socket(accept_result.result_);
-      DispatchAcceptedConnection(std::move(client_socket));
+      if (!has_more && !accept_stopped_) {
+        accept = accept_context_.AcceptMultishot(listen_socket_.fd());
+      }
     }
-  } catch (...) {
+    if (dispatch_error) {
+      std::rethrow_exception(dispatch_error);
+    }
+  } catch (const std::exception &) {  // XRPC_EXCEPTION_GUARD: stop context before coroutine propagation
     accept_context_.RequestStop();
     throw;
   }
@@ -232,26 +298,24 @@ void RpcServer::Impl::BeginConnectionDrain() {
   }
 }
 
-void RpcServer::Impl::FinishConnectionDrain() {
-  std::exception_ptr failure;
-  auto attempt = [&failure](auto &&action) -> void {
-    try {
-      action();
-    } catch (...) {
-      if (!failure) {
-        failure = std::current_exception();
-      }
-    }
-  };
+auto RpcServer::Impl::FinishConnectionDrain() -> Status {
+  Status failure = Status::Ok();
 
   for (auto &loop : connection_io_loops_) {
-    attempt([&loop]() -> void { loop->FinishDrain(); });
+    Status status = loop->FinishDrain();
+    if (failure.ok() && !status.ok()) {
+      failure = std::move(status);
+    }
   }
-  attempt([this]() -> void { accept_context_.RequestStop(); });
 
-  if (failure) {
-    std::rethrow_exception(failure);
+  try {
+    accept_context_.RequestStop();
+  } catch (const std::exception &) {  // XRPC_EXCEPTION_GUARD: convert runtime shutdown failure
+    if (failure.ok()) {
+      failure = CaughtExceptionToStatus("failed to stop accept I/O context");
+    }
   }
+  return failure;
 }
 
 auto RpcServer::Impl::TryDeregisterService() noexcept -> Status {
@@ -261,7 +325,7 @@ auto RpcServer::Impl::TryDeregisterService() noexcept -> Status {
 
   try {
     return registrar_->Deregister();
-  } catch (...) {
+  } catch (const std::exception &) {  // XRPC_EXCEPTION_GUARD: noexcept status adapter
     return CaughtExceptionToStatus("Consul service deregistration failed");
   }
 }
@@ -269,30 +333,23 @@ auto RpcServer::Impl::TryDeregisterService() noexcept -> Status {
 /**
  * @brief Completes server shutdown and publishes the terminal lifecycle state.
  *
- * Shutdown failures are preserved, but the lifecycle is always transitioned
- * to `Stopped` before the failure is rethrown.
+ * Shutdown failures are preserved as a status, but the lifecycle is always
+ * transitioned to `Stopped` before the status is returned.
  */
-void RpcServer::Impl::CompleteShutdown() {
+auto RpcServer::Impl::CompleteShutdown() -> Status {
   {
     std::lock_guard lock(lifecycle_mutex_);
     assert(state_ == State::Running || state_ == State::Stopping);
     state_ = State::Stopping;
   }
 
-  std::exception_ptr failure;
-  try {
-    ShutdownComponents();
-  } catch (...) {
-    failure = std::current_exception();
-  }
+  Status status = ShutdownComponents();
 
   {
     std::lock_guard lock(lifecycle_mutex_);
     state_ = State::Stopped;
   }
-  if (failure) {
-    std::rethrow_exception(failure);
-  }
+  return status;
 }
 
 /**
@@ -302,17 +359,17 @@ void RpcServer::Impl::CompleteShutdown() {
  * draining while already admitted worker jobs are allowed to finish, after
  * which connection I/O loops complete their drain and stop.
  *
- * Cleanup continues after individual failures and rethrows the first failure
+ * Cleanup continues after individual failures and returns the first failure
  * after all shutdown steps have been attempted.
  */
-void RpcServer::Impl::ShutdownComponents() {
-  std::exception_ptr failure;
+auto RpcServer::Impl::ShutdownComponents() -> Status {
+  Status failure = Status::Ok();
   auto attempt = [&failure](auto &&action) -> void {
     try {
       action();
-    } catch (...) {
-      if (!failure) {
-        failure = std::current_exception();
+    } catch (const std::exception &) {  // XRPC_EXCEPTION_GUARD: convert failure and continue shutdown
+      if (failure.ok()) {
+        failure = CaughtExceptionToStatus("server component shutdown failed");
       }
     }
   };
@@ -325,17 +382,17 @@ void RpcServer::Impl::ShutdownComponents() {
   attempt([this]() -> void { BeginConnectionDrain(); });
 
   attempt([this]() -> void { worker_pool_.DrainAndJoin(); });
-  attempt([this]() -> void { FinishConnectionDrain(); });
-
-  if (failure) {
-    std::rethrow_exception(failure);
+  Status drain_status = FinishConnectionDrain();
+  if (failure.ok() && !drain_status.ok()) {
+    failure = std::move(drain_status);
   }
+  return failure;
 }
 
 void RpcServer::Impl::ShutdownComponentsBestEffort() noexcept {
   try {
-    ShutdownComponents();
-  } catch (...) {
+    (void)ShutdownComponents();
+  } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: noexcept destruction fallback
     const std::exception_ptr ignored = std::current_exception();
     (void)ignored;
   }

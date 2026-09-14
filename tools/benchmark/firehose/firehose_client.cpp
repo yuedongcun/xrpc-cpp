@@ -1,4 +1,5 @@
 #include <protocol/xrpc/frame_metadata.pb.h>
+#include <cstdlib>
 
 #include <algorithm>
 #include <array>
@@ -30,6 +31,7 @@
 #include <unistd.h>
 
 #include "benchmark_stats.h"
+#include "common/log.h"
 #include "proto/echo.pb.h"
 #include "protocol/frame_header.h"
 
@@ -467,7 +469,7 @@ class EpollFirehoseConnection final {
       std::optional<DecodedFirehoseResponse> decoded;
       try {
         decoded = TryDecodeResponse(readable, expected_response_payload_);
-      } catch (...) {
+      } catch (const std::exception &) {
         FailOutstanding();
         return;
       }
@@ -618,7 +620,7 @@ class EpollFirehoseWorker final {
       try {
         start_latch.wait();
         Run(deadline);
-      } catch (...) {
+      } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: thread entry
         exception_ = std::current_exception();
       }
     });
@@ -668,6 +670,12 @@ class EpollFirehoseWorker final {
   void AppendStats(BenchmarkStats &stats, std::vector<std::chrono::nanoseconds> &latencies) const {
     for (const auto &connection : connections_) {
       connection->AppendStats(stats, latencies);
+    }
+  }
+
+  void AppendConnectionSuccesses(std::vector<std::size_t> &successes) const {
+    for (const auto &connection : connections_) {
+      successes.push_back(connection->Success());
     }
   }
 
@@ -895,7 +903,7 @@ auto RunEpollFirehoseBenchmark(const FirehoseConfig &config) -> BenchmarkStats {
     for (auto &worker : workers) {
       worker->Join();
     }
-  } catch (...) {
+  } catch (const std::exception &) {
     start_latch.count_down();
     for (auto &worker : workers) {
       worker->Join();
@@ -917,7 +925,20 @@ auto RunEpollFirehoseBenchmark(const FirehoseConfig &config) -> BenchmarkStats {
     progress_thread.join();
   }
 
-  return FinalizeFirehoseStats(workers, std::chrono::duration_cast<std::chrono::nanoseconds>(wall_end - wall_start));
+  BenchmarkStats stats =
+      FinalizeFirehoseStats(workers, std::chrono::duration_cast<std::chrono::nanoseconds>(wall_end - wall_start));
+  std::vector<std::size_t> connection_successes;
+  connection_successes.reserve(config.firehose_connections_);
+  for (const auto &worker : workers) {
+    worker->AppendConnectionSuccesses(connection_successes);
+  }
+  assert(connection_successes.size() == config.firehose_connections_);
+  stats.has_connection_progress_ = true;
+  stats.min_connection_success_ = *std::ranges::min_element(connection_successes);
+  stats.max_connection_success_ = *std::ranges::max_element(connection_successes);
+  stats.zero_success_connections_ =
+      static_cast<std::size_t>(std::ranges::count(connection_successes, static_cast<std::size_t>(0)));
+  return stats;
 }
 
 }  // namespace
@@ -927,6 +948,7 @@ auto RunFirehoseBenchmark(const FirehoseConfig &config) -> BenchmarkStats { retu
 }  // namespace xrpc::benchmark
 
 auto main(int argc, char **argv) -> int {
+  xrpc::LoggingRuntime logging(argv[0]);
   try {
     const xrpc::benchmark::FirehoseConfig config = xrpc::benchmark::ParseConfig(argc, argv);
     std::printf(

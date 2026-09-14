@@ -7,6 +7,8 @@
 
 #include <cstddef>
 
+#include <xrpc/status.h>
+
 /**
  * @brief Limits resource usage for a single server connection.
  *
@@ -20,5 +22,8 @@ struct ConnectionBackpressureLimits {
 
   std::size_t max_write_queue_bytes_;
 };
+
+[[nodiscard]] auto MakeConnectionBackpressureLimits(std::size_t max_inflight, std::size_t max_write_queue_bytes)
+    -> StatusOr<ConnectionBackpressureLimits>;
 
 }  // namespace xrpc

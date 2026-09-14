@@ -35,7 +35,7 @@ struct ConsulHttpResponse {
  */
 class ConsulHttpClient final {
  public:
-  explicit ConsulHttpClient(const std::string &address);
+  [[nodiscard]] static auto Create(std::string_view address) -> StatusOr<ConsulHttpClient>;
 
   [[nodiscard]] auto Get(std::string_view path, std::chrono::milliseconds timeout) const
       -> StatusOr<ConsulHttpResponse>;
@@ -44,6 +44,8 @@ class ConsulHttpClient final {
       -> StatusOr<ConsulHttpResponse>;
 
  private:
+  ConsulHttpClient(std::string host, std::uint16_t port);
+
   /** Sends one request and maps transport or HTTP parsing failures to `Status`. */
   [[nodiscard]] auto SendRequest(std::string_view method, std::string_view path, std::string_view body,
                                  std::chrono::milliseconds timeout) const -> StatusOr<ConsulHttpResponse>;

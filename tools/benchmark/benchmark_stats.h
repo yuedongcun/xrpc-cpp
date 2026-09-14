@@ -18,6 +18,10 @@ struct BenchmarkStats {
   std::chrono::nanoseconds p95_latency_{0};
   std::chrono::nanoseconds p99_latency_{0};
   double qps_ = 0.0;
+  bool has_connection_progress_ = false;
+  std::size_t min_connection_success_ = 0;
+  std::size_t max_connection_success_ = 0;
+  std::size_t zero_success_connections_ = 0;
 };
 
 // Not thread-safe by itself; benchmark workers should aggregate through their

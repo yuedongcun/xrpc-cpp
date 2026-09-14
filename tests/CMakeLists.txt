@@ -17,11 +17,22 @@ set(XRPC_TEST_UNIT_TIMEOUT 5)
 set(XRPC_TEST_INTEGRATION_TIMEOUT 15)
 set(XRPC_TEST_EXTERNAL_TIMEOUT 60)
 
+add_test(
+    NAME package_consumer_test
+    COMMAND ${CMAKE_COMMAND}
+        "-DXRPC_BUILD_DIR=${CMAKE_BINARY_DIR}"
+        "-DXRPC_CONSUMER_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/package_consumer"
+        "-DXRPC_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+        "-DXRPC_BUILD_CONFIG=$<CONFIG>"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/VerifyInstallation.cmake"
+)
+set_tests_properties(package_consumer_test PROPERTIES TIMEOUT 60)
+
 function(xrpc_add_test test_name test_source)
     set(one_value_args TIMEOUT)
     cmake_parse_arguments(XRPC_TEST "" "${one_value_args}" "" ${ARGN})
 
-    add_executable(${test_name} ${test_source})
+    add_executable(${test_name} ${test_source} main.cpp)
     set_target_properties(
         ${test_name}
         PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${XRPC_TEST_RUNTIME_DIR}"
@@ -38,7 +49,8 @@ function(xrpc_add_test test_name test_source)
         PRIVATE
             xrpc::xrpc
             xrpc_test_proto
-            GTest::gmock_main
+            GTest::gmock
+            glog::glog
             Threads::Threads
     )
     add_test(NAME ${test_name} COMMAND ${test_name})
@@ -48,9 +60,11 @@ function(xrpc_add_test test_name test_source)
 endfunction()
 
 xrpc_add_test(common_task_test common/task_test.cpp TIMEOUT ${XRPC_TEST_UNIT_TIMEOUT})
+xrpc_add_test(common_log_test common/log_test.cpp TIMEOUT ${XRPC_TEST_UNIT_TIMEOUT})
 xrpc_add_test(io_uring_awaitable_test io/uring_awaitable_test.cpp TIMEOUT ${XRPC_TEST_INTEGRATION_TIMEOUT})
 xrpc_add_test(protocol_test protocol/protocol_test.cpp TIMEOUT ${XRPC_TEST_UNIT_TIMEOUT})
 xrpc_add_test(server_connection_io_uring_test server/server_connection_io_uring_test.cpp TIMEOUT ${XRPC_TEST_INTEGRATION_TIMEOUT})
+xrpc_add_test(worker_pool_stats_test server/worker_pool_stats_test.cpp TIMEOUT ${XRPC_TEST_UNIT_TIMEOUT})
 xrpc_add_test(rpc_frame_stream_test server/rpc_frame_stream_test.cpp TIMEOUT ${XRPC_TEST_UNIT_TIMEOUT})
 xrpc_add_test(rpc_server_lifecycle_test server/rpc_server_lifecycle_test.cpp TIMEOUT ${XRPC_TEST_INTEGRATION_TIMEOUT})
 xrpc_add_test(rpc_client_endpoint_test client/rpc_client_endpoint_test.cpp TIMEOUT ${XRPC_TEST_INTEGRATION_TIMEOUT})

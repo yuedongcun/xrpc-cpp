@@ -15,7 +15,7 @@
 
 #include "common/task.h"
 #include "io/socket.h"
-#include "io/uring_context.h"
+#include "io/uring/context.h"
 #include "server/connection_io_loop.h"
 #include "server/server_config.h"
 #include "server/service_registry.h"
@@ -27,15 +27,17 @@ class ConsulRegistrar;
 
 class RpcServer::Impl final {
  public:
-  explicit Impl(const RpcServerOptions &options);
+  explicit Impl(ServerConfig config);
   ~Impl();
 
-  void RegisterMethod(MethodRegistration registration);
-  void Listen(std::string_view host, std::uint16_t port);
-  void Run();
+  [[nodiscard]] auto RegisterMethod(MethodRegistration registration) -> Status;
+  [[nodiscard]] auto Listen(std::string_view host, std::uint16_t port) -> Status;
+  [[nodiscard]] auto Run() -> Status;
   void Stop();
 
   [[nodiscard]] auto port() const -> std::uint16_t;
+
+  [[nodiscard]] auto SnapshotStats(bool start_window = false) -> StatusOr<ServerStatsSnapshot>;
 
  private:
   enum class State : std::uint8_t {
@@ -60,12 +62,12 @@ class RpcServer::Impl final {
 
   void StartConnectionLoops();
   void BeginConnectionDrain();
-  void FinishConnectionDrain();
+  [[nodiscard]] auto FinishConnectionDrain() -> Status;
 
   [[nodiscard]] auto TryDeregisterService() noexcept -> Status;
 
-  void CompleteShutdown();
-  void ShutdownComponents();
+  [[nodiscard]] auto CompleteShutdown() -> Status;
+  [[nodiscard]] auto ShutdownComponents() -> Status;
   void ShutdownComponentsBestEffort() noexcept;
 
   ServerConfig config_;

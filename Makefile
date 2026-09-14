@@ -2,9 +2,10 @@ BUILD_DIR ?= build
 RELEASE_BUILD_DIR ?= build-release
 CMAKE_ARGS ?=
 CLANG_FORMAT ?= clang-format-20
+INSTALL_PREFIX ?= /usr/local
 
 .DEFAULT_GOAL := all
-.PHONY: all configure release test format check-format check-tidy clangd-db dev clean
+.PHONY: all configure release install test format check-format check-tidy check-exceptions clangd-db dev clean
 
 FORMAT_FILES = $(shell find include src -type f \( \
 	-name '*.h' -o -name '*.hh' -o -name '*.hpp' -o \
@@ -22,6 +23,9 @@ configure:
 
 all: configure
 	cmake --build $(BUILD_DIR) --parallel
+
+install: all
+	cmake --install $(BUILD_DIR) --prefix "$(INSTALL_PREFIX)"
 
 release:
 	cmake -S . -B $(RELEASE_BUILD_DIR) \
@@ -51,6 +55,9 @@ check-format:
 		exit 1; \
 	}
 	@$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_FILES)
+
+check-exceptions:
+	@python3 tools/check_exception_boundaries.py
 
 check-tidy:
 	@command -v run-clang-tidy >/dev/null 2>&1 || { \

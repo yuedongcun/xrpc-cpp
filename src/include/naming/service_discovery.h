@@ -49,6 +49,6 @@ class ServiceDiscovery {
 
 /** Creates discovery for a `list://host:port,...` or `consul://service` target. */
 [[nodiscard]] auto MakeServiceDiscovery(std::string_view target, const std::string &consul_address)
-    -> std::unique_ptr<ServiceDiscovery>;
+    -> StatusOr<std::unique_ptr<ServiceDiscovery>>;
 
 }  // namespace xrpc

@@ -14,9 +14,6 @@
 #include <cstdint>
 #include <limits>
 #include <string>
-#include <thread>
-
-#include "common/xrpc_exception.h"
 
 namespace xrpc {
 
@@ -24,68 +21,75 @@ namespace {
 
 auto IsWildcardAddress(std::string_view host) -> bool { return host == "0.0.0.0" || host == "::"; }
 
-auto ResolveWorkerThreads(std::size_t worker_threads) -> std::size_t {
-  if (worker_threads > 0) {
-    return worker_threads;
+auto MakeListenConfig(std::size_t backlog) -> StatusOr<ListenConfig> {
+  if (backlog == 0) {
+    return StatusOr<ListenConfig>(
+        Status{StatusCode::InvalidArgument, "RpcServer listen_backlog must be greater than 0"});
   }
+  if (backlog > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    return StatusOr<ListenConfig>(
+        Status{StatusCode::InvalidArgument, "RpcServer listen_backlog exceeds the socket API range"});
+  }
+  return StatusOr<ListenConfig>(ListenConfig{.backlog_ = static_cast<int>(backlog)});
+}
 
-  const auto hardware_threads = std::thread::hardware_concurrency();
-  return hardware_threads == 0 ? 1U : static_cast<std::size_t>(hardware_threads);
+auto MakeConsulRegistrationConfig(const RpcServerOptions &options) -> StatusOr<ConsulRegistrationConfig> {
+  if (options.service_name_.empty()) {
+    if (!options.service_id_.empty()) {
+      return StatusOr<ConsulRegistrationConfig>(
+          Status{StatusCode::InvalidArgument, "RpcServer service_id requires service_name"});
+    }
+    if (!options.service_address_.empty()) {
+      return StatusOr<ConsulRegistrationConfig>(
+          Status{StatusCode::InvalidArgument, "RpcServer service_address requires service_name"});
+    }
+  } else if (options.consul_address_.empty()) {
+    return StatusOr<ConsulRegistrationConfig>(
+        Status{StatusCode::InvalidArgument,
+               "RpcServer consul_address must not be empty when service registration is enabled"});
+  }
+  return StatusOr<ConsulRegistrationConfig>(ConsulRegistrationConfig{
+      .service_name_ = options.service_name_,
+      .service_id_ = options.service_id_,
+      .service_address_ = options.service_address_,
+      .agent_address_ = options.consul_address_,
+  });
 }
 
 }  // namespace
 
-/**
- * @brief Validates public server options and builds the normalized runtime configuration.
- */
-auto NormalizeServerOptions(const RpcServerOptions &options) -> ServerConfig {
-  if (options.listen_backlog_ == 0) {
-    throw ConfigException("RpcServer listen_backlog must be greater than 0");
+auto ServerConfig::Create(const RpcServerOptions &options, io::UringBufferPoolConfig buffer_pool)
+    -> StatusOr<ServerConfig> {
+  const auto pool_status = buffer_pool.Validate();
+  if (!pool_status.ok()) {
+    return StatusOr<ServerConfig>(pool_status);
   }
-  if (options.listen_backlog_ > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-    throw ConfigException("RpcServer listen_backlog exceeds the socket API range");
+  StatusOr<WorkerPoolConfig> worker_pool =
+      MakeWorkerPoolConfig(options.worker_threads_, options.max_pending_jobs_global_);
+  if (!worker_pool.ok()) {
+    return StatusOr<ServerConfig>(worker_pool.status());
   }
-  if (options.connection_io_threads_ == 0) {
-    throw ConfigException("RpcServer connection_io_threads must be greater than 0");
+  StatusOr<ListenConfig> listen = MakeListenConfig(options.listen_backlog_);
+  if (!listen.ok()) {
+    return StatusOr<ServerConfig>(listen.status());
   }
-  if (options.max_inflight_per_connection_ == 0) {
-    throw ConfigException("RpcServer max_inflight_per_connection must be greater than 0");
+  StatusOr<ConnectionIoConfig> connection_io =
+      MakeConnectionIoConfig(options.connection_io_threads_, options.max_inflight_per_connection_,
+                             options.max_write_queue_bytes_per_connection_, options.max_payload_size_);
+  if (!connection_io.ok()) {
+    return StatusOr<ServerConfig>(connection_io.status());
   }
-  if (options.max_write_queue_bytes_per_connection_ == 0) {
-    throw ConfigException("RpcServer max_write_queue_bytes_per_connection must be greater than 0");
+  connection_io.value().buffer_pool_ = buffer_pool;
+  StatusOr<ConsulRegistrationConfig> consul = MakeConsulRegistrationConfig(options);
+  if (!consul.ok()) {
+    return StatusOr<ServerConfig>(consul.status());
   }
-  if (options.max_pending_jobs_global_ == 0) {
-    throw ConfigException("RpcServer max_pending_jobs_global must be greater than 0");
-  }
-  if (options.service_name_.empty()) {
-    if (!options.service_id_.empty()) {
-      throw ConfigException("RpcServer service_id requires service_name");
-    }
-    if (!options.service_address_.empty()) {
-      throw ConfigException("RpcServer service_address requires service_name");
-    }
-  } else if (options.consul_address_.empty()) {
-    throw ConfigException("RpcServer consul_address must not be empty when service registration is enabled");
-  }
-  return ServerConfig{
-      .worker_threads_ = ResolveWorkerThreads(options.worker_threads_),
-      .max_pending_jobs_ = options.max_pending_jobs_global_,
-      .backlog_ = static_cast<int>(options.listen_backlog_),
-      .io_threads_ = options.connection_io_threads_,
-      .connection_limits_ =
-          ConnectionBackpressureLimits{
-              .max_inflight_ = options.max_inflight_per_connection_,
-              .max_write_queue_bytes_ = options.max_write_queue_bytes_per_connection_,
-          },
-      .protocol_limits_ = MakeProtocolLimits(options.max_payload_size_),
-      .consul_ =
-          ConsulRegistrationConfig{
-              .service_name_ = options.service_name_,
-              .service_id_ = options.service_id_,
-              .service_address_ = options.service_address_,
-              .agent_address_ = options.consul_address_,
-          },
-  };
+  return StatusOr<ServerConfig>(ServerConfig{
+      .worker_pool_ = std::move(worker_pool).value(),
+      .listen_ = std::move(listen).value(),
+      .connection_io_ = std::move(connection_io).value(),
+      .consul_ = std::move(consul).value(),
+  });
 }
 
 auto ServiceRegistrationEnabled(const ServerConfig &config) -> bool { return !config.consul_.service_name_.empty(); }
@@ -98,15 +102,17 @@ auto ServiceRegistrationEnabled(const ServerConfig &config) -> bool { return !co
  * service address. The registered port is always the actual listening port.
  */
 auto ResolveRegistrarOptions(const ServerConfig &config, std::string_view host, std::uint16_t listen_port)
-    -> ConsulRegistrar::Options {
+    -> StatusOr<ConsulRegistrar::Options> {
   if (!ServiceRegistrationEnabled(config)) {
-    throw LifecycleException("service registration is not enabled");
+    return StatusOr<ConsulRegistrar::Options>(
+        Status{StatusCode::FailedPrecondition, "service registration is not enabled"});
   }
 
   std::string service_address = config.consul_.service_address_;
   if (service_address.empty()) {
     if (host.empty() || IsWildcardAddress(host)) {
-      throw ConfigException("service_address is required when listen host is wildcard");
+      return StatusOr<ConsulRegistrar::Options>(
+          Status{StatusCode::InvalidArgument, "service_address is required when listen host is wildcard"});
     }
     service_address = std::string(host);
   }
@@ -118,12 +124,12 @@ auto ResolveRegistrarOptions(const ServerConfig &config, std::string_view host, 
                  std::to_string(static_cast<std::int64_t>(::getpid()));
   }
 
-  return ConsulRegistrar::Options{
+  return StatusOr<ConsulRegistrar::Options>(ConsulRegistrar::Options{
       .service_name_ = config.consul_.service_name_,
       .service_id_ = std::move(service_id),
       .service_address_ = std::move(service_address),
       .service_port_ = listen_port,
-  };
+  });
 }
 
 }  // namespace xrpc

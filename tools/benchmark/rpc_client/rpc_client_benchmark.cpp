@@ -2,6 +2,7 @@
 #include <charconv>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <latch>
 #include <memory>
@@ -15,6 +16,7 @@
 #include <xrpc/rpc_client.h>
 
 #include "benchmark_stats.h"
+#include "common/log.h"
 #include "proto/echo.pb.h"
 
 namespace xrpc::benchmark {
@@ -167,7 +169,7 @@ auto RunRpcClientBenchmark(const ClientConfig &config) -> BenchmarkStats {
     worker.thread_ = std::jthread([&client, &message, &start_latch, &ready_latch, &deadline, worker_ptr]() {
       try {
         RunWorker(*client, message, start_latch, ready_latch, deadline, worker_ptr->recorder_);
-      } catch (...) {
+      } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: thread entry
         worker_ptr->exception_ = std::current_exception();
       }
     });
@@ -197,6 +199,7 @@ auto RunRpcClientBenchmark(const ClientConfig &config) -> BenchmarkStats {
 }  // namespace xrpc::benchmark
 
 auto main(int argc, char **argv) -> int {
+  xrpc::LoggingRuntime logging(argv[0]);
   try {
     const xrpc::benchmark::ClientConfig config = xrpc::benchmark::ParseConfig(argc, argv);
     std::printf("client=rpc_client host=%s port=%u duration_s=%llu payload_size=%zu threads=%zu\n",

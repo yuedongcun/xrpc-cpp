@@ -40,13 +40,15 @@ namespace xrpc {
  */
 class RpcClient::Impl final {
  public:
-  explicit Impl(const RpcClientOptions &options);
+  [[nodiscard]] static auto Create(const RpcClientOptions &options) -> StatusOr<std::unique_ptr<Impl>>;
   ~Impl();
 
   [[nodiscard]] auto Call(std::string service_name, std::string method_name, std::string payload,
                           const CallOptions &options) -> StatusOr<std::string>;
 
  private:
+  Impl(const RpcClientOptions &options, ProtocolLimits protocol_limits, std::unique_ptr<ServiceDiscovery> discovery);
+
   /** One virtual-node entry used for sticky endpoint selection. */
   struct HashRingEntry final {
     std::uint64_t hash_ = 0;

@@ -15,8 +15,6 @@
 #include <string_view>
 #include <utility>
 
-#include "common/xrpc_exception.h"
-
 namespace xrpc {
 namespace {
 
@@ -37,21 +35,26 @@ struct FrameView {
   std::string_view payload_;
 };
 
-void ValidateEncodedFrameSize(std::size_t metadata_size, std::size_t payload_size, const ProtocolLimits &limits) {
+auto ValidateEncodedFrameSize(std::size_t metadata_size, std::size_t payload_size, const ProtocolLimits &limits)
+    -> Status {
   if (metadata_size > std::numeric_limits<std::uint32_t>::max() || metadata_size > limits.max_metadata_size_) {
-    throw ProtocolException(StatusCode::ResourceExhausted, "protocol metadata exceeds configured limit");
+    return {StatusCode::ResourceExhausted, "protocol metadata exceeds configured limit"};
   }
   if (payload_size > std::numeric_limits<std::uint32_t>::max() || payload_size > limits.max_payload_size_) {
-    throw ProtocolException(StatusCode::ResourceExhausted, "protocol payload exceeds configured limit");
+    return {StatusCode::ResourceExhausted, "protocol payload exceeds configured limit"};
   }
   if (FrameSize(metadata_size, payload_size) > std::numeric_limits<std::size_t>::max()) {
-    throw ProtocolException(StatusCode::ResourceExhausted, "protocol frame exceeds the addressable size");
+    return {StatusCode::ResourceExhausted, "protocol frame exceeds the addressable size"};
   }
+  return Status::Ok();
 }
 
 auto BuildFrame(const FrameHeader &header, std::string_view metadata_bytes, std::string_view payload,
-                const ProtocolLimits &limits) -> std::string {
-  ValidateEncodedFrameSize(metadata_bytes.size(), payload.size(), limits);
+                const ProtocolLimits &limits) -> StatusOr<std::string> {
+  const Status size_status = ValidateEncodedFrameSize(metadata_bytes.size(), payload.size(), limits);
+  if (!size_status.ok()) {
+    return StatusOr<std::string>(size_status);
+  }
 
   // Allocate the complete frame once, then write each wire section directly
   // into its final position.
@@ -70,16 +73,18 @@ auto BuildFrame(const FrameHeader &header, std::string_view metadata_bytes, std:
     std::memcpy(write, payload.data(), payload.size());
   }
 
-  return result;
+  return StatusOr<std::string>(std::move(result));
 }
 
-auto BuildRequestFrame(const RequestEnvelope &request, const ProtocolLimits &limits) -> std::string {
+auto BuildRequestFrame(const RequestEnvelope &request, const ProtocolLimits &limits) -> StatusOr<std::string> {
   RequestMetadata metadata;
   metadata.set_service_name(request.service_name_);
   metadata.set_method_name(request.method_name_);
 
   std::string metadata_bytes;
-  metadata.SerializeToString(&metadata_bytes);
+  if (!metadata.SerializeToString(&metadata_bytes)) {
+    return StatusOr<std::string>(Status{StatusCode::Internal, "failed to encode request metadata"});
+  }
 
   FrameHeader header;
   header.message_type_ = MessageType::Request;
@@ -106,7 +111,7 @@ auto EncodeResponseMetadata(const ResponseEnvelope &response) -> std::string {
   return metadata_bytes;
 }
 
-auto BuildResponseFrame(const ResponseEnvelope &response, const ProtocolLimits &limits) -> std::string {
+auto BuildResponseFrame(const ResponseEnvelope &response, const ProtocolLimits &limits) -> StatusOr<std::string> {
   std::string metadata_bytes = EncodeResponseMetadata(response);
 
   FrameHeader header;
@@ -214,26 +219,28 @@ auto ReadFrame(std::string_view buf, const ProtocolLimits &limits) -> FrameView 
 
 }  // namespace
 
-auto MakeProtocolLimits(std::size_t max_payload_size) -> ProtocolLimits {
+auto MakeProtocolLimits(std::size_t max_payload_size) -> StatusOr<ProtocolLimits> {
   if (max_payload_size == 0) {
-    throw ConfigException("protocol max_payload_size must be greater than 0");
+    return StatusOr<ProtocolLimits>(
+        Status{StatusCode::InvalidArgument, "protocol max_payload_size must be greater than 0"});
   }
   if (max_payload_size > std::numeric_limits<std::uint32_t>::max()) {
-    throw ConfigException("protocol max_payload_size must fit in uint32");
+    return StatusOr<ProtocolLimits>(
+        Status{StatusCode::InvalidArgument, "protocol max_payload_size must fit in uint32"});
   }
 
   ProtocolLimits limits;
   limits.max_payload_size_ = max_payload_size;
-  return limits;
+  return StatusOr<ProtocolLimits>(limits);
 }
 
 FrameCodec::FrameCodec(ProtocolLimits limits) : limits_(limits) {}
 
-auto FrameCodec::Encode(const RequestEnvelope &request) const -> std::string {
+auto FrameCodec::Encode(const RequestEnvelope &request) const -> StatusOr<std::string> {
   return BuildRequestFrame(request, limits_);
 }
 
-auto FrameCodec::Encode(const ResponseEnvelope &response) const -> std::string {
+auto FrameCodec::Encode(const ResponseEnvelope &response) const -> StatusOr<std::string> {
   return BuildResponseFrame(response, limits_);
 }
 

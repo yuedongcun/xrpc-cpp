@@ -10,19 +10,21 @@
 
 #include "server/connection_io_loop.h"
 
+#include <algorithm>
+#include <cassert>
+#include <exception>
 #include <utility>
 
+#include "common/abort.h"
+
+#include "common/xrpc_exception.h"
 #include "server/service_registry.h"
 
 namespace xrpc {
 
-ConnectionIoLoop::ConnectionIoLoop(ServiceRegistry &registry, WorkerPool &worker_pool,
-                                   ConnectionBackpressureLimits limits, ProtocolLimits protocol_limits)
-    : dispatch_mailbox_(std::make_shared<DispatchMailbox>(context_)),
-      registry_(&registry),
-      worker_pool_(&worker_pool),
-      limits_(limits),
-      protocol_limits_(protocol_limits) {}
+ConnectionIoLoop::ConnectionIoLoop(ServiceRegistry &registry, WorkerPool &worker_pool, ServerConnectionConfig config,
+                                   io::UringBufferPoolConfig buffer_pool_config)
+    : context_(256, buffer_pool_config), registry_(registry), worker_pool_(worker_pool), config_(config) {}
 
 ConnectionIoLoop::~ConnectionIoLoop() { StopImmediately(); }
 
@@ -31,19 +33,14 @@ void ConnectionIoLoop::Start() {
   if (state_ != State::Created) {
     return;
   }
+  thread_ = std::jthread([this]() -> void {
+    try {
+      context_.Run();
+    } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: thread entry
+      error_ = CaughtExceptionToStatus("connection I/O loop failed");
+    }
+  });
   state_ = State::Running;
-  try {
-    thread_ = std::jthread([this]() -> void {
-      try {
-        context_.Run();
-      } catch (...) {
-        error_ = std::current_exception();
-      }
-    });
-  } catch (...) {
-    state_ = State::Stopped;
-    throw;
-  }
 }
 
 /**
@@ -69,7 +66,6 @@ void ConnectionIoLoop::StopImmediately() noexcept {
   if (thread_.joinable()) {
     thread_.join();
   }
-  dispatch_mailbox_->Disable();
   {
     std::lock_guard lock(drain_mutex_);
     state_ = State::Stopped;
@@ -92,12 +88,12 @@ void ConnectionIoLoop::BeginDrain() {
   context_.Post([this]() -> void { BeginDrainOnContext(); });
 }
 
-void ConnectionIoLoop::FinishDrain() {
+auto ConnectionIoLoop::FinishDrain() -> Status {
   BeginDrain();
   {
     std::unique_lock lock(drain_mutex_);
     if (state_ == State::Stopped) {
-      return;
+      return error_;
     }
     drain_cv_.wait(lock, [this]() -> bool { return live_connections_ == 0; });
   }
@@ -107,15 +103,12 @@ void ConnectionIoLoop::FinishDrain() {
     thread_.join();
   }
 
-  dispatch_mailbox_->Disable();
   connections_.clear();
   {
     std::lock_guard lock(drain_mutex_);
     state_ = State::Stopped;
   }
-  if (error_) {
-    std::rethrow_exception(error_);
-  }
+  return error_;
 }
 
 void ConnectionIoLoop::PostStartConnection(io::Socket client_socket) {
@@ -135,37 +128,45 @@ void ConnectionIoLoop::PostStartConnection(io::Socket client_socket) {
 }
 
 void ConnectionIoLoop::StartConnectionOnContext(io::Socket client_socket) {
+  ServerConnection *connection = nullptr;
   {
     std::lock_guard lock(drain_mutex_);
     if (state_ != State::Running) {
       client_socket.Close();
       return;
     }
+
+    const ConnectionId connection_id = AllocateConnectionId();
+    // The constructor is private so only the owning loop can create a connection.
+    auto owned_connection = std::unique_ptr<ServerConnection>(
+        new ServerConnection(connection_id, *this, context_, registry_, worker_pool_, std::move(client_socket), config_,
+                             [this]() -> void { OnConnectionClosed(); }));
+    auto [position, inserted] = connections_.emplace(connection_id, std::move(owned_connection));
+    if (!inserted) {
+      Abort("ConnectionIoLoop generated a duplicate connection ID");
+    }
+    connection = position->second.get();
     ++live_connections_;
   }
-
-  const ServerConnectionConfig config{.limits_ = limits_, .protocol_limits_ = protocol_limits_};
-  std::shared_ptr<ServerConnection> connection;
-  try {
-    connection = std::make_shared<ServerConnection>(context_, *registry_, *worker_pool_, *dispatch_mailbox_,
-                                                    std::move(client_socket), config,
-                                                    [this]() -> void { OnConnectionClosed(); });
-  } catch (...) {
-    OnConnectionClosed();
-    throw;
-  }
-  connections_.push_back(connection);
   connection->Start();
 }
 
+auto ConnectionIoLoop::AllocateConnectionId() -> ConnectionId {
+  const ConnectionId connection_id = next_connection_id_;
+  if (connection_id == 0) {
+    Abort("ConnectionIoLoop exhausted the connection ID space");
+  }
+  ++next_connection_id_;
+  return connection_id;
+}
+
 void ConnectionIoLoop::CollectClosedConnections() {
-  std::erase_if(connections_, [](const std::shared_ptr<ServerConnection> &connection) -> bool {
-    return connection->CanBeCollected();
-  });
+  std::erase_if(connections_, [](const auto &entry) -> bool { return entry.second->CanBeCollected(); });
 }
 
 void ConnectionIoLoop::CloseConnectionsOnContext() {
-  for (const auto &connection : connections_) {
+  for (const auto &entry : connections_) {
+    const auto &connection = entry.second;
     if (!connection->IsClosed()) {
       connection->Close();
     }
@@ -174,9 +175,53 @@ void ConnectionIoLoop::CloseConnectionsOnContext() {
 }
 
 void ConnectionIoLoop::BeginDrainOnContext() {
-  for (const auto &connection : connections_) {
+  for (const auto &entry : connections_) {
+    const auto &connection = entry.second;
     connection->BeginDrain();
   }
+}
+
+void ConnectionIoLoop::PostWorkerResult(WorkerResult result) {
+  context_.Post([this, result = std::move(result)]() mutable -> void { HandleWorkerResult(std::move(result)); });
+}
+
+auto ConnectionIoLoop::RequestStats(bool start_window) -> std::future<ConnectionLoopStatsSnapshot> {
+  std::lock_guard lock(drain_mutex_);
+  if (state_ != State::Running || std::this_thread::get_id() == thread_.get_id()) {
+    throw LifecycleException("statistics require a running loop and an external control thread");
+  }
+  auto promise = std::make_shared<std::promise<ConnectionLoopStatsSnapshot>>();
+  auto future = promise->get_future();
+  context_.Post([this, promise, start_window]() -> void {
+    if (start_window) {
+      pending_write_bytes_peak_ = pending_write_bytes_;
+    }
+    promise->set_value({.uring_ = context_.SnapshotStats(start_window),
+                        .live_connections_ = live_connections_,
+                        .pending_write_bytes_ = pending_write_bytes_,
+                        .pending_write_bytes_peak_ = pending_write_bytes_peak_});
+  });
+  return future;
+}
+
+void ConnectionIoLoop::RecordWriteBytesChange(std::size_t before, std::size_t after) {
+  assert(pending_write_bytes_ >= before);
+  pending_write_bytes_ = pending_write_bytes_ - before + after;
+  pending_write_bytes_peak_ = std::max(pending_write_bytes_peak_, pending_write_bytes_);
+}
+
+void ConnectionIoLoop::HandleWorkerResult(WorkerResult result) {
+  auto connection = connections_.find(result.connection_id_);
+  if (connection == connections_.end()) {
+    return;
+  }
+
+  if (result.encode_failed_) {
+    connection->second->OnResponseEncodeFailure(result.released_requests_);
+  } else {
+    connection->second->OnResponsesEncoded(std::move(result.response_bytes_), result.released_requests_);
+  }
+  CollectClosedConnections();
 }
 
 void ConnectionIoLoop::OnConnectionClosed() {
