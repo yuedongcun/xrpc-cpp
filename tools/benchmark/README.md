@@ -84,6 +84,12 @@ Firehose 客户端：
 
 ## 结果
 
+README 中的两张性能图由 `tools/benchmark/runner/generate_readme_charts.py` 生成。发布新的正式结果时，更新本页的汇总表和脚本中的同一组数据后运行：
+
+```bash
+python3 tools/benchmark/runner/generate_readme_charts.py
+```
+
 ### 服务端容量
 
 服务端容量测试固定 12 条 TCP 连接、128 字节 Protobuf Echo payload、3 个 Connection I/O 线程和 3 个 Worker 线程。每个工作点预热 3 秒、测量 30 秒并重复 3 次；测试顺序按固定种子在各轮间改变，表中报告中位数和三轮最小值—最大值。
