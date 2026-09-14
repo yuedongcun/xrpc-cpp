@@ -53,11 +53,13 @@ auto RpcServer::Impl::SnapshotStats(bool start_window) -> StatusOr<ServerStatsSn
   }
   try {
     std::vector<std::future<ConnectionLoopStatsSnapshot>> futures;
+    futures.reserve(connection_io_loops_.size());
     for (auto &loop : connection_io_loops_) {
       futures.push_back(loop->RequestStats(start_window));
     }
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     ServerStatsSnapshot snapshot;
+    snapshot.loops_.reserve(futures.size());
     snapshot.worker_pool_ = worker_pool_.SnapshotStats(start_window);
     for (auto &future : futures) {
       if (future.wait_until(deadline) != std::future_status::ready) {

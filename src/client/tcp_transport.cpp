@@ -169,7 +169,7 @@ auto TcpTransport::EnsureConnectedWithTimeout(std::chrono::milliseconds timeout)
   JoinReaderIfStopped(lock);
 
   io::Socket socket;
-  const Status status = socket.Connect(host_, port_, timeout);
+  Status status = socket.Connect(host_, port_, timeout);
   if (!status.ok()) {
     return status;
   }
@@ -192,7 +192,7 @@ void TcpTransport::JoinReaderIfStopped(std::unique_lock<std::mutex> &lock) {
     return;
   }
 
-  std::jthread reader = std::move(reader_thread_);
+  std::jthread reader = std::exchange(reader_thread_, std::jthread{});
   lock.unlock();
   reader.join();
   lock.lock();
@@ -204,7 +204,7 @@ void TcpTransport::Close() {
     std::lock_guard lock(state_mutex_);
     CloseSocketLocked();
     if (reader_thread_.joinable() && reader_thread_.get_id() != std::this_thread::get_id()) {
-      reader = std::move(reader_thread_);
+      reader = std::exchange(reader_thread_, std::jthread{});
     }
   }
 

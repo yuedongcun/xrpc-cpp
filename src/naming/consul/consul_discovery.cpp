@@ -84,11 +84,15 @@ auto ParseEndpoints(const std::string &body) -> StatusOr<std::vector<Endpoint>> 
       return StatusOr<std::vector<Endpoint>>(
           Status{StatusCode::DataLoss, "Consul health response contains an invalid service port"});
     }
-    const std::int64_t port = service["Port"].is_number_unsigned()
-                                  ? (service["Port"].get<std::uint64_t>() <= 65535
-                                         ? static_cast<std::int64_t>(service["Port"].get<std::uint64_t>())
-                                         : 0)
-                                  : service["Port"].get<std::int64_t>();
+    std::int64_t port = 0;
+    if (service["Port"].is_number_unsigned()) {
+      const auto unsigned_port = service["Port"].get<std::uint64_t>();
+      if (unsigned_port <= 65535) {
+        port = static_cast<std::int64_t>(unsigned_port);
+      }
+    } else {
+      port = service["Port"].get<std::int64_t>();
+    }
     if (host.empty() || port <= 0 || port > 65535) {
       continue;
     }

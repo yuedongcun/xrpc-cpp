@@ -70,6 +70,7 @@ check-tidy:
 	}
 	@run-clang-tidy \
 		-p "$(BUILD_DIR)" \
+		-config-file="$(CURDIR)/.clang-tidy" \
 		-quiet \
 		-header-filter="$(CURDIR)/(include|src)/.*" \
 		"$(CURDIR)/src/.*\\.cpp"
