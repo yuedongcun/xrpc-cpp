@@ -185,7 +185,7 @@ class UringContext final {
   // Submission and completion of coroutine I/O.
   [[nodiscard]] auto TryStartOperation(std::unique_ptr<Operation> &operation) -> bool;
   [[nodiscard]] auto AcquireSqe() -> io_uring_sqe *;
-  void SubmitPreparedOperation(std::unique_ptr<Operation> operation) noexcept;
+  void StageOperation(std::unique_ptr<Operation> operation) noexcept;
   [[nodiscard]] auto TakeOperation(Operation &operation) -> std::unique_ptr<Operation>;
   void FlushSubmissionBatch();
   void ProcessCqe(io_uring_cqe *cqe);

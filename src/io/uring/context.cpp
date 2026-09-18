@@ -251,8 +251,8 @@ auto UringContext::AcquireSqe() -> io_uring_sqe * {
   return sqe;
 }
 
-/** @brief Takes ownership of a prepared operation and counts its unsubmitted SQE. */
-void UringContext::SubmitPreparedOperation(std::unique_ptr<Operation> operation) noexcept {
+/** @brief Transfers a prepared operation to the context for batched submission. */
+void UringContext::StageOperation(std::unique_ptr<Operation> operation) noexcept {
   assert(operations_.size() < operations_.capacity());
   operation->owner_index_ = operations_.size();
   operations_.push_back(std::move(operation));
@@ -293,13 +293,10 @@ void UringContext::FlushSubmissionBatch() {
 }
 
 /**
- * @brief Starts a deferred awaitable operation on the run thread.
+ * @brief Prepares and stages a deferred operation on the run thread.
  *
- * A stop request rejects the start; the awaitable retains ownership and
- * produces its synchronous cancellation result. Otherwise, all potentially failing work is
- * completed before the SQE receives the operation pointer. From that commit
- * point onward, preparing the SQE and moving the operation into the reserved
- * owning vector do not throw.
+ * Returns false during shutdown, leaving ownership with the awaitable.
+ * Otherwise, the context takes ownership and queues the SQE for submission.
  */
 auto UringContext::TryStartOperation(std::unique_ptr<Operation> &operation) -> bool {
   AssertRunThread("io_uring submission attempted outside the owning Run thread");
@@ -308,16 +305,6 @@ auto UringContext::TryStartOperation(std::unique_ptr<Operation> &operation) -> b
   }
   if (stop_requested_.load()) {
     return false;
-  }
-
-  switch (operation->type_) {
-    case OperationType::Accept:
-    case OperationType::Recv:
-    case OperationType::RecvProvided:
-    case OperationType::Send:
-      break;
-    case OperationType::Unknown:
-      Abort("UringContext attempted to start an operation with unknown type");
   }
 
   io_uring_sqe *sqe = AcquireSqe();
@@ -351,7 +338,7 @@ auto UringContext::TryStartOperation(std::unique_ptr<Operation> &operation) -> b
   Operation *raw_operation = operation.get();
   io_uring_sqe_set_data(sqe, raw_operation);
 
-  SubmitPreparedOperation(std::move(operation));
+  StageOperation(std::move(operation));
   return true;
 }
 
@@ -485,7 +472,7 @@ void UringContext::SubmitCancelFd(int fd) {
   Operation *raw_operation = operation.get();
   io_uring_sqe_set_data(sqe, raw_operation);
 
-  SubmitPreparedOperation(std::move(operation));
+  StageOperation(std::move(operation));
 
   // Callers close the descriptor immediately after CancelFd() returns. Publish
   // the cancellation before that close instead of waiting for the turn boundary.
@@ -572,7 +559,7 @@ void UringContext::SubmitWakeupPoll() {
   Operation *raw_operation = operation.get();
   io_uring_sqe_set_data(sqe, raw_operation);
 
-  SubmitPreparedOperation(std::move(operation));
+  StageOperation(std::move(operation));
   wakeup_poll_pending_ = true;
 }
 
