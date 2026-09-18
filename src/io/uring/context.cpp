@@ -24,11 +24,11 @@
 #include <cassert>
 #include <cerrno>
 #include <exception>
-#include <system_error>
 #include <utility>
 
 #include "common/abort.h"
 #include "common/xrpc_exception.h"
+#include "io/system_error.h"
 
 namespace xrpc::io {
 
@@ -60,72 +60,53 @@ struct Operation {
 // Initialize ring/pool/eventfd; only the Run thread submits and completes I/O.
 // -----------------------------------------------------------------------------
 
-auto UringContext::MakeErrorMessage(std::string_view action, int error_code) -> std::string {
-  std::string message(action);
-  message.append(" failed");
-  if (error_code != 0) {
-    message.append(": ");
-    message.append(std::error_code(error_code, std::generic_category()).message());
+UringInstance::UringInstance(std::uint32_t entries) {
+  const int result = io_uring_queue_init(entries, &ring_, 0);  // Use the default setup flags.
+  if (result < 0) {
+    throw InternalException(MakeSystemErrorMessage("io_uring_queue_init", -result));
   }
-  return message;
 }
 
-UringContext::UringContext(std::uint32_t entries) : UringContext(std::nullopt, entries) {}
+UringInstance::~UringInstance() { io_uring_queue_exit(&ring_); }
 
-UringContext::UringContext(std::uint32_t entries, UringBufferPoolConfig buffer_pool_config)
-    : UringContext(std::optional<UringBufferPoolConfig>{buffer_pool_config}, entries) {}
+WakeupEventFd::WakeupEventFd() {
+  fd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+  if (fd_ < 0) {
+    throw InternalException(MakeSystemErrorMessage("eventfd", errno));
+  }
+}
 
-UringContext::UringContext(std::optional<UringBufferPoolConfig> buffer_pool_config, std::uint32_t entries) {
+WakeupEventFd::~WakeupEventFd() { (void)::close(fd_); }
+
+UringContext::UringContext(std::uint32_t entries, std::optional<UringBufferPoolConfig> buffer_pool_config)
+    : ring_(entries) {
   staged_operations_.reserve(entries);
 
-  const int ret = io_uring_queue_init(entries, &ring_, 0);
-  if (ret < 0) {
-    throw InternalException(MakeErrorMessage("io_uring_queue_init", -ret));
-  }
-
-  try {
-    if (buffer_pool_config.has_value()) {
-      StatusOr<std::unique_ptr<UringProvidedBufferPool>> registered =
-          UringProvidedBufferPool::Register(ring_, *buffer_pool_config);
-      if (!registered.ok()) {
-        throw InternalException(registered.status().message());
-      }
-      provided_buffer_pool_ = std::move(registered).value();
+  if (buffer_pool_config.has_value()) {
+    StatusOr<std::unique_ptr<UringProvidedBufferPool>> registered =
+        UringProvidedBufferPool::Register(ring_.Native(), *buffer_pool_config);
+    if (!registered.ok()) {
+      throw InternalException(registered.status().message());
     }
-
-    wakeup_fd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    if (wakeup_fd_ < 0) {
-      const int error_code = errno;
-      throw InternalException(MakeErrorMessage("eventfd", error_code));
-    }
-  } catch (...) {  // XRPC_EXCEPTION_GUARD: release registered resources if construction fails
-    provided_buffer_pool_.reset();
-    io_uring_queue_exit(&ring_);
-    throw;
+    provided_buffer_pool_ = std::move(registered).value();
   }
 }
 
-UringContext::~UringContext() {
-  if (wakeup_fd_ >= 0) {
-    (void)::close(wakeup_fd_);
-  }
-  provided_buffer_pool_.reset();
-  io_uring_queue_exit(&ring_);
-}
+UringContext::~UringContext() = default;
 
 auto UringContext::CurrentThreadId() -> pid_t {
-  static thread_local const auto thread_id = static_cast<pid_t>(::syscall(SYS_gettid));
+  thread_local const auto thread_id = static_cast<pid_t>(::syscall(SYS_gettid));
   return thread_id;
 }
 
-void UringContext::BeginRun() {
+void UringContext::AcquireRunOwnership() {
   pid_t expected = 0;
   if (!run_thread_id_.compare_exchange_strong(expected, CurrentThreadId())) {
     Abort("UringContext::Run called while another Run thread owns the context");
   }
 }
 
-void UringContext::EndRun() { run_thread_id_.store(0); }
+void UringContext::ReleaseRunOwnership() { run_thread_id_.store(0); }
 
 void UringContext::AssertRunThread(std::string_view action) const {
   if (run_thread_id_.load() != CurrentThreadId()) {
@@ -144,14 +125,14 @@ auto UringContext::Accept(int listen_fd) -> UringAwaitable {
   auto operation = std::make_unique<Operation>();
   operation->type_ = OperationType::Accept;
   operation->fd_ = listen_fd;
-  return UringAwaitable(*this, std::move(operation));
+  return {*this, std::move(operation), /*multishot=*/false};
 }
 
 auto UringContext::AcceptMultishot(int listen_fd) -> UringAwaitable {
   auto operation = std::make_unique<Operation>();
   operation->type_ = OperationType::Accept;
   operation->fd_ = listen_fd;
-  return UringAwaitable(*this, std::move(operation), true);
+  return {*this, std::move(operation), /*multishot=*/true};
 }
 
 auto UringContext::Recv(int fd, void *buffer, std::size_t len) -> UringAwaitable {
@@ -160,7 +141,7 @@ auto UringContext::Recv(int fd, void *buffer, std::size_t len) -> UringAwaitable
   operation->fd_ = fd;
   operation->buffer_ = buffer;
   operation->length_ = len;
-  return UringAwaitable(*this, std::move(operation));
+  return {*this, std::move(operation), /*multishot=*/false};
 }
 
 auto UringContext::RecvProvided(int fd) -> UringAwaitable {
@@ -170,7 +151,7 @@ auto UringContext::RecvProvided(int fd) -> UringAwaitable {
   auto operation = std::make_unique<Operation>();
   operation->type_ = OperationType::RecvProvided;
   operation->fd_ = fd;
-  return UringAwaitable(*this, std::move(operation));
+  return {*this, std::move(operation), /*multishot=*/false};
 }
 
 auto UringContext::Send(int fd, const void *buffer, std::size_t len) -> UringAwaitable {
@@ -179,7 +160,7 @@ auto UringContext::Send(int fd, const void *buffer, std::size_t len) -> UringAwa
   operation->fd_ = fd;
   operation->buffer_ = const_cast<void *>(buffer);
   operation->length_ = len;
-  return UringAwaitable(*this, std::move(operation));
+  return {*this, std::move(operation), /*multishot=*/false};
 }
 
 // -----------------------------------------------------------------------------
@@ -263,10 +244,10 @@ auto UringAwaitable::await_resume() -> IoResult {
 // -----------------------------------------------------------------------------
 
 auto UringContext::AcquireSqe() -> io_uring_sqe * {
-  io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
+  io_uring_sqe *sqe = io_uring_get_sqe(&ring_.Native());
   if (sqe == nullptr && !staged_operations_.empty()) {
     FlushSubmissionBatch();
-    sqe = io_uring_get_sqe(&ring_);
+    sqe = io_uring_get_sqe(&ring_.Native());
   }
   if (sqe == nullptr) {
     throw InternalException("io_uring_get_sqe failed");
@@ -314,11 +295,11 @@ void UringContext::FlushSubmissionBatch() {
     int ret = 0;
     do {
       ++counters_.submit_calls_;
-      ret = io_uring_submit(&ring_);
+      ret = io_uring_submit(&ring_.Native());
     } while (ret == -EINTR);
 
     if (ret < 0) {
-      throw InternalException(MakeErrorMessage("io_uring_submit", -ret));
+      throw InternalException(MakeSystemErrorMessage("io_uring_submit", -ret));
     }
     if (ret == 0) {
       Abort("io_uring_submit returned zero while operations remain staged");
@@ -411,7 +392,7 @@ auto UringContext::TryStartOperation(std::unique_ptr<Operation> &operation, std:
 void UringContext::ProcessCqe(io_uring_cqe *cqe) {
   auto *raw_operation = static_cast<Operation *>(io_uring_cqe_get_data(cqe));
   if (raw_operation == nullptr) {
-    io_uring_cqe_seen(&ring_, cqe);
+    io_uring_cqe_seen(&ring_.Native(), cqe);
     return;
   }
 
@@ -439,7 +420,7 @@ void UringContext::ProcessCqe(io_uring_cqe *cqe) {
 
 void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) {
   if (pending_io_operations_ == 0) {
-    io_uring_cqe_seen(&ring_, cqe);
+    io_uring_cqe_seen(&ring_.Native(), cqe);
     Abort("UringContext received an awaitable CQE with no pending I/O");
   }
   const bool is_multishot = operation.multishot_;
@@ -470,12 +451,12 @@ void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) 
     operation.result_.buffer_group_ = provided_buffer_pool_->GroupId();
     const bool has_selected_buffer = (cqe->flags & IORING_CQE_F_BUFFER) != 0;
     if (cqe->res > 0 && !has_selected_buffer) {
-      io_uring_cqe_seen(&ring_, cqe);
+      io_uring_cqe_seen(&ring_.Native(), cqe);
       Abort("io_uring completed a provided-buffer receive without selecting a buffer");
     }
     if (has_selected_buffer) {
       if (!provided_buffer_pool_) {
-        io_uring_cqe_seen(&ring_, cqe);
+        io_uring_cqe_seen(&ring_.Native(), cqe);
         Abort("io_uring selected a buffer after its provided-buffer pool was destroyed");
       }
       const auto buffer_id = static_cast<std::uint16_t>(cqe->flags >> IORING_CQE_BUFFER_SHIFT);
@@ -483,7 +464,7 @@ void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) 
     }
   }
 
-  io_uring_cqe_seen(&ring_, cqe);
+  io_uring_cqe_seen(&ring_.Native(), cqe);
   if (is_multishot) {
     UringAwaitable *awaitable = operation.awaitable_;
     awaitable->result_ = std::move(operation.result_);
@@ -511,7 +492,7 @@ void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) 
 
 void UringContext::ProcessCancelCqe(io_uring_cqe *cqe) {
   if (pending_io_operations_ == 0) {
-    io_uring_cqe_seen(&ring_, cqe);
+    io_uring_cqe_seen(&ring_.Native(), cqe);
     Abort("UringContext received a cancel CQE with no pending I/O");
   }
   --pending_io_operations_;
@@ -519,10 +500,10 @@ void UringContext::ProcessCancelCqe(io_uring_cqe *cqe) {
   IoResult result;
   result.result_ = cqe->res;
   result.error_code_ = cqe->res < 0 ? -cqe->res : 0;
-  io_uring_cqe_seen(&ring_, cqe);
+  io_uring_cqe_seen(&ring_.Native(), cqe);
   if (result.result_ < 0 && result.error_code_ != ENOENT && result.error_code_ != EALREADY &&
       result.error_code_ != ECANCELED) {
-    throw InternalException(MakeErrorMessage("io_uring cancel", result.error_code_));
+    throw InternalException(MakeSystemErrorMessage("io_uring cancel", result.error_code_));
   }
 }
 
@@ -632,12 +613,12 @@ void UringContext::SubmitWakeupPoll() {
 
   auto operation = std::make_unique<Operation>();
   operation->completion_category_ = Operation::CompletionCategory::Wakeup;
-  operation->fd_ = wakeup_fd_;
+  operation->fd_ = wakeup_.Get();
   operation->multishot_ = true;
 
   io_uring_sqe *sqe = AcquireSqe();
 
-  io_uring_prep_poll_multishot(sqe, wakeup_fd_, POLLIN);
+  io_uring_prep_poll_multishot(sqe, wakeup_.Get(), POLLIN);
   Operation *raw_operation = operation.get();
   io_uring_sqe_set_data(sqe, raw_operation);
 
@@ -657,14 +638,14 @@ void UringContext::ProcessWakeupCqe(io_uring_cqe *cqe, bool has_more) {
 
   const int result = cqe->res;
   const int error_code = result < 0 ? -result : 0;
-  io_uring_cqe_seen(&ring_, cqe);
+  io_uring_cqe_seen(&ring_.Native(), cqe);
 
   if (result < 0) {
     if (stop_requested_.load() && error_code == ECANCELED && !has_more) {
       wakeup_poll_cancel_requested_ = false;
       return;
     }
-    throw InternalException(MakeErrorMessage("eventfd poll", error_code));
+    throw InternalException(MakeSystemErrorMessage("eventfd poll", error_code));
   }
   if ((result & POLLIN) == 0) {
     throw InternalException("eventfd poll completed without POLLIN");
@@ -675,7 +656,7 @@ void UringContext::ProcessWakeupCqe(io_uring_cqe *cqe, bool has_more) {
   if (stop_requested_.load()) {
     if (has_more && !wakeup_poll_cancel_requested_) {
       wakeup_poll_cancel_requested_ = true;
-      SubmitCancelFd(wakeup_fd_);
+      SubmitCancelFd(wakeup_.Get());
     }
   } else if (!has_more) {
     SubmitWakeupPoll();
@@ -685,7 +666,7 @@ void UringContext::ProcessWakeupCqe(io_uring_cqe *cqe, bool has_more) {
 void UringContext::SignalWakeup() const {
   constexpr std::uint64_t value = 1;
   while (true) {
-    const ssize_t written = ::write(wakeup_fd_, &value, sizeof(value));
+    const ssize_t written = ::write(wakeup_.Get(), &value, sizeof(value));
     if (std::cmp_equal(written, sizeof(value))) {
       return;
     }
@@ -695,14 +676,14 @@ void UringContext::SignalWakeup() const {
     if (written < 0 && errno == EAGAIN) {
       return;
     }
-    throw InternalException(MakeErrorMessage("eventfd write", errno));
+    throw InternalException(MakeSystemErrorMessage("eventfd write", errno));
   }
 }
 
 void UringContext::DrainWakeupCounter() const {
   std::uint64_t value = 0;
   while (true) {
-    const ssize_t read_size = ::read(wakeup_fd_, &value, sizeof(value));
+    const ssize_t read_size = ::read(wakeup_.Get(), &value, sizeof(value));
     if (std::cmp_equal(read_size, sizeof(value))) {
       return;
     }
@@ -712,7 +693,7 @@ void UringContext::DrainWakeupCounter() const {
     if (read_size < 0 && errno == EAGAIN) {
       return;
     }
-    throw InternalException(MakeErrorMessage("eventfd read", errno));
+    throw InternalException(MakeSystemErrorMessage("eventfd read", errno));
   }
 }
 
@@ -723,7 +704,7 @@ void UringContext::DrainWakeupCounter() const {
 
 auto UringContext::SnapshotStats(bool start_window) -> UringStatsSnapshot {
   AssertRunThread("UringContext::SnapshotStats called outside the owning Run thread");
-  const std::size_t cq_ready = io_uring_cq_ready(&ring_);
+  const std::size_t cq_ready = io_uring_cq_ready(&ring_.Native());
   if (start_window) {
     ++stats_window_id_;
     peaks_ = {.staged_operations_ = staged_operations_.size(), .cq_ready_sampled_ = cq_ready};
@@ -746,10 +727,10 @@ auto UringContext::SnapshotStats(bool start_window) -> UringStatsSnapshot {
 // -----------------------------------------------------------------------------
 
 void UringContext::Run() {
-  BeginRun();
+  AcquireRunOwnership();
   struct RunOwnership final {
     UringContext &context_;
-    ~RunOwnership() { context_.EndRun(); }
+    ~RunOwnership() { context_.ReleaseRunOwnership(); }
   } run_ownership{*this};
 
   SubmitWakeupPoll();
@@ -759,23 +740,24 @@ void UringContext::Run() {
     // No operation may remain staged while the event loop blocks.
     assert(staged_operations_.empty());
     io_uring_cqe *cqe = nullptr;
-    const int ret = io_uring_wait_cqe(&ring_, &cqe);
+    const int ret = io_uring_wait_cqe(&ring_.Native(), &cqe);
     if (ret < 0) {
       if (ret == -EINTR) {
         continue;
       }
-      throw InternalException(MakeErrorMessage("io_uring_wait_cqe", -ret));
+      throw InternalException(MakeSystemErrorMessage("io_uring_wait_cqe", -ret));
     }
 
     // Bound one event-loop turn so newly staged Recv/Send/Accept operations
     // cannot be starved by a continuously replenished completion queue.
-    peaks_.cq_ready_sampled_ = std::max(peaks_.cq_ready_sampled_, static_cast<std::size_t>(io_uring_cq_ready(&ring_)));
+    peaks_.cq_ready_sampled_ =
+        std::max(peaks_.cq_ready_sampled_, static_cast<std::size_t>(io_uring_cq_ready(&ring_.Native())));
     const std::size_t completion_budget = staged_operations_.capacity();
     std::size_t processed_cqes = 0;
     try {
       ProcessCqe(cqe);
       ++processed_cqes;
-      while (processed_cqes < completion_budget && io_uring_peek_cqe(&ring_, &cqe) == 0) {
+      while (processed_cqes < completion_budget && io_uring_peek_cqe(&ring_.Native(), &cqe) == 0) {
         ProcessCqe(cqe);
         ++processed_cqes;
       }

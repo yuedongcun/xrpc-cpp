@@ -13,12 +13,12 @@
 #include <limits>
 #include <memory>
 #include <string>
-#include <system_error>
 #include <utility>
 
 #include <liburing.h>
 
 #include "common/abort.h"
+#include "io/system_error.h"
 
 namespace xrpc::io {
 namespace {
@@ -42,12 +42,7 @@ auto ValidateConfig(const UringBufferPoolConfig &config) -> Status {
 }
 
 auto RegistrationError(int error_code) -> Status {
-  std::string message("io_uring provided buffer registration failed");
-  if (error_code != 0) {
-    message.append(": ");
-    message.append(std::error_code(error_code, std::generic_category()).message());
-  }
-  return {StatusCode::Unavailable, std::move(message)};
+  return {StatusCode::Unavailable, MakeSystemErrorMessage("io_uring provided buffer registration", error_code)};
 }
 
 }  // namespace

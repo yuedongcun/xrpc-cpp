@@ -29,7 +29,6 @@
 #include <exception>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <utility>
 
 #include <arpa/inet.h>
@@ -40,22 +39,13 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include "io/system_error.h"
+
 namespace xrpc::io {
 namespace {
 
-auto MakeErrorMessage(std::string_view action, std::error_code error) -> std::string {
-  std::string message(action);
-  message.append(" failed");
-  if (error) {
-    message.append(": ");
-    message.append(error.message());
-  }
-  return message;
-}
-
 auto MakeSocketStatus(SocketErrorCode code, std::string_view action, int error) -> Status {
-  const std::error_code system_error = MakeSystemErrorCode(error);
-  return {ToStatusCode(code), MakeErrorMessage(action, system_error)};
+  return {ToStatusCode(code), MakeSystemErrorMessage(action, error)};
 }
 
 auto MakeSocketStatus(SocketErrorCode code, std::string_view action) -> Status {

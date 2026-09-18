@@ -84,7 +84,12 @@ class [[nodiscard]] StatusOr final {
   explicit StatusOr(T value) : value_(std::move(value)) {}
 
   /** Constructs a failed result. `status` must not be `StatusCode::Ok`. */
-  explicit StatusOr(Status status) : status_(RequireErrorStatus(std::move(status))) {}
+  explicit StatusOr(Status status) : status_(std::move(status)) {
+    // An OK result must carry a value.
+    if (status_.ok()) {
+      std::terminate();
+    }
+  }
 
   [[nodiscard]] auto ok() const -> bool { return status_.ok(); }
 
@@ -106,14 +111,8 @@ class [[nodiscard]] StatusOr final {
   }
 
  private:
-  [[nodiscard]] static auto RequireErrorStatus(Status status) -> Status {
-    if (status.ok()) {
-      std::terminate();
-    }
-    return status;
-  }
-
   void RequireValue() const {
+    // Accessing an error result is a caller contract violation.
     if (!value_.has_value()) {
       std::terminate();
     }

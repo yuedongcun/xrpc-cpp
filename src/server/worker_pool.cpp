@@ -66,6 +66,7 @@ auto WorkerPool::TrySubmitBatch(std::function<void()> job, std::size_t logical_j
     }
     queue.jobs_.push(WorkerJob{.run_ = std::move(job), .logical_jobs_ = logical_jobs});
     queue.pending_entries_.fetch_add(1);
+    queue.pending_logical_jobs_.fetch_add(logical_jobs);
     queue.queued_logical_jobs_ += logical_jobs;
     queue.queued_batches_peak_ = std::max(queue.queued_batches_peak_, queue.jobs_.size());
     queue.queued_logical_jobs_peak_ = std::max(queue.queued_logical_jobs_peak_, queue.queued_logical_jobs_);
@@ -100,23 +101,24 @@ auto WorkerPool::SnapshotStats(bool start_window) -> WorkerPoolStatsSnapshot {
     snapshot.queues_.push_back({.queued_batches_ = queue->jobs_.size(),
                                 .queued_logical_jobs_ = queue->queued_logical_jobs_,
                                 .pending_batches_ = queue->pending_entries_.load(),
+                                .pending_logical_jobs_ = queue->pending_logical_jobs_.load(),
                                 .queued_batches_peak_ = queue->queued_batches_peak_,
                                 .queued_logical_jobs_peak_ = queue->queued_logical_jobs_peak_});
   }
   return snapshot;
 }
 
-// Start from a round-robin candidate, then prefer a queue with fewer pending
-// WorkerJob entries. An empty queue is already optimal, so probing stops early.
+// Start from a round-robin candidate, then prefer a worker with fewer pending
+// logical RPCs. Zero is already optimal, so probing stops early.
 auto WorkerPool::SelectWorkerQueue() -> WorkerQueue & {
   const std::size_t worker_count = worker_queues_.size();
   const std::size_t start = next_worker_index_.fetch_add(1) % worker_count;
   std::size_t selected = start;
-  std::size_t selected_pending = worker_queues_[selected]->pending_entries_.load();
+  std::size_t selected_pending = worker_queues_[selected]->pending_logical_jobs_.load();
 
   for (std::size_t offset = 1; offset < worker_count && selected_pending > 0; ++offset) {
     const std::size_t candidate = (start + offset) % worker_count;
-    const std::size_t candidate_pending = worker_queues_[candidate]->pending_entries_.load();
+    const std::size_t candidate_pending = worker_queues_[candidate]->pending_logical_jobs_.load();
     if (candidate_pending < selected_pending) {
       selected = candidate;
       selected_pending = candidate_pending;
@@ -177,6 +179,7 @@ void WorkerPool::WorkerLoop(WorkerQueue &queue) {
 
     job.run_();
     queue.pending_entries_.fetch_sub(1);
+    queue.pending_logical_jobs_.fetch_sub(job.logical_jobs_);
     ReleasePendingJobs(job.logical_jobs_);
   }
 }

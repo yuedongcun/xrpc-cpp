@@ -10,7 +10,6 @@
 
 #include <algorithm>
 #include <cerrno>
-#include <cstring>
 #include <exception>
 #include <utility>
 #include <vector>
@@ -21,6 +20,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include "io/system_error.h"
 #include "protocol/rpc_envelope.h"
 
 namespace xrpc {
@@ -34,7 +34,7 @@ auto IoStatus(std::string_view action, int error) -> Status {
   if (error == EAGAIN || error == EWOULDBLOCK) {
     return TimeoutStatus(action);
   }
-  return {StatusCode::Unavailable, std::string(action) + " failed: " + std::strerror(error)};
+  return {StatusCode::Unavailable, io::MakeSystemErrorMessage(action, error)};
 }
 
 auto PeerClosedStatus(std::string_view action) -> Status {

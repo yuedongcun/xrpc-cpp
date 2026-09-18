@@ -4,8 +4,7 @@
  *
  * A `UringContext` owns one io_uring ring and drives asynchronous operations
  * on the thread running `Run()`. `Accept`, `AcceptMultishot`, `Recv`,
- * `RecvProvided` and `Send` create deferred,
- * move-only awaitables.
+ * `RecvProvided` and `Send` create deferred, address-stable awaitables.
  * The operation starts when the coroutine suspends and resumes that coroutine
  * with an `IoResult`.
  *
@@ -37,6 +36,40 @@
 #include "io/uring/stats.h"
 
 namespace xrpc::io {
+
+/** Owns one initialized io_uring instance; its address stays stable for buffer pools. */
+class UringInstance final {
+ public:
+  explicit UringInstance(std::uint32_t entries);
+  ~UringInstance();
+
+  UringInstance(const UringInstance &) = delete;
+  auto operator=(const UringInstance &) -> UringInstance & = delete;
+  UringInstance(UringInstance &&) = delete;
+  auto operator=(UringInstance &&) -> UringInstance & = delete;
+
+  [[nodiscard]] auto Native() noexcept -> io_uring & { return ring_; }
+
+ private:
+  io_uring ring_{};
+};
+
+/** Owns the eventfd used to wake a UringContext from another thread. */
+class WakeupEventFd final {
+ public:
+  WakeupEventFd();
+  ~WakeupEventFd();
+
+  WakeupEventFd(const WakeupEventFd &) = delete;
+  auto operator=(const WakeupEventFd &) -> WakeupEventFd & = delete;
+  WakeupEventFd(WakeupEventFd &&) = delete;
+  auto operator=(WakeupEventFd &&) -> WakeupEventFd & = delete;
+
+  [[nodiscard]] auto Get() const noexcept -> int { return fd_; }
+
+ private:
+  int fd_ = -1;
+};
 
 enum class OperationType : std::uint8_t {
   Unknown = 0,
@@ -82,9 +115,8 @@ class UringAwaitable;
  */
 class UringContext final {
  public:
-  explicit UringContext(std::uint32_t entries = 256);
-
-  UringContext(std::uint32_t entries, UringBufferPoolConfig buffer_pool_config);
+  explicit UringContext(std::uint32_t entries = 256,
+                        std::optional<UringBufferPoolConfig> buffer_pool_config = std::nullopt);
 
   ~UringContext();
 
@@ -144,13 +176,11 @@ class UringContext final {
   friend class UringAwaitable;
 
   // Resource lifetime and ownership of the Run thread.
-  UringContext(std::optional<UringBufferPoolConfig> buffer_pool_config, std::uint32_t entries);
-  void BeginRun();
-  void EndRun();
+  void AcquireRunOwnership();
+  void ReleaseRunOwnership();
   void AssertRunThread(std::string_view action) const;
   [[nodiscard]] auto IsRunning() const -> bool;
   [[nodiscard]] static auto CurrentThreadId() -> pid_t;
-  [[nodiscard]] static auto MakeErrorMessage(std::string_view action, int error_code) -> std::string;
 
   // Submission and completion of coroutine I/O.
   [[nodiscard]] auto TryStartOperation(std::unique_ptr<Operation> &operation, std::coroutine_handle<> continuation)
@@ -171,33 +201,45 @@ class UringContext final {
   void SignalWakeup() const;
   void DrainWakeupCounter() const;
 
-  io_uring ring_{};
-
+  // --- Context resources: declaration order preserves pool-before-ring destruction. ---
+  UringInstance ring_;
   std::unique_ptr<UringProvidedBufferPool> provided_buffer_pool_;
+  WakeupEventFd wakeup_;
 
-  int wakeup_fd_ = -1;
-
+  // --- Cross-thread control: atomic access, independent of post_mutex_. ---
+  // Linux thread ID of the Run owner; zero means Run() has no owner.
   std::atomic<pid_t> run_thread_id_{0};
-
+  // RequestStop() sets this; Run() observes it and drains outstanding work.
   std::atomic<bool> stop_requested_{false};
 
+  // --- Submission and completion tracking: Run thread only. ---
+  // Counts staged + submitted awaitable/cancel requests until their final CQE.
+  // A multishot request counts once; the eventfd poll is tracked separately below.
   std::size_t pending_io_operations_ = 0;
-
-  // Run-thread-owned statistics; no atomic updates on the I/O hot path.
-  UringCounters counters_;
-  std::size_t active_recv_requests_ = 0;
-  UringWindowPeaks peaks_;
-  std::uint64_t stats_window_id_ = 0;
-
+  // Owns prepared operations until io_uring_submit() publishes their SQEs.
   std::vector<std::unique_ptr<Operation>> staged_operations_;
 
+  // --- eventfd multishot poll lifecycle: Run thread only. ---
+  // True from staging the poll until its final CQE; prevents early Run() exit.
   bool wakeup_poll_pending_ = false;
+  // Prevents duplicate poll cancellation while shutdown CQEs are being drained.
   bool wakeup_poll_cancel_requested_ = false;
 
+  // --- Statistics: Run thread only; no atomic updates on the I/O hot path. ---
+  // Cumulative counters across measurement windows.
+  UringCounters counters_;
+  // Recv/RecvProvided requests staged or submitted but not yet finally completed.
+  std::size_t active_recv_requests_ = 0;
+  // High-water marks for the current measurement window.
+  UringWindowPeaks peaks_;
+  // Incremented when SnapshotStats(true) starts a new window.
+  std::uint64_t stats_window_id_ = 0;
+
+  // --- Cross-thread callback queue: both fields below require post_mutex_. ---
   std::mutex post_mutex_;
-
+  // RequestStop() closes admission under the same lock used by Post().
   bool accepting_posts_ = true;
-
+  // Producers enqueue under the lock; Run() takes a batch and executes unlocked.
   std::queue<std::function<void()>> posted_callbacks_;
 };
 
@@ -227,9 +269,9 @@ class UringAwaitable final {
   auto await_resume() -> IoResult;
 
  private:
-  explicit UringAwaitable(UringContext &context, std::unique_ptr<Operation> operation, bool multishot = false) noexcept;
-
   friend class UringContext;
+
+  UringAwaitable(UringContext &context, std::unique_ptr<Operation> operation, bool multishot) noexcept;
 
   UringContext *context_ = nullptr;
   std::unique_ptr<Operation> unstarted_operation_;

@@ -56,7 +56,8 @@ auto ToJson(const WorkerPoolStatsSnapshot &pool) -> nlohmann::json {
          {"gauges",
           {{"queued_batches", q.queued_batches_},
            {"queued_logical_jobs", q.queued_logical_jobs_},
-           {"pending_batches", q.pending_batches_}}},
+           {"pending_batches", q.pending_batches_},
+           {"pending_logical_jobs", q.pending_logical_jobs_}}},
          {"peaks",
           {{"queued_batches", q.queued_batches_peak_}, {"queued_logical_jobs", q.queued_logical_jobs_peak_}}}});
   }

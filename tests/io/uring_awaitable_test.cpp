@@ -386,7 +386,7 @@ TEST(IoUringAwaitableTest, ProvidedPoolExhaustionPreservesLeaseAndRecoversAfterR
   auto server_socket = listen_socket.Accept().value();
   ASSERT_TRUE(client_socket.WriteAll("abcdefgh").ok());
   client_socket.ShutdownWrite();
-  xrpc::io::UringContext context(8, {.buffer_count_ = 1, .buffer_size_ = 4, .group_id_ = 7});
+  xrpc::io::UringContext context(8, xrpc::io::UringBufferPoolConfig{.buffer_count_ = 1, .buffer_size_ = 4, .group_id_ = 7});
   WaitTaskWithContext(ExhaustAndReusePool(context, server_socket.fd()), context);
 }
 
@@ -411,19 +411,19 @@ TEST(IoUringAwaitableTest, ProvidedRecvReportsExhaustionAndReusesReturnedBuffer)
   ASSERT_TRUE(client.Connect("127.0.0.1", listener.LocalPort().value()).ok());
   auto server = listener.Accept().value();
   ASSERT_TRUE(client.WriteAll("abcdefgh").ok());
-  xrpc::io::UringContext context(8, {.buffer_count_ = 1, .buffer_size_ = 4, .group_id_ = 7});
+  xrpc::io::UringContext context(8, xrpc::io::UringBufferPoolConfig{.buffer_count_ = 1, .buffer_size_ = 4, .group_id_ = 7});
   WaitTaskWithContext(ExhaustProvidedRecv(context, server.fd()), context);
 }
 
 TEST(IoUringAwaitableTest, ProvidedRecvInvalidFdAndCancellationBeforeAdmission) {
   xrpc::io::UringContext no_pool;
   EXPECT_THROW((void)no_pool.RecvProvided(-1), xrpc::LifecycleException);
-  xrpc::io::UringContext context(8, {.buffer_count_ = 8, .buffer_size_ = 4});
+  xrpc::io::UringContext context(8, xrpc::io::UringBufferPoolConfig{.buffer_count_ = 8, .buffer_size_ = 4});
   WaitTaskWithContext(CheckProvidedRecvErrors(context), context);
 }
 
 TEST(IoUringStatsTest, UnawaitedAndRejectedReceivesDoNotCountAsPreparedSqes) {
-  xrpc::io::UringContext context(8, {.buffer_count_ = 8, .buffer_size_ = 4});
+  xrpc::io::UringContext context(8, xrpc::io::UringBufferPoolConfig{.buffer_count_ = 8, .buffer_size_ = 4});
   WaitTaskWithContext(CheckUnsubmittedStats(context), context);
 }
 

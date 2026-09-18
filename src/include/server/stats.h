@@ -11,7 +11,8 @@ namespace xrpc {
 struct WorkerQueueStatsSnapshot {
   std::size_t queued_batches_ = 0;
   std::size_t queued_logical_jobs_ = 0;
-  std::size_t pending_batches_ = 0;  // Queued or executing; sampled from existing atomic.
+  std::size_t pending_batches_ = 0;       // Queued or executing; sampled from existing atomic.
+  std::size_t pending_logical_jobs_ = 0;  // Queued or executing on this worker.
   std::size_t queued_batches_peak_ = 0;
   std::size_t queued_logical_jobs_peak_ = 0;
 };
