@@ -36,22 +36,12 @@ namespace xrpc::io {
 //
 // Ownership model:
 //
-// Before submission, an awaitable Operation is first owned by its
-// UringAwaitable, then moved into staged_operations_ by await_suspend().
-// Internal operations are staged directly. In both cases, a unique_ptr owns
-// the Operation until io_uring_submit() succeeds.
-//
-// After a successful submission, no long-lived C++ owner remains. The pending
-// io_uring request carries a raw pointer in user_data, and the Operation must
-// remain alive until that request produces its final CQE.
-//
-// ProcessCqe() temporarily adopts the Operation into a unique_ptr. For a
-// non-final multishot CQE (IORING_CQE_F_MORE), it releases the unique_ptr
-// because the pending request will produce another CQE. The final CQE leaves
-// the unique_ptr owning the Operation, which is then destroyed.
-//
-// RequestStop() only initiates shutdown. Run() must drain every submitted
-// Operation through its final CQE before returning and allowing ring teardown.
+// Awaitables own unstarted operations. On start, the context's operations_
+// takes ownership before submission; user_data only borrows the stable address.
+// Internal cancel and wakeup operations use the same container.
+// Non-final CQEs leave ownership in the container. A final CQE takes the owner
+// into a local unique_ptr before processing and resuming the coroutine.
+// Run() must drain submitted operations before the context can be destroyed.
 // -----------------------------------------------------------------------------
 
 struct Operation {
@@ -61,13 +51,12 @@ struct Operation {
     Wakeup,
   };
 
+  std::size_t owner_index_ = 0;
   OperationType type_ = OperationType::Unknown;
   CompletionCategory completion_category_ = CompletionCategory::Awaitable;
   int fd_ = -1;
   void *buffer_ = nullptr;
   std::size_t length_ = 0;
-  IoResult result_;
-  std::coroutine_handle<> continuation_;
   UringAwaitable *awaitable_ = nullptr;
   bool multishot_ = false;
 };
@@ -96,8 +85,8 @@ WakeupEventFd::WakeupEventFd() {
 WakeupEventFd::~WakeupEventFd() { (void)::close(fd_); }
 
 UringContext::UringContext(std::uint32_t entries, std::optional<UringBufferPoolConfig> buffer_pool_config)
-    : uring_(entries) {
-  staged_operations_.reserve(entries);
+    : uring_(entries), completion_batch_limit_(entries) {
+  operations_.reserve(entries);
 
   if (buffer_pool_config.has_value()) {
     StatusOr<std::unique_ptr<UringProvidedBufferPool>> registered =
@@ -109,7 +98,12 @@ UringContext::UringContext(std::uint32_t entries, std::optional<UringBufferPoolC
   }
 }
 
-UringContext::~UringContext() = default;
+UringContext::~UringContext() {
+  // Container destruction must not free operations still borrowed by the kernel.
+  if (!operations_.empty()) {
+    Abort("UringContext destroyed before its operations were drained");
+  }
+}
 
 auto UringContext::CurrentThreadId() -> pid_t {
   thread_local const auto thread_id = static_cast<pid_t>(::syscall(SYS_gettid));
@@ -203,10 +197,10 @@ auto UringAwaitable::await_suspend(std::coroutine_handle<> continuation) -> bool
     if (!handed_off_operation_->multishot_) {
       Abort("one-shot UringAwaitable awaited again while its operation is pending");
     }
-    if (handed_off_operation_->continuation_) {
+    if (continuation_) {
       Abort("multishot UringAwaitable already has a waiting coroutine");
     }
-    handed_off_operation_->continuation_ = continuation;
+    continuation_ = continuation;
     return true;
   }
 
@@ -215,14 +209,16 @@ auto UringAwaitable::await_suspend(std::coroutine_handle<> continuation) -> bool
   }
   Operation *operation = owned_operation_.get();
   operation->awaitable_ = this;
-  if (!context_.TryStartOperation(owned_operation_, continuation)) {
+  if (!context_.TryStartOperation(owned_operation_)) {
     // A rejected start resumes synchronously through the common result slot.
     auto rejected_operation = std::move(owned_operation_);
-    result_ = std::move(rejected_operation->result_);
+    result_ = UringContext::MakeCancelledResult(*rejected_operation);
     result_ready_ = true;
     return false;
   }
   handed_off_operation_ = operation;
+  // Starting an operation does not dispatch CQEs; publish the waiter only on success.
+  continuation_ = continuation;
   return true;
 }
 
@@ -236,12 +232,16 @@ auto UringAwaitable::await_resume() -> IoResult {
 
 // -----------------------------------------------------------------------------
 // SQE preparation and batched submission
-// Staging owns each Operation until io_uring_submit publishes its SQE.
+// The context owns operations across both preparation and submission.
 // -----------------------------------------------------------------------------
 
 auto UringContext::AcquireSqe() -> io_uring_sqe * {
+  // Allocate before acquiring a new SQE, so ownership handoff cannot throw.
+  if (operations_.size() == operations_.capacity()) {
+    operations_.reserve(operations_.capacity() * 2);
+  }
   io_uring_sqe *sqe = io_uring_get_sqe(&uring_.Get());
-  if (sqe == nullptr && !staged_operations_.empty()) {
+  if (sqe == nullptr && staged_sqe_count_ != 0) {
     FlushSubmissionBatch();
     sqe = io_uring_get_sqe(&uring_.Get());
   }
@@ -251,15 +251,27 @@ auto UringContext::AcquireSqe() -> io_uring_sqe * {
   return sqe;
 }
 
-/** @brief Stages a prepared operation for the next submission flush. */
+/** @brief Takes ownership of a prepared operation and counts its unsubmitted SQE. */
 void UringContext::SubmitPreparedOperation(std::unique_ptr<Operation> operation) noexcept {
-  assert(staged_operations_.size() < staged_operations_.capacity());
-  ++pending_operations_;
-  staged_operations_.push_back(std::move(operation));
+  assert(operations_.size() < operations_.capacity());
+  operation->owner_index_ = operations_.size();
+  operations_.push_back(std::move(operation));
+  ++staged_sqe_count_;
+}
+
+auto UringContext::TakeOperation(Operation &operation) -> std::unique_ptr<Operation> {
+  const std::size_t index = operation.owner_index_;
+  auto completed = std::move(operations_[index]);
+  if (index != operations_.size() - 1) {
+    operations_[index] = std::move(operations_.back());
+    operations_[index]->owner_index_ = index;
+  }
+  operations_.pop_back();
+  return completed;
 }
 
 void UringContext::FlushSubmissionBatch() {
-  while (!staged_operations_.empty()) {
+  while (staged_sqe_count_ != 0) {
     int ret = 0;
     do {
       ret = io_uring_submit(&uring_.Get());
@@ -273,33 +285,28 @@ void UringContext::FlushSubmissionBatch() {
     }
 
     const auto submitted = static_cast<std::size_t>(ret);
-    if (submitted > staged_operations_.size()) {
+    if (submitted > staged_sqe_count_) {
       Abort("io_uring_submit reported more operations than were staged");
     }
-    for (std::size_t index = 0; index < submitted; ++index) {
-      [[maybe_unused]] Operation *released = staged_operations_[index].release();
-    }
-    staged_operations_.erase(staged_operations_.begin(), staged_operations_.begin() + ret);
+    staged_sqe_count_ -= submitted;
   }
 }
 
 /**
  * @brief Starts a deferred awaitable operation on the run thread.
  *
- * A stop request produces a synchronous cancellation result and leaves
- * ownership with the awaitable. Otherwise, all potentially failing work is
+ * A stop request rejects the start; the awaitable retains ownership and
+ * produces its synchronous cancellation result. Otherwise, all potentially failing work is
  * completed before the SQE receives the operation pointer. From that commit
  * point onward, preparing the SQE and moving the operation into the reserved
- * staging vector do not throw.
+ * owning vector do not throw.
  */
-auto UringContext::TryStartOperation(std::unique_ptr<Operation> &operation, std::coroutine_handle<> continuation)
-    -> bool {
+auto UringContext::TryStartOperation(std::unique_ptr<Operation> &operation) -> bool {
   AssertRunThread("io_uring submission attempted outside the owning Run thread");
   if (!operation) {
     Abort("UringContext attempted to start an empty operation");
   }
   if (stop_requested_.load()) {
-    operation->result_ = MakeCancelledResult(*operation);
     return false;
   }
 
@@ -313,7 +320,6 @@ auto UringContext::TryStartOperation(std::unique_ptr<Operation> &operation, std:
       Abort("UringContext attempted to start an operation with unknown type");
   }
 
-  operation->continuation_ = continuation;
   io_uring_sqe *sqe = AcquireSqe();
 
   switch (operation->type_) {
@@ -351,7 +357,7 @@ auto UringContext::TryStartOperation(std::unique_ptr<Operation> &operation, std:
 
 // -----------------------------------------------------------------------------
 // CQE consumption and coroutine resumption
-// Each CQE temporarily takes ownership; only a non-final multishot CQE releases it.
+// Only final CQEs take ownership out of the context, before invoking handlers.
 // -----------------------------------------------------------------------------
 
 void UringContext::ProcessCqe(io_uring_cqe *cqe) {
@@ -361,53 +367,53 @@ void UringContext::ProcessCqe(io_uring_cqe *cqe) {
     return;
   }
 
-  std::unique_ptr<Operation> operation(raw_operation);
+  Operation *operation = raw_operation;
   const bool has_more = (cqe->flags & IORING_CQE_F_MORE) != 0;
   const bool is_final = !operation->multishot_ || !has_more;
-  if (pending_operations_ == 0) {
-    io_uring_cqe_seen(&uring_.Get(), cqe);
-    Abort("UringContext received an operation CQE with no pending operation");
+  if (operation->owner_index_ >= operations_.size() || operations_[operation->owner_index_].get() != operation) {
+    Abort("UringContext received a CQE for an untracked operation");
   }
+  // Keep the final operation alive across handlers, including synchronous resume.
+  std::unique_ptr<Operation> completed_operation;
   if (is_final) {
-    --pending_operations_;
+    completed_operation = TakeOperation(*operation);
   }
   switch (operation->completion_category_) {
     case Operation::CompletionCategory::Awaitable:
       ProcessAwaitableCqe(*operation, cqe);
-      if (!is_final) {
-        [[maybe_unused]] Operation *released = operation.release();
-      }
       return;
     case Operation::CompletionCategory::Cancel:
       ProcessCancelCqe(cqe);
       return;
     case Operation::CompletionCategory::Wakeup:
       ProcessWakeupCqe(cqe, has_more);
-      if (!is_final) {
-        [[maybe_unused]] Operation *released = operation.release();
-      }
       return;
   }
 }
 
 void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) {
+  UringAwaitable *awaitable = operation.awaitable_;
+  if (awaitable == nullptr) {
+    Abort("UringContext completed an operation without an awaitable");
+  }
+  IoResult &result = awaitable->result_;
   const bool is_multishot = operation.multishot_;
   const bool has_more = (cqe->flags & IORING_CQE_F_MORE) != 0;
   const bool is_final = !is_multishot || !has_more;
   if (operation.type_ == OperationType::RecvProvided && cqe->res == -ENOBUFS) {
     ++counters_.provided_buffer_enobufs_;
   }
-  operation.result_.type_ = operation.type_;
-  operation.result_.fd_ = operation.fd_;
-  operation.result_.result_ = cqe->res;
-  operation.result_.error_code_ = cqe->res < 0 ? -cqe->res : 0;
-  operation.result_.has_more_ = is_multishot && has_more;
+  result.type_ = operation.type_;
+  result.fd_ = operation.fd_;
+  result.result_ = cqe->res;
+  result.error_code_ = cqe->res < 0 ? -cqe->res : 0;
+  result.has_more_ = is_multishot && has_more;
   if (operation.type_ == OperationType::Recv || operation.type_ == OperationType::RecvProvided ||
       operation.type_ == OperationType::Send) {
-    operation.result_.bytes_transferred_ = cqe->res > 0 ? static_cast<std::size_t>(cqe->res) : 0;
+    result.bytes_transferred_ = cqe->res > 0 ? static_cast<std::size_t>(cqe->res) : 0;
   }
   if (operation.type_ == OperationType::RecvProvided) {
-    operation.result_.buffer_group_ = provided_buffer_pool_->GroupId();
+    result.buffer_group_ = provided_buffer_pool_->GroupId();
     const bool has_selected_buffer = (cqe->flags & IORING_CQE_F_BUFFER) != 0;
     if (cqe->res > 0 && !has_selected_buffer) {
       io_uring_cqe_seen(&uring_.Get(), cqe);
@@ -419,27 +425,23 @@ void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) 
         Abort("io_uring selected a buffer after its provided-buffer pool was destroyed");
       }
       const auto buffer_id = static_cast<std::uint16_t>(cqe->flags >> IORING_CQE_BUFFER_SHIFT);
-      operation.result_.buffer_ = provided_buffer_pool_->Acquire(buffer_id, operation.result_.bytes_transferred_);
+      result.buffer_ = provided_buffer_pool_->Acquire(buffer_id, result.bytes_transferred_);
     }
   }
 
   io_uring_cqe_seen(&uring_.Get(), cqe);
-  UringAwaitable *awaitable = operation.awaitable_;
-  if (awaitable == nullptr) {
-    Abort("UringContext completed an operation without an awaitable");
-  }
-  awaitable->result_ = std::move(operation.result_);
   awaitable->result_ready_ = true;
   if (is_final) {
     awaitable->handed_off_operation_ = nullptr;
   }
 
-  std::coroutine_handle<> continuation = std::exchange(operation.continuation_, {});
+  std::coroutine_handle<> continuation = std::exchange(awaitable->continuation_, {});
   if (!continuation) {
     Abort("UringContext completed an awaitable operation without a continuation");
   }
   continuation.resume();
-  if (!is_final && !operation.continuation_) {
+  // A final completion may destroy the awaitable during resume.
+  if (!is_final && !awaitable->continuation_) {
     Abort("multishot consumer must await the operation again before yielding");
   }
 }
@@ -550,7 +552,7 @@ void UringContext::DrainPosted() {
  * @brief Arms the eventfd poll used to wake the io_uring event loop.
  *
  * One multishot wakeup poll remains pending while the context runs. Its
- * operation is released to the completion path and survives each CQE carrying
+ * operation stays owned by the context across each CQE carrying
  * MORE; shutdown explicitly cancels it to obtain the final CQE.
  */
 void UringContext::SubmitWakeupPoll() {
@@ -676,9 +678,9 @@ void UringContext::Run() {
   SubmitWakeupPoll();
   FlushSubmissionBatch();
 
-  while (!stop_requested_.load() || pending_operations_ > 0) {
+  while (!stop_requested_.load() || !operations_.empty()) {
     // No operation may remain staged while the event loop blocks.
-    assert(staged_operations_.empty());
+    assert(staged_sqe_count_ == 0);
     io_uring_cqe *cqe = nullptr;
     const int ret = io_uring_wait_cqe(&uring_.Get(), &cqe);
     if (ret < 0) {
@@ -690,7 +692,7 @@ void UringContext::Run() {
 
     // Bound one event-loop turn so newly staged Recv/Send/Accept operations
     // cannot be starved by a continuously replenished completion queue.
-    const std::size_t completion_budget = staged_operations_.capacity();
+    const std::size_t completion_budget = completion_batch_limit_;
     std::size_t processed_cqes = 0;
     try {
       ProcessCqe(cqe);

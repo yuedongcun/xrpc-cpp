@@ -183,10 +183,10 @@ class UringContext final {
   [[nodiscard]] static auto CurrentThreadId() -> pid_t;
 
   // Submission and completion of coroutine I/O.
-  [[nodiscard]] auto TryStartOperation(std::unique_ptr<Operation> &operation, std::coroutine_handle<> continuation)
-      -> bool;
+  [[nodiscard]] auto TryStartOperation(std::unique_ptr<Operation> &operation) -> bool;
   [[nodiscard]] auto AcquireSqe() -> io_uring_sqe *;
   void SubmitPreparedOperation(std::unique_ptr<Operation> operation) noexcept;
+  [[nodiscard]] auto TakeOperation(Operation &operation) -> std::unique_ptr<Operation>;
   void FlushSubmissionBatch();
   void ProcessCqe(io_uring_cqe *cqe);
   void ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe);
@@ -213,11 +213,12 @@ class UringContext final {
   std::atomic<bool> stop_requested_{false};
 
   // --- Submission and completion tracking: Run thread only. ---
-  // Counts all staged + submitted operations until their final CQE.
-  // A multishot request counts once across all of its CQEs.
-  std::size_t pending_operations_ = 0;
-  // Owns prepared operations until io_uring_submit() publishes their SQEs.
-  std::vector<std::unique_ptr<Operation>> staged_operations_;
+  // Owns staged and submitted operations until their final CQE is taken for processing.
+  std::vector<std::unique_ptr<Operation>> operations_;
+  // Prepared SQEs not yet submitted.
+  std::size_t staged_sqe_count_ = 0;
+  // Fixed per-turn CQE budget, independent of operation storage growth.
+  const std::size_t completion_batch_limit_;
 
   // --- eventfd multishot poll lifecycle: Run thread only. ---
   // True from staging the poll until its final CQE; prevents duplicate arming.
@@ -273,6 +274,7 @@ class UringAwaitable final {
   // is non-owning and remains valid through the final CQE.
   std::unique_ptr<Operation> owned_operation_;
   Operation *handed_off_operation_ = nullptr;
+  std::coroutine_handle<> continuation_;
   IoResult result_;
   bool result_ready_ = false;
 };

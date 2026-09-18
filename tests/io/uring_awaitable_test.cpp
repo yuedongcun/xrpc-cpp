@@ -201,6 +201,19 @@ auto CheckProvidedRecvErrors(xrpc::io::UringContext &context) -> xrpc::runtime::
   EXPECT_FALSE(after_stop.has_more_);
 }
 
+// Resume from a final CQE, then grow the context's owner storage while that
+// completion is still on the stack. Keep all child coroutine frames alive.
+auto StartBurstAfterCompletion(xrpc::io::UringContext &context,
+                               std::vector<xrpc::runtime::Task<xrpc::io::IoResult>> &tasks)
+    -> xrpc::runtime::Task<void> {
+  const auto first = co_await context.Recv(-1, nullptr, 0);
+  EXPECT_EQ(first.error_code_, EBADF);
+  for (int i = 0; i < 128; ++i) {
+    tasks.push_back(ReadInvalidFd(context));
+    tasks.back().Start();
+  }
+}
+
 }  // namespace
 
 TEST(IoUringAwaitableTest, StartAfterStopReturnsSynchronousCancellation) {
@@ -357,7 +370,8 @@ TEST(IoUringAwaitableTest, ProvidedPoolExhaustionPreservesLeaseAndRecoversAfterR
   auto server_socket = listen_socket.Accept().value();
   ASSERT_TRUE(client_socket.WriteAll("abcdefgh").ok());
   client_socket.ShutdownWrite();
-  xrpc::io::UringContext context(8, xrpc::io::UringBufferPoolConfig{.buffer_count_ = 1, .buffer_size_ = 4, .group_id_ = 7});
+  xrpc::io::UringContext context(
+      8, xrpc::io::UringBufferPoolConfig{.buffer_count_ = 1, .buffer_size_ = 4, .group_id_ = 7});
   WaitTaskWithContext(ExhaustAndReusePool(context, server_socket.fd()), context);
 }
 
@@ -382,7 +396,8 @@ TEST(IoUringAwaitableTest, ProvidedRecvReportsExhaustionAndReusesReturnedBuffer)
   ASSERT_TRUE(client.Connect("127.0.0.1", listener.LocalPort().value()).ok());
   auto server = listener.Accept().value();
   ASSERT_TRUE(client.WriteAll("abcdefgh").ok());
-  xrpc::io::UringContext context(8, xrpc::io::UringBufferPoolConfig{.buffer_count_ = 1, .buffer_size_ = 4, .group_id_ = 7});
+  xrpc::io::UringContext context(
+      8, xrpc::io::UringBufferPoolConfig{.buffer_count_ = 1, .buffer_size_ = 4, .group_id_ = 7});
   WaitTaskWithContext(ExhaustProvidedRecv(context, server.fd()), context);
 }
 
@@ -444,4 +459,18 @@ TEST(IoUringMultishotTest, AcceptCancellationDrainsQueuedConnections) {
   }
   xrpc::io::UringContext context(32);
   WaitTaskWithContext(CancelAcceptWithQueuedConnections(context, listener.fd()), context);
+}
+
+TEST(IoUringAwaitableTest, CompletionCanGrowOperationStorageAndDrainBeyondRingSize) {
+  xrpc::io::UringContext context(8);
+  std::vector<xrpc::runtime::Task<xrpc::io::IoResult>> tasks;
+  tasks.reserve(128);
+  WaitTaskWithContext(StartBurstAfterCompletion(context, tasks), context);
+  ASSERT_EQ(tasks.size(), 128U);
+  for (auto &task : tasks) {
+    ASSERT_TRUE(task.WaitFor(WaitTimeout));
+    const auto result = task.Result();
+    EXPECT_EQ(result.error_code_, EBADF);
+    EXPECT_FALSE(result.has_more_);
+  }
 }
