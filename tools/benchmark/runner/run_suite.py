@@ -306,7 +306,7 @@ def run_case(repo_root, build_dir, config, case, server_cpus=None, client_cpus=N
         )
         if collect_io_stats:
             after = collect_io_snapshot(server, path)
-            stats["io_stats"] = io_stats_interval(before, after, stats["success"])
+            stats["io_stats"] = io_stats_interval(before, after)
         return stats
     finally:
         if server is not None:

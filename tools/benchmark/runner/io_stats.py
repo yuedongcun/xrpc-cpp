@@ -14,7 +14,7 @@ def collect_io_snapshot(server, path, start_window=False):
             snapshot = json.loads(path.read_text())
             if "error" in snapshot:
                 raise RuntimeError("I/O statistics: " + snapshot["error"])
-            if snapshot.get("schema_version") != 4 or snapshot.get("scope") != "server_runtime":
+            if snapshot.get("schema_version") != 5 or snapshot.get("scope") != "server_runtime":
                 raise RuntimeError("unsupported I/O statistics schema")
             return snapshot
         if server.poll() is not None:
@@ -23,7 +23,7 @@ def collect_io_snapshot(server, path, start_window=False):
     raise RuntimeError("I/O statistics request timed out")
 
 
-def io_stats_interval(before, after, success):
+def io_stats_interval(before, after):
     start = {loop["loop_id"]: loop for loop in before["loops"]}
     end = {loop["loop_id"]: loop for loop in after["loops"]}
     if not start or start.keys() != end.keys():
@@ -44,16 +44,9 @@ def io_stats_interval(before, after, success):
                       "gauges_before": first["gauges"], "gauges_after": last["gauges"]})
         for key, value in delta.items():
             totals[key] = totals.get(key, 0) + value
-    def ratio(numerator, denominator):
-        return numerator / denominator if denominator else None
     return {"scope": "connection_io_loops", "before": before, "after": after,
             "worker_pool": worker_stats_interval(before["worker_pool"], after["worker_pool"]),
-            "loops": loops, "counters": totals,
-            "ratios": {
-                "sqes_per_submit_call": ratio(totals["submitted_sqes"], totals["submit_calls"]),
-                "cqes_per_prepared_recv": ratio(totals["recv_cqes"], totals["prepared_recv_sqes"]),
-                "prepared_recv_sqes_per_1000_success": ratio(totals["prepared_recv_sqes"] * 1000, success),
-                "submit_calls_per_1000_success": ratio(totals["submit_calls"] * 1000, success)}}
+            "loops": loops, "counters": totals}
 
 
 def worker_stats_interval(before, after):

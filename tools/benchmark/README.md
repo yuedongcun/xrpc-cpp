@@ -142,13 +142,11 @@ runner 为 benchmark server 提供临时 `--stats_file`，通过 `SIGUSR1` 请�
 
 `before` 在预热客户端退出后采集，并在每个 loop 上将峰值重置为当时的当前值；已有的 buffer 租约也计入新窗口。累计计数不重置。`after` 在测量客户端退出后采集，同一 loop 的 `window_id` 必须相同，否则拒绝本次结果。窗口包含测量连接的建立、请求处理及关闭，也包含边界采集的唤醒开销；不是仅有业务处理的精确时间窗口。各 loop 独立采样，accept loop 不计入本阶段统计。
 
-输出包含原始 `before/after`、逐 loop 的累计计数差值与边界当前值、计数总和以及派生比例。`recv_cqes` 包含 EOF、错误和取消。`submit_calls` 统计 liburing 调用及重试，不代表 `io_uring_enter` 系统调用数。当前值不取差值，不当作峰值；`peaks` 保留逐 loop 的窗口最大值，不取差值，也不将各 loop 峰值相加冒充全局同时峰值。没有分母的比例输出 `null`。统计 JSON 的 `schema_version` 为 4（移除 multishot recv 专属计数），runner 与启用统计的服务端应使用匹配版本。
+输出包含原始 `before/after`、逐 loop 的 `provided_buffer_enobufs` 差值、边界当前值和窗口峰值。当前值不取差值，峰值不跨 loop 相加。统计 JSON 的 `schema_version` 为 5，runner 与启用统计的服务端应使用匹配版本。
 
-采集代码集中在内部 `server/runtime_stats.h`、benchmark 的 `server/stats_output.cpp` 和 runner 的 `io_stats.py`。本阶段已加入 staged 队列精确峰值、每批 CQE 处理前及快照时采样的 CQ 长度峰值、buffer 借用/归还累计计数、当前及窗口峰值租约数，以及 provided-buffer 接收的 `ENOBUFS` 次数。租约数仅包括用户态已领取的 buffer，不包括内核已选中但 CQE 尚未消费的 buffer，不能用池容量减租约数推算空闲容量。写侧新增逐 loop 的 `pending_write_bytes` 当前值与窗口峰值，包含已预留、排队和正在发送的响应字节，不含 worker 已编码但尚未投递到连接的响应。此峰值是同一 loop 内各连接的同时总量。
+逐 loop 输出 buffer 容量、大小、当前及窗口峰值租约数，以及 `pending_write_bytes` 当前值和窗口峰值。租约数只包括用户态已领取的 buffer，不能用容量减租约数推算内核空闲容量。`pending_write_bytes` 包含已预留、排队和正在发送的响应字节。
 
 `worker_pool` 独立输出已有 admission 总数 `pending_logical_jobs`（包含容量预留、排队和执行中 RPC），以及逐 worker 的 `queued_batches`、`queued_logical_jobs`、`pending_batches` 当前值和排队窗口峰值。一个 batch 可包含多个 RPC。采集复用既有队列锁，逐 worker 采样不构成全局原子快照；峰值也不跨 worker 求和。总快照 scope 为 `server_runtime`，I/O 计数汇总仍只包含 Connection I/O loops。
-
-历史 one-shot / multishot recv 对照见 [性能与压力记录](../../docs/multishot-recv-observability.md)。
 
 ### Buffer 容量与耗尽关闭的压测入口
 
@@ -156,6 +154,6 @@ benchmark server 支持 `--recv_buffer_count=N` 和 `--recv_buffer_size=BYTES`�
 
 runner 配置可分别增加 `server_recv_buffer_count` 和 `server_recv_buffer_size`，例如设置为 1 和 256，配合多条同时接收的连接产生资源压力；单连接的大 payload 会复用 buffer，不一定触发耗尽。省略的参数不传给服务端，仍可运行旧版本。结果保存完整配置，启用 `--collect-io-stats` 后还保存实际 `buffer_capacity` 和 `buffer_size`。
 
-压力实验应结合成功请求、超时、逐连接推进情况、ENOBUFS、recv SQE 和 CPU 判断容量是否足够；ENOBUFS 会导致连接立即关闭。测量客户端关闭后，期望接收请求和 buffer 租约归零，buffer 借还平衡。短时间统计冒烟测试只验证链路，不用于得出性能结论。
+压力实验应结合成功请求、超时、逐连接推进情况、ENOBUFS 和 CPU 判断容量是否足够；ENOBUFS 会导致连接立即关闭。测量客户端关闭后，期望 buffer 租约归零。短时间统计冒烟测试只验证链路，不用于得出性能结论。
 
 firehose 还会输出并由 runner 保存 `connection_progress`：`min_success`、`max_success` 和 `zero_success_connections`。它们以单次测量中每条 TCP 连接的成功 RPC 数计算，用于排查零推进连接和明显失衡；不能替代更长时间的公平性分析。

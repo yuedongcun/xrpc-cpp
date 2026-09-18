@@ -107,8 +107,6 @@ class UringProvidedBufferPool final {
   std::unique_ptr<std::byte[]> storage_;
   std::vector<std::uint8_t> leased_;
   std::size_t outstanding_leases_ = 0;
-  std::uint64_t acquires_ = 0;
-  std::uint64_t returns_ = 0;
   std::size_t outstanding_leases_peak_ = 0;
 };
 

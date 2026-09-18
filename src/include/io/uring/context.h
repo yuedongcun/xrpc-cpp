@@ -48,7 +48,7 @@ class UringInstance final {
   UringInstance(UringInstance &&) = delete;
   auto operator=(UringInstance &&) -> UringInstance & = delete;
 
-  [[nodiscard]] auto Native() noexcept -> io_uring & { return ring_; }
+  [[nodiscard]] auto Get() noexcept -> io_uring & { return ring_; }
 
  private:
   io_uring ring_{};
@@ -186,7 +186,7 @@ class UringContext final {
   [[nodiscard]] auto TryStartOperation(std::unique_ptr<Operation> &operation, std::coroutine_handle<> continuation)
       -> bool;
   [[nodiscard]] auto AcquireSqe() -> io_uring_sqe *;
-  void SubmitPreparedOperation(std::unique_ptr<Operation> operation, bool counts_as_pending_io) noexcept;
+  void SubmitPreparedOperation(std::unique_ptr<Operation> operation) noexcept;
   void FlushSubmissionBatch();
   void ProcessCqe(io_uring_cqe *cqe);
   void ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe);
@@ -202,7 +202,7 @@ class UringContext final {
   void DrainWakeupCounter() const;
 
   // --- Context resources: declaration order preserves pool-before-ring destruction. ---
-  UringInstance ring_;
+  UringInstance uring_;
   std::unique_ptr<UringProvidedBufferPool> provided_buffer_pool_;
   WakeupEventFd wakeup_;
 
@@ -213,25 +213,20 @@ class UringContext final {
   std::atomic<bool> stop_requested_{false};
 
   // --- Submission and completion tracking: Run thread only. ---
-  // Counts staged + submitted awaitable/cancel requests until their final CQE.
-  // A multishot request counts once; the eventfd poll is tracked separately below.
-  std::size_t pending_io_operations_ = 0;
+  // Counts all staged + submitted operations until their final CQE.
+  // A multishot request counts once across all of its CQEs.
+  std::size_t pending_operations_ = 0;
   // Owns prepared operations until io_uring_submit() publishes their SQEs.
   std::vector<std::unique_ptr<Operation>> staged_operations_;
 
   // --- eventfd multishot poll lifecycle: Run thread only. ---
-  // True from staging the poll until its final CQE; prevents early Run() exit.
+  // True from staging the poll until its final CQE; prevents duplicate arming.
   bool wakeup_poll_pending_ = false;
   // Prevents duplicate poll cancellation while shutdown CQEs are being drained.
   bool wakeup_poll_cancel_requested_ = false;
 
-  // --- Statistics: Run thread only; no atomic updates on the I/O hot path. ---
-  // Cumulative counters across measurement windows.
+  // --- Statistics: Run thread only. ---
   UringCounters counters_;
-  // Recv/RecvProvided requests staged or submitted but not yet finally completed.
-  std::size_t active_recv_requests_ = 0;
-  // High-water marks for the current measurement window.
-  UringWindowPeaks peaks_;
   // Incremented when SnapshotStats(true) starts a new window.
   std::uint64_t stats_window_id_ = 0;
 

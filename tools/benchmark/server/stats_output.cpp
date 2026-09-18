@@ -15,28 +15,11 @@ auto ToJson(const io::UringStatsSnapshot &snapshot, std::size_t loop_id) -> nloh
   const auto &c = snapshot.counters_;
   nlohmann::json output{{"loop_id", loop_id},
                         {"window_id", snapshot.window_id_},
-                        {"peaks",
-                         {{"staged_operations", snapshot.peaks_.staged_operations_},
-                          {"cq_ready_sampled", snapshot.peaks_.cq_ready_sampled_}}},
-                        {"counters",
-                         {{"prepared_accept_sqes", c.prepared_accept_sqes_},
-                          {"prepared_recv_sqes", c.prepared_recv_sqes_},
-                          {"prepared_send_sqes", c.prepared_send_sqes_},
-                          {"prepared_cancel_sqes", c.prepared_cancel_sqes_},
-                          {"prepared_wakeup_sqes", c.prepared_wakeup_sqes_},
-                          {"submit_calls", c.submit_calls_},
-                          {"submitted_sqes", c.submitted_sqes_},
-                          {"recv_cqes", c.recv_cqes_},
-                          {"received_bytes", c.received_bytes_},
-                          {"provided_buffer_enobufs", c.provided_buffer_enobufs_}}},
-                        {"gauges",
-                         {{"staged_operations", snapshot.staged_operations_},
-                          {"active_recv_requests", snapshot.active_recv_requests_},
-                          {"cq_ready", snapshot.cq_ready_}}}};
+                        {"peaks", nlohmann::json::object()},
+                        {"counters", {{"provided_buffer_enobufs", c.provided_buffer_enobufs_}}},
+                        {"gauges", nlohmann::json::object()}};
   if (snapshot.buffer_pool_) {
     const auto &pool = *snapshot.buffer_pool_;
-    output["counters"]["buffer_acquires"] = pool.acquires_;
-    output["counters"]["buffer_returns"] = pool.returns_;
     output["gauges"]["buffer_capacity"] = pool.capacity_;
     output["gauges"]["buffer_size"] = pool.buffer_size_;
     output["gauges"]["buffer_outstanding_leases"] = pool.outstanding_leases_;
@@ -69,7 +52,7 @@ auto ToJson(const WorkerPoolStatsSnapshot &pool) -> nlohmann::json {
 auto WriteStatsSnapshot(RpcServer &server, const std::string &path, bool start_window) -> Status {
   try {
     const auto result = ServerStatsAccess::Snapshot(server, start_window);
-    nlohmann::json output{{"schema_version", 4}, {"scope", "server_runtime"}};
+    nlohmann::json output{{"schema_version", 5}, {"scope", "server_runtime"}};
     if (!result.ok()) {
       output["error"] = result.status().message();
     } else {

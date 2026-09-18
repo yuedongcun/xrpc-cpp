@@ -20,7 +20,6 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-#include <algorithm>
 #include <cassert>
 #include <cerrno>
 #include <exception>
@@ -97,12 +96,12 @@ WakeupEventFd::WakeupEventFd() {
 WakeupEventFd::~WakeupEventFd() { (void)::close(fd_); }
 
 UringContext::UringContext(std::uint32_t entries, std::optional<UringBufferPoolConfig> buffer_pool_config)
-    : ring_(entries) {
+    : uring_(entries) {
   staged_operations_.reserve(entries);
 
   if (buffer_pool_config.has_value()) {
     StatusOr<std::unique_ptr<UringProvidedBufferPool>> registered =
-        UringProvidedBufferPool::Register(ring_.Native(), *buffer_pool_config);
+        UringProvidedBufferPool::Register(uring_.Get(), *buffer_pool_config);
     if (!registered.ok()) {
       throw InternalException(registered.status().message());
     }
@@ -241,10 +240,10 @@ auto UringAwaitable::await_resume() -> IoResult {
 // -----------------------------------------------------------------------------
 
 auto UringContext::AcquireSqe() -> io_uring_sqe * {
-  io_uring_sqe *sqe = io_uring_get_sqe(&ring_.Native());
+  io_uring_sqe *sqe = io_uring_get_sqe(&uring_.Get());
   if (sqe == nullptr && !staged_operations_.empty()) {
     FlushSubmissionBatch();
-    sqe = io_uring_get_sqe(&ring_.Native());
+    sqe = io_uring_get_sqe(&uring_.Get());
   }
   if (sqe == nullptr) {
     throw InternalException("io_uring_get_sqe failed");
@@ -253,46 +252,17 @@ auto UringContext::AcquireSqe() -> io_uring_sqe * {
 }
 
 /** @brief Stages a prepared operation for the next submission flush. */
-void UringContext::SubmitPreparedOperation(std::unique_ptr<Operation> operation, bool counts_as_pending_io) noexcept {
+void UringContext::SubmitPreparedOperation(std::unique_ptr<Operation> operation) noexcept {
   assert(staged_operations_.size() < staged_operations_.capacity());
-  switch (operation->completion_category_) {
-    case Operation::CompletionCategory::Cancel:
-      ++counters_.prepared_cancel_sqes_;
-      break;
-    case Operation::CompletionCategory::Wakeup:
-      ++counters_.prepared_wakeup_sqes_;
-      break;
-    case Operation::CompletionCategory::Awaitable:
-      switch (operation->type_) {
-        case OperationType::Accept:
-          ++counters_.prepared_accept_sqes_;
-          break;
-        case OperationType::Recv:
-        case OperationType::RecvProvided:
-          ++counters_.prepared_recv_sqes_;
-          ++active_recv_requests_;
-          break;
-        case OperationType::Send:
-          ++counters_.prepared_send_sqes_;
-          break;
-        case OperationType::Unknown:
-          Abort("UringContext staged an operation with unknown type");
-      }
-      break;
-  }
-  if (counts_as_pending_io) {
-    ++pending_io_operations_;
-  }
+  ++pending_operations_;
   staged_operations_.push_back(std::move(operation));
-  peaks_.staged_operations_ = std::max(peaks_.staged_operations_, staged_operations_.size());
 }
 
 void UringContext::FlushSubmissionBatch() {
   while (!staged_operations_.empty()) {
     int ret = 0;
     do {
-      ++counters_.submit_calls_;
-      ret = io_uring_submit(&ring_.Native());
+      ret = io_uring_submit(&uring_.Get());
     } while (ret == -EINTR);
 
     if (ret < 0) {
@@ -306,7 +276,6 @@ void UringContext::FlushSubmissionBatch() {
     if (submitted > staged_operations_.size()) {
       Abort("io_uring_submit reported more operations than were staged");
     }
-    counters_.submitted_sqes_ += submitted;
     for (std::size_t index = 0; index < submitted; ++index) {
       [[maybe_unused]] Operation *released = staged_operations_[index].release();
     }
@@ -346,7 +315,6 @@ auto UringContext::TryStartOperation(std::unique_ptr<Operation> &operation, std:
 
   operation->continuation_ = continuation;
   io_uring_sqe *sqe = AcquireSqe();
-  assert(staged_operations_.size() < staged_operations_.capacity());
 
   switch (operation->type_) {
     case OperationType::Accept:
@@ -377,7 +345,7 @@ auto UringContext::TryStartOperation(std::unique_ptr<Operation> &operation, std:
   Operation *raw_operation = operation.get();
   io_uring_sqe_set_data(sqe, raw_operation);
 
-  SubmitPreparedOperation(std::move(operation), true);
+  SubmitPreparedOperation(std::move(operation));
   return true;
 }
 
@@ -389,17 +357,24 @@ auto UringContext::TryStartOperation(std::unique_ptr<Operation> &operation, std:
 void UringContext::ProcessCqe(io_uring_cqe *cqe) {
   auto *raw_operation = static_cast<Operation *>(io_uring_cqe_get_data(cqe));
   if (raw_operation == nullptr) {
-    io_uring_cqe_seen(&ring_.Native(), cqe);
+    io_uring_cqe_seen(&uring_.Get(), cqe);
     return;
   }
 
   std::unique_ptr<Operation> operation(raw_operation);
   const bool has_more = (cqe->flags & IORING_CQE_F_MORE) != 0;
-  const bool keep_multishot_operation = operation->multishot_ && has_more;
+  const bool is_final = !operation->multishot_ || !has_more;
+  if (pending_operations_ == 0) {
+    io_uring_cqe_seen(&uring_.Get(), cqe);
+    Abort("UringContext received an operation CQE with no pending operation");
+  }
+  if (is_final) {
+    --pending_operations_;
+  }
   switch (operation->completion_category_) {
     case Operation::CompletionCategory::Awaitable:
       ProcessAwaitableCqe(*operation, cqe);
-      if (keep_multishot_operation) {
+      if (!is_final) {
         [[maybe_unused]] Operation *released = operation.release();
       }
       return;
@@ -408,7 +383,7 @@ void UringContext::ProcessCqe(io_uring_cqe *cqe) {
       return;
     case Operation::CompletionCategory::Wakeup:
       ProcessWakeupCqe(cqe, has_more);
-      if (keep_multishot_operation) {
+      if (!is_final) {
         [[maybe_unused]] Operation *released = operation.release();
       }
       return;
@@ -416,26 +391,12 @@ void UringContext::ProcessCqe(io_uring_cqe *cqe) {
 }
 
 void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) {
-  if (pending_io_operations_ == 0) {
-    io_uring_cqe_seen(&ring_.Native(), cqe);
-    Abort("UringContext received an awaitable CQE with no pending I/O");
-  }
   const bool is_multishot = operation.multishot_;
   const bool has_more = (cqe->flags & IORING_CQE_F_MORE) != 0;
   const bool is_final = !is_multishot || !has_more;
-  if (operation.type_ == OperationType::Recv || operation.type_ == OperationType::RecvProvided) {
-    ++counters_.recv_cqes_;
-    counters_.received_bytes_ += cqe->res > 0 ? static_cast<std::uint64_t>(cqe->res) : 0;
-    if (operation.type_ == OperationType::RecvProvided && cqe->res == -ENOBUFS) {
-      ++counters_.provided_buffer_enobufs_;
-    }
-    assert(active_recv_requests_ > 0);
-    --active_recv_requests_;
+  if (operation.type_ == OperationType::RecvProvided && cqe->res == -ENOBUFS) {
+    ++counters_.provided_buffer_enobufs_;
   }
-  if (is_final) {
-    --pending_io_operations_;
-  }
-
   operation.result_.type_ = operation.type_;
   operation.result_.fd_ = operation.fd_;
   operation.result_.result_ = cqe->res;
@@ -449,12 +410,12 @@ void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) 
     operation.result_.buffer_group_ = provided_buffer_pool_->GroupId();
     const bool has_selected_buffer = (cqe->flags & IORING_CQE_F_BUFFER) != 0;
     if (cqe->res > 0 && !has_selected_buffer) {
-      io_uring_cqe_seen(&ring_.Native(), cqe);
+      io_uring_cqe_seen(&uring_.Get(), cqe);
       Abort("io_uring completed a provided-buffer receive without selecting a buffer");
     }
     if (has_selected_buffer) {
       if (!provided_buffer_pool_) {
-        io_uring_cqe_seen(&ring_.Native(), cqe);
+        io_uring_cqe_seen(&uring_.Get(), cqe);
         Abort("io_uring selected a buffer after its provided-buffer pool was destroyed");
       }
       const auto buffer_id = static_cast<std::uint16_t>(cqe->flags >> IORING_CQE_BUFFER_SHIFT);
@@ -462,7 +423,7 @@ void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) 
     }
   }
 
-  io_uring_cqe_seen(&ring_.Native(), cqe);
+  io_uring_cqe_seen(&uring_.Get(), cqe);
   UringAwaitable *awaitable = operation.awaitable_;
   if (awaitable == nullptr) {
     Abort("UringContext completed an operation without an awaitable");
@@ -484,16 +445,10 @@ void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) 
 }
 
 void UringContext::ProcessCancelCqe(io_uring_cqe *cqe) {
-  if (pending_io_operations_ == 0) {
-    io_uring_cqe_seen(&ring_.Native(), cqe);
-    Abort("UringContext received a cancel CQE with no pending I/O");
-  }
-  --pending_io_operations_;
-
   IoResult result;
   result.result_ = cqe->res;
   result.error_code_ = cqe->res < 0 ? -cqe->res : 0;
-  io_uring_cqe_seen(&ring_.Native(), cqe);
+  io_uring_cqe_seen(&uring_.Get(), cqe);
   if (result.result_ < 0 && result.error_code_ != ENOENT && result.error_code_ != EALREADY &&
       result.error_code_ != ECANCELED) {
     throw InternalException(MakeSystemErrorMessage("io_uring cancel", result.error_code_));
@@ -528,7 +483,7 @@ void UringContext::SubmitCancelFd(int fd) {
   Operation *raw_operation = operation.get();
   io_uring_sqe_set_data(sqe, raw_operation);
 
-  SubmitPreparedOperation(std::move(operation), true);
+  SubmitPreparedOperation(std::move(operation));
 
   // Callers close the descriptor immediately after CancelFd() returns. Publish
   // the cancellation before that close instead of waiting for the turn boundary.
@@ -615,7 +570,7 @@ void UringContext::SubmitWakeupPoll() {
   Operation *raw_operation = operation.get();
   io_uring_sqe_set_data(sqe, raw_operation);
 
-  SubmitPreparedOperation(std::move(operation), false);
+  SubmitPreparedOperation(std::move(operation));
   wakeup_poll_pending_ = true;
 }
 
@@ -631,7 +586,7 @@ void UringContext::ProcessWakeupCqe(io_uring_cqe *cqe, bool has_more) {
 
   const int result = cqe->res;
   const int error_code = result < 0 ? -result : 0;
-  io_uring_cqe_seen(&ring_.Native(), cqe);
+  io_uring_cqe_seen(&uring_.Get(), cqe);
 
   if (result < 0) {
     if (stop_requested_.load() && error_code == ECANCELED && !has_more) {
@@ -697,19 +652,11 @@ void UringContext::DrainWakeupCounter() const {
 
 auto UringContext::SnapshotStats(bool start_window) -> UringStatsSnapshot {
   AssertRunThread("UringContext::SnapshotStats called outside the owning Run thread");
-  const std::size_t cq_ready = io_uring_cq_ready(&ring_.Native());
   if (start_window) {
     ++stats_window_id_;
-    peaks_ = {.staged_operations_ = staged_operations_.size(), .cq_ready_sampled_ = cq_ready};
-  } else {
-    peaks_.cq_ready_sampled_ = std::max(peaks_.cq_ready_sampled_, cq_ready);
   }
   return {.counters_ = counters_,
-          .staged_operations_ = staged_operations_.size(),
-          .active_recv_requests_ = active_recv_requests_,
-          .cq_ready_ = cq_ready,
           .window_id_ = stats_window_id_,
-          .peaks_ = peaks_,
           .buffer_pool_ =
               provided_buffer_pool_ ? std::optional{provided_buffer_pool_->SnapshotStats(start_window)} : std::nullopt};
 }
@@ -729,11 +676,11 @@ void UringContext::Run() {
   SubmitWakeupPoll();
   FlushSubmissionBatch();
 
-  while (!stop_requested_.load() || pending_io_operations_ > 0 || wakeup_poll_pending_) {
+  while (!stop_requested_.load() || pending_operations_ > 0) {
     // No operation may remain staged while the event loop blocks.
     assert(staged_operations_.empty());
     io_uring_cqe *cqe = nullptr;
-    const int ret = io_uring_wait_cqe(&ring_.Native(), &cqe);
+    const int ret = io_uring_wait_cqe(&uring_.Get(), &cqe);
     if (ret < 0) {
       if (ret == -EINTR) {
         continue;
@@ -743,14 +690,12 @@ void UringContext::Run() {
 
     // Bound one event-loop turn so newly staged Recv/Send/Accept operations
     // cannot be starved by a continuously replenished completion queue.
-    peaks_.cq_ready_sampled_ =
-        std::max(peaks_.cq_ready_sampled_, static_cast<std::size_t>(io_uring_cq_ready(&ring_.Native())));
     const std::size_t completion_budget = staged_operations_.capacity();
     std::size_t processed_cqes = 0;
     try {
       ProcessCqe(cqe);
       ++processed_cqes;
-      while (processed_cqes < completion_budget && io_uring_peek_cqe(&ring_.Native(), &cqe) == 0) {
+      while (processed_cqes < completion_budget && io_uring_peek_cqe(&uring_.Get(), &cqe) == 0) {
         ProcessCqe(cqe);
         ++processed_cqes;
       }

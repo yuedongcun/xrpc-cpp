@@ -117,8 +117,6 @@ auto ExhaustAndReusePool(xrpc::io::UringContext &context, int fd) -> xrpc::runti
   EXPECT_EQ(held.buffer_pool_->capacity_, 1U);
   EXPECT_EQ(held.buffer_pool_->outstanding_leases_, 1U);
   EXPECT_EQ(held.buffer_pool_->outstanding_leases_peak_, 1U);
-  EXPECT_EQ(held.buffer_pool_->acquires_, 1U);
-  EXPECT_EQ(held.buffer_pool_->returns_, 0U);
 
   // The only buffer remains leased, so the next receive must fail rather than overwrite it.
   auto exhausted = co_await context.RecvProvided(fd);
@@ -134,10 +132,6 @@ auto ExhaustAndReusePool(xrpc::io::UringContext &context, int fd) -> xrpc::runti
   EXPECT_EQ(reset.window_id_, held.window_id_ + 1);
   EXPECT_EQ(reset.buffer_pool_->outstanding_leases_, 0U);
   EXPECT_EQ(reset.buffer_pool_->outstanding_leases_peak_, 0U);
-  EXPECT_EQ(reset.buffer_pool_->acquires_, 1U);  // Resetting peaks preserves counters.
-  EXPECT_EQ(reset.buffer_pool_->returns_, 1U);
-  EXPECT_EQ(reset.peaks_.staged_operations_, reset.staged_operations_);
-  EXPECT_EQ(reset.peaks_.cq_ready_sampled_, reset.cq_ready_);
   auto next = co_await context.RecvProvided(fd);
   EXPECT_EQ(next.result_, 4);
   EXPECT_EQ(context.SnapshotStats().buffer_pool_->outstanding_leases_peak_, 1U);
@@ -150,7 +144,6 @@ auto ExhaustAndReusePool(xrpc::io::UringContext &context, int fd) -> xrpc::runti
 }
 
 auto AcceptMultishotTwiceAndCancel(xrpc::io::UringContext &context, int listen_fd) -> xrpc::runtime::Task<void> {
-  const auto before = context.SnapshotStats();
   auto accept = context.AcceptMultishot(listen_fd);
   for (int accepted = 0; accepted < 2; ++accepted) {
     const xrpc::io::IoResult result = co_await accept;
@@ -165,7 +158,6 @@ auto AcceptMultishotTwiceAndCancel(xrpc::io::UringContext &context, int listen_f
   const xrpc::io::IoResult cancelled = co_await accept;
   EXPECT_EQ(cancelled.error_code_, ECANCELED);
   EXPECT_FALSE(cancelled.has_more_);
-  EXPECT_EQ(context.SnapshotStats().counters_.prepared_accept_sqes_ - before.counters_.prepared_accept_sqes_, 1U);
 }
 
 auto ExhaustProvidedRecv(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<void> {
@@ -177,8 +169,6 @@ auto ExhaustProvidedRecv(xrpc::io::UringContext &context, int fd) -> xrpc::runti
   EXPECT_FALSE(exhausted.has_more_);
   const auto pressure = context.SnapshotStats();
   EXPECT_EQ(pressure.counters_.provided_buffer_enobufs_, 1U);
-  EXPECT_EQ(pressure.active_recv_requests_, 0U);
-  EXPECT_EQ(pressure.counters_.prepared_recv_sqes_, 2U);
   EXPECT_TRUE(exhausted.buffer_.Empty());
   EXPECT_EQ(pressure.buffer_pool_->outstanding_leases_, 1U);
   EXPECT_EQ(pressure.buffer_pool_->outstanding_leases_peak_, 1U);
@@ -188,7 +178,6 @@ auto ExhaustProvidedRecv(xrpc::io::UringContext &context, int fd) -> xrpc::runti
   first.buffer_.Reset();
   const auto released = context.SnapshotStats();
   EXPECT_EQ(released.buffer_pool_->outstanding_leases_, 0U);
-  EXPECT_EQ(released.buffer_pool_->acquires_, released.buffer_pool_->returns_);
 
   auto remaining = co_await context.RecvProvided(fd);
   EXPECT_EQ(remaining.result_, 4);
@@ -197,11 +186,6 @@ auto ExhaustProvidedRecv(xrpc::io::UringContext &context, int fd) -> xrpc::runti
   remaining.buffer_.Reset();
 
   const auto recovered = context.SnapshotStats();
-  EXPECT_EQ(recovered.counters_.prepared_recv_sqes_, 3U);
-  EXPECT_EQ(recovered.counters_.received_bytes_, 8U);
-  EXPECT_EQ(recovered.active_recv_requests_, 0U);
-  EXPECT_EQ(recovered.buffer_pool_->acquires_, 2U);
-  EXPECT_EQ(recovered.buffer_pool_->returns_, 2U);
   EXPECT_EQ(recovered.buffer_pool_->outstanding_leases_, 0U);
 }
 
@@ -215,19 +199,6 @@ auto CheckProvidedRecvErrors(xrpc::io::UringContext &context) -> xrpc::runtime::
   auto after_stop = co_await stopped;
   EXPECT_EQ(after_stop.error_code_, ECANCELED);
   EXPECT_FALSE(after_stop.has_more_);
-}
-
-auto CheckUnsubmittedStats(xrpc::io::UringContext &context) -> xrpc::runtime::Task<void> {
-  const auto before = context.SnapshotStats();
-  auto unawaited = context.RecvProvided(-1);
-  EXPECT_EQ(context.SnapshotStats().counters_.prepared_recv_sqes_, before.counters_.prepared_recv_sqes_);
-  context.RequestStop();
-  auto rejected = co_await context.RecvProvided(-1);
-  EXPECT_EQ(rejected.error_code_, ECANCELED);
-  const auto after = context.SnapshotStats();
-  EXPECT_EQ(after.counters_.prepared_recv_sqes_, before.counters_.prepared_recv_sqes_);
-  EXPECT_EQ(after.counters_.recv_cqes_, before.counters_.recv_cqes_);
-  EXPECT_EQ(after.active_recv_requests_, 0U);
 }
 
 }  // namespace
@@ -422,27 +393,21 @@ TEST(IoUringAwaitableTest, ProvidedRecvInvalidFdAndCancellationBeforeAdmission) 
   WaitTaskWithContext(CheckProvidedRecvErrors(context), context);
 }
 
-TEST(IoUringStatsTest, UnawaitedAndRejectedReceivesDoNotCountAsPreparedSqes) {
-  xrpc::io::UringContext context(8, xrpc::io::UringBufferPoolConfig{.buffer_count_ = 8, .buffer_size_ = 4});
-  WaitTaskWithContext(CheckUnsubmittedStats(context), context);
-}
-
 TEST(IoUringMultishotTest, WakeupPollSurvivesRepeatedPostsAndStops) {
   xrpc::io::UringContext context(16);
   std::jthread thread([&context]() -> void { context.Run(); });
   // Each acknowledged callback precedes the next Post. This exercises wakeups
   // across turns rather than only draining a single preloaded callback queue.
   for (int round = 0; round < 32; ++round) {
-    auto promise = std::make_shared<std::promise<std::uint64_t>>();
+    auto promise = std::make_shared<std::promise<void>>();
     auto future = promise->get_future();
-    context.Post(
-        [&context, promise]() -> void { promise->set_value(context.SnapshotStats().counters_.prepared_wakeup_sqes_); });
+    context.Post([promise]() -> void { promise->set_value(); });
     const auto ready = future.wait_for(WaitTimeout);
     EXPECT_EQ(ready, std::future_status::ready);
     if (ready != std::future_status::ready) {
       break;
     }
-    EXPECT_EQ(future.get(), 1U);
+    future.get();
   }
   context.RequestStop();
   thread.join();
