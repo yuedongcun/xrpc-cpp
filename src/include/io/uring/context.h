@@ -247,10 +247,10 @@ class UringContext final {
  * @brief Address-stable result of an I/O submission for one coroutine awaiter.
  *
  * An awaitable owns one unstarted operation. `await_suspend()` transfers that
- * operation to the `UringContext`; `await_resume()` moves the completed result
- * out of the operation. A multishot awaitable keeps its operation alive while
- * CQEs carry `IORING_CQE_F_MORE`; its final CQE ends the operation. It supports
- * the synchronous consumer protocol used by multishot accept. Awaitables are
+ * operation to the `UringContext`; each completion delivers its result through
+ * the awaitable. A multishot awaitable keeps its operation alive while CQEs
+ * carry `IORING_CQE_F_MORE`; its final CQE ends the operation. It supports the
+ * synchronous consumer protocol used by multishot accept. Awaitables are
  * immovable so an active operation can safely retain its awaitable's address.
  */
 class UringAwaitable final {
@@ -262,7 +262,7 @@ class UringAwaitable final {
   UringAwaitable(UringAwaitable &&) = delete;
   auto operator=(UringAwaitable &&) -> UringAwaitable & = delete;
 
-  auto await_ready() const noexcept -> bool { return false; }
+  auto await_ready() const noexcept -> bool;
 
   auto await_suspend(std::coroutine_handle<> continuation) -> bool;
 
@@ -277,7 +277,6 @@ class UringAwaitable final {
   std::unique_ptr<Operation> unstarted_operation_;
   Operation *active_operation_ = nullptr;
   IoResult result_;
-  bool multishot_ = false;
   bool result_ready_ = false;
 };
 

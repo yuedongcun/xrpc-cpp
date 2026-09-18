@@ -165,11 +165,11 @@ auto UringContext::Send(int fd, const void *buffer, std::size_t len) -> UringAwa
 
 // -----------------------------------------------------------------------------
 // Coroutine handoff: await_suspend -> completion -> await_resume
-// An awaitable transfers an Operation on first await; multishot reuses that operation.
+// An Operation survives until its final CQE; every result returns through its awaitable.
 // -----------------------------------------------------------------------------
 
 UringAwaitable::UringAwaitable(UringContext &context, std::unique_ptr<Operation> operation, bool multishot) noexcept
-    : context_(&context), unstarted_operation_(std::move(operation)), multishot_(multishot) {
+    : context_(&context), unstarted_operation_(std::move(operation)) {
   unstarted_operation_->multishot_ = multishot;
 }
 
@@ -179,32 +179,26 @@ UringAwaitable::~UringAwaitable() {
   }
 }
 
+auto UringAwaitable::await_ready() const noexcept -> bool { return false; }
+
 auto UringAwaitable::await_suspend(std::coroutine_handle<> continuation) -> bool {
-  if (context_ == nullptr || (!unstarted_operation_ && active_operation_ == nullptr)) {
+  if (context_ == nullptr) {
     Abort("UringAwaitable suspended in an invalid or already-consumed state");
   }
 
-  if (multishot_) {
-    if (active_operation_ == nullptr) {
-      Operation *operation = unstarted_operation_.get();
-      operation->awaitable_ = this;
-      if (!context_->TryStartOperation(unstarted_operation_, continuation)) {
-        return false;
-      }
-      active_operation_ = operation;
-    } else {
-      if (active_operation_->continuation_) {
-        Abort("multishot operation already has a waiting coroutine");
-      }
-      active_operation_->continuation_ = continuation;
+  if (active_operation_ != nullptr) {
+    if (!active_operation_->multishot_ || active_operation_->continuation_) {
+      Abort("UringAwaitable suspended while its operation already has a waiting coroutine");
     }
+    active_operation_->continuation_ = continuation;
     return true;
   }
 
-  if (active_operation_ != nullptr || !unstarted_operation_) {
+  if (!unstarted_operation_) {
     Abort("UringAwaitable suspended in an invalid or already-consumed state");
   }
   Operation *operation = unstarted_operation_.get();
+  operation->awaitable_ = this;
   if (!context_->TryStartOperation(unstarted_operation_, continuation)) {
     return false;
   }
@@ -213,22 +207,9 @@ auto UringAwaitable::await_suspend(std::coroutine_handle<> continuation) -> bool
 }
 
 auto UringAwaitable::await_resume() -> IoResult {
-  if (multishot_) {
-    if (result_ready_) {
-      result_ready_ = false;
-      return std::exchange(result_, {});
-    }
-    if (unstarted_operation_) {
-      IoResult result = std::move(unstarted_operation_->result_);
-      unstarted_operation_.reset();
-      return result;
-    }
-    Abort("multishot operation resumed without a result");
-  }
-  if (active_operation_ != nullptr) {
-    IoResult result = std::move(active_operation_->result_);
-    active_operation_ = nullptr;
-    return result;
+  if (result_ready_) {
+    result_ready_ = false;
+    return std::exchange(result_, {});
   }
   if (unstarted_operation_) {
     IoResult result = std::move(unstarted_operation_->result_);
@@ -386,7 +367,7 @@ auto UringContext::TryStartOperation(std::unique_ptr<Operation> &operation, std:
 
 // -----------------------------------------------------------------------------
 // CQE consumption and coroutine resumption
-// One-shot takes final ownership; multishot keeps ownership alive while MORE is set.
+// Each CQE temporarily takes ownership; only a non-final multishot CQE releases it.
 // -----------------------------------------------------------------------------
 
 void UringContext::ProcessCqe(io_uring_cqe *cqe) {
@@ -425,6 +406,7 @@ void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) 
   }
   const bool is_multishot = operation.multishot_;
   const bool has_more = (cqe->flags & IORING_CQE_F_MORE) != 0;
+  const bool is_final = !is_multishot || !has_more;
   if (operation.type_ == OperationType::Recv || operation.type_ == OperationType::RecvProvided) {
     ++counters_.recv_cqes_;
     counters_.received_bytes_ += cqe->res > 0 ? static_cast<std::uint64_t>(cqe->res) : 0;
@@ -434,7 +416,7 @@ void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) 
     assert(active_recv_requests_ > 0);
     --active_recv_requests_;
   }
-  if (!is_multishot || !has_more) {
+  if (is_final) {
     --pending_io_operations_;
   }
 
@@ -465,22 +447,14 @@ void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) 
   }
 
   io_uring_cqe_seen(&ring_.Native(), cqe);
-  if (is_multishot) {
-    UringAwaitable *awaitable = operation.awaitable_;
-    awaitable->result_ = std::move(operation.result_);
-    awaitable->result_ready_ = true;
-    if (!has_more) {
-      awaitable->active_operation_ = nullptr;
-    }
-    std::coroutine_handle<> continuation = std::exchange(operation.continuation_, {});
-    if (!continuation) {
-      Abort("multishot operation completed without a waiting coroutine");
-    }
-    continuation.resume();
-    if (has_more && !operation.continuation_) {
-      Abort("multishot consumer must await the operation again before yielding");
-    }
-    return;
+  UringAwaitable *awaitable = operation.awaitable_;
+  if (awaitable == nullptr) {
+    Abort("UringContext completed an operation without an awaitable");
+  }
+  awaitable->result_ = std::move(operation.result_);
+  awaitable->result_ready_ = true;
+  if (is_final) {
+    awaitable->active_operation_ = nullptr;
   }
 
   std::coroutine_handle<> continuation = std::exchange(operation.continuation_, {});
@@ -488,6 +462,9 @@ void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) 
     Abort("UringContext completed an awaitable operation without a continuation");
   }
   continuation.resume();
+  if (!is_final && !operation.continuation_) {
+    Abort("multishot consumer must await the operation again before yielding");
+  }
 }
 
 void UringContext::ProcessCancelCqe(io_uring_cqe *cqe) {
