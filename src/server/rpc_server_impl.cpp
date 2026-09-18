@@ -29,6 +29,7 @@
 #include <string_view>
 #include <utility>
 
+#include "common/log.h"
 #include "common/xrpc_exception.h"
 #include "io/socket.h"
 #include "naming/consul/consul_registrar.h"
@@ -220,32 +221,35 @@ void RpcServer::Impl::StartAcceptLoop() {
 
 auto RpcServer::Impl::AcceptLoop() -> runtime::Task<void> {
   try {
-    auto accept = accept_context_.AcceptMultishot(listen_socket_.fd());
     std::exception_ptr dispatch_error;
-    // Stop closes admission immediately, but successful CQEs may already be
-    // queued. Keep awaiting until the original request's final CQE arrives.
-    bool has_more = false;
-    while (!accept_stopped_ || has_more) {
-      const io::IoResult accept_result = co_await accept;
-      has_more = accept_result.has_more_;
-      if (accept_result.result_ < 0) {
-        if (!accept_stopped_) {
-          StopAcceptingOnContext();
-        }
-      } else {
-        io::Socket client_socket(accept_result.result_);
-        if (!accept_stopped_) {
-          try {
-            DispatchAcceptedConnection(std::move(client_socket));
-          } catch (...) {  // XRPC_EXCEPTION_GUARD: drain accept before propagating dispatch failure
-            dispatch_error = std::current_exception();
+    while (!accept_stopped_) {
+      auto accept = accept_context_.AcceptMultishot(listen_socket_.fd());
+      // Stop closes admission immediately, but successful CQEs may already be
+      // queued. Keep awaiting until this request's final CQE arrives.
+      bool has_more = true;
+      while (has_more) {
+        const io::IoResult accept_result = co_await accept;
+        has_more = accept_result.has_more_;
+        if (accept_result.result_ < 0) {
+          if (!accept_stopped_) {
             StopAcceptingOnContext();
           }
+        } else {
+          io::Socket client_socket(accept_result.result_);
+          if (!accept_stopped_) {
+            try {
+              DispatchAcceptedConnection(std::move(client_socket));
+            } catch (...) {  // XRPC_EXCEPTION_GUARD: drain accept before propagating dispatch failure
+              dispatch_error = std::current_exception();
+              StopAcceptingOnContext();
+            }
+          }
+          // A late successful accept after stop is closed by Socket's destructor.
+          if (!has_more && !accept_stopped_) {
+            LOG(WARNING) << "multishot accept ended after a successful completion; resubmitting listen_fd="
+                         << listen_socket_.fd();
+          }
         }
-        // A late successful accept after stop is closed by Socket's destructor.
-      }
-      if (!has_more && !accept_stopped_) {
-        accept = accept_context_.AcceptMultishot(listen_socket_.fd());
       }
     }
     if (dispatch_error) {

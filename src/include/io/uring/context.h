@@ -63,7 +63,8 @@ struct IoResult {
   // True while this multishot operation remains active. Check even on success;
   // false means a final result (also for one-shot and pre-submission cancellation).
   bool has_more_ = false;
-  // Identifies the provided-buffer group even when receive fails without a buffer.
+  // Identifies the provided-buffer group for submitted RecvProvided completions,
+  // including failures where the kernel selected no buffer.
   std::uint16_t buffer_group_ = 0;
   UringBuffer buffer_;
 };
@@ -201,13 +202,14 @@ class UringContext final {
 };
 
 /**
- * @brief Move-only result of an I/O submission for one coroutine awaiter.
+ * @brief Address-stable result of an I/O submission for one coroutine awaiter.
  *
  * An awaitable owns one unstarted operation. `await_suspend()` transfers that
  * operation to the `UringContext`; `await_resume()` moves the completed result
  * out of the operation. A multishot awaitable keeps its operation alive while
  * CQEs carry `IORING_CQE_F_MORE`; its final CQE ends the operation. It supports
- * the synchronous consumer protocol used by multishot accept.
+ * the synchronous consumer protocol used by multishot accept. Awaitables are
+ * immovable so an active operation can safely retain its awaitable's address.
  */
 class UringAwaitable final {
  public:
@@ -215,9 +217,8 @@ class UringAwaitable final {
 
   UringAwaitable(const UringAwaitable &) = delete;
   auto operator=(const UringAwaitable &) -> UringAwaitable & = delete;
-
-  UringAwaitable(UringAwaitable &&other) noexcept;
-  auto operator=(UringAwaitable &&other) noexcept -> UringAwaitable &;
+  UringAwaitable(UringAwaitable &&) = delete;
+  auto operator=(UringAwaitable &&) -> UringAwaitable & = delete;
 
   auto await_ready() const noexcept -> bool { return false; }
 

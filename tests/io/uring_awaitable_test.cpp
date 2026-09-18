@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include "common/task.h"
@@ -22,6 +23,9 @@
 namespace {
 
 constexpr auto WaitTimeout = std::chrono::milliseconds(1000);
+
+static_assert(!std::is_copy_constructible_v<xrpc::io::UringAwaitable>);
+static_assert(!std::is_move_constructible_v<xrpc::io::UringAwaitable>);
 
 template <typename T>
 void StartTaskOnContext(xrpc::io::UringContext &context, xrpc::runtime::Task<T> &task) {
@@ -73,13 +77,6 @@ auto ReadInvalidFd(xrpc::io::UringContext &context) -> xrpc::runtime::Task<xrpc:
   auto read_buffer = std::make_shared<std::array<char, 8>>();
   xrpc::io::IoResult result = co_await context.Recv(-1, read_buffer->data(), read_buffer->size());
   co_return result;
-}
-
-auto MoveAwaitableBeforeAwait(xrpc::io::UringContext &context) -> xrpc::runtime::Task<xrpc::io::IoResult> {
-  auto read_buffer = std::make_shared<std::array<char, 8>>();
-  xrpc::io::UringAwaitable awaitable = context.Recv(-1, read_buffer->data(), read_buffer->size());
-  xrpc::io::UringAwaitable moved_awaitable = std::move(awaitable);
-  co_return co_await std::move(moved_awaitable);
 }
 
 auto PendingRead(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<xrpc::io::IoResult> {
@@ -234,15 +231,6 @@ auto CheckUnsubmittedStats(xrpc::io::UringContext &context) -> xrpc::runtime::Ta
 }
 
 }  // namespace
-
-TEST(IoUringAwaitableTest, MoveBeforeAwaitPreservesOperation) {
-  xrpc::io::UringContext context;
-
-  const xrpc::io::IoResult result = WaitTaskWithContext(MoveAwaitableBeforeAwait(context), context);
-  EXPECT_EQ(result.type_, xrpc::io::OperationType::Recv);
-  EXPECT_NE(result.error_code_, 0);
-  EXPECT_LT(result.result_, 0);
-}
 
 TEST(IoUringAwaitableTest, StartAfterStopReturnsSynchronousCancellation) {
   xrpc::io::UringContext context;

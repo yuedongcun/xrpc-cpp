@@ -198,33 +198,6 @@ UringAwaitable::~UringAwaitable() {
   }
 }
 
-UringAwaitable::UringAwaitable(UringAwaitable &&other) noexcept
-    : context_(std::exchange(other.context_, nullptr)),
-      unstarted_operation_(std::move(other.unstarted_operation_)),
-      active_operation_(std::exchange(other.active_operation_, nullptr)),
-      result_(std::move(other.result_)),
-      multishot_(std::exchange(other.multishot_, false)),
-      result_ready_(std::exchange(other.result_ready_, false)) {
-  if (active_operation_ != nullptr) {
-    Abort("UringAwaitable moved while an I/O operation is pending");
-  }
-}
-
-auto UringAwaitable::operator=(UringAwaitable &&other) noexcept -> UringAwaitable & {
-  if (this == &other) {
-    return *this;
-  }
-  if (active_operation_ != nullptr || other.active_operation_ != nullptr) {
-    Abort("UringAwaitable move-assigned while an I/O operation is pending");
-  }
-  context_ = std::exchange(other.context_, nullptr);
-  unstarted_operation_ = std::move(other.unstarted_operation_);
-  result_ = std::move(other.result_);
-  multishot_ = std::exchange(other.multishot_, false);
-  result_ready_ = std::exchange(other.result_ready_, false);
-  return *this;
-}
-
 auto UringAwaitable::await_suspend(std::coroutine_handle<> continuation) -> bool {
   if (context_ == nullptr || (!unstarted_operation_ && active_operation_ == nullptr)) {
     Abort("UringAwaitable suspended in an invalid or already-consumed state");
