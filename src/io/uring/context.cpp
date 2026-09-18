@@ -242,7 +242,7 @@ auto UringContext::AcquireSqe() -> io_uring_sqe * {
   }
   io_uring_sqe *sqe = io_uring_get_sqe(&uring_.Get());
   if (sqe == nullptr && staged_sqe_count_ != 0) {
-    FlushSubmissionBatch();
+    SubmitStagedSqes();
     sqe = io_uring_get_sqe(&uring_.Get());
   }
   if (sqe == nullptr) {
@@ -270,7 +270,7 @@ auto UringContext::TakeOperation(Operation &operation) -> std::unique_ptr<Operat
   return completed;
 }
 
-void UringContext::FlushSubmissionBatch() {
+void UringContext::SubmitStagedSqes() {
   while (staged_sqe_count_ != 0) {
     int ret = 0;
     do {
@@ -476,7 +476,7 @@ void UringContext::SubmitCancelFd(int fd) {
 
   // Callers close the descriptor immediately after CancelFd() returns. Publish
   // the cancellation before that close instead of waiting for the turn boundary.
-  FlushSubmissionBatch();
+  SubmitStagedSqes();
 }
 
 void UringContext::CancelFd(int fd) {
@@ -663,7 +663,7 @@ void UringContext::Run() {
   } run_ownership{*this};
 
   SubmitWakeupPoll();
-  FlushSubmissionBatch();
+  SubmitStagedSqes();
 
   while (!stop_requested_.load() || !operations_.empty()) {
     // No operation may remain staged while the event loop blocks.
@@ -689,10 +689,10 @@ void UringContext::Run() {
         ++processed_cqes;
       }
     } catch (const std::exception &) {  // XRPC_EXCEPTION_GUARD: flush staged SQEs before propagation
-      FlushSubmissionBatch();
+      SubmitStagedSqes();
       throw;
     }
-    FlushSubmissionBatch();
+    SubmitStagedSqes();
   }
 }
 

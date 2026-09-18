@@ -187,7 +187,7 @@ class UringContext final {
   [[nodiscard]] auto AcquireSqe() -> io_uring_sqe *;
   void StageOperation(std::unique_ptr<Operation> operation) noexcept;
   [[nodiscard]] auto TakeOperation(Operation &operation) -> std::unique_ptr<Operation>;
-  void FlushSubmissionBatch();
+  void SubmitStagedSqes();
   void ProcessCqe(io_uring_cqe *cqe);
   void ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe);
   void ProcessCancelCqe(io_uring_cqe *cqe);
