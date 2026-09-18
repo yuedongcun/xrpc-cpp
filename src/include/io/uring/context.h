@@ -273,9 +273,11 @@ class UringAwaitable final {
 
   UringAwaitable(UringContext &context, std::unique_ptr<Operation> operation, bool multishot) noexcept;
 
-  UringContext *context_ = nullptr;
-  std::unique_ptr<Operation> unstarted_operation_;
-  Operation *active_operation_ = nullptr;
+  UringContext &context_;
+  // owned_operation_ owns the Operation before handoff. handed_off_operation_
+  // is non-owning and remains valid through the final CQE.
+  std::unique_ptr<Operation> owned_operation_;
+  Operation *handed_off_operation_ = nullptr;
   IoResult result_;
   bool result_ready_ = false;
 };

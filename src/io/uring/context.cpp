@@ -34,7 +34,25 @@ namespace xrpc::io {
 
 // -----------------------------------------------------------------------------
 // Operation state
-// user_data carries this object from SQE submission to CQE completion.
+//
+// Ownership model:
+//
+// Before submission, an awaitable Operation is first owned by its
+// UringAwaitable, then moved into staged_operations_ by await_suspend().
+// Internal operations are staged directly. In both cases, a unique_ptr owns
+// the Operation until io_uring_submit() succeeds.
+//
+// After a successful submission, no long-lived C++ owner remains. The pending
+// io_uring request carries a raw pointer in user_data, and the Operation must
+// remain alive until that request produces its final CQE.
+//
+// ProcessCqe() temporarily adopts the Operation into a unique_ptr. For a
+// non-final multishot CQE (IORING_CQE_F_MORE), it releases the unique_ptr
+// because the pending request will produce another CQE. The final CQE leaves
+// the unique_ptr owning the Operation, which is then destroyed.
+//
+// RequestStop() only initiates shutdown. Run() must drain every submitted
+// Operation through its final CQE before returning and allowing ring teardown.
 // -----------------------------------------------------------------------------
 
 struct Operation {
@@ -169,12 +187,12 @@ auto UringContext::Send(int fd, const void *buffer, std::size_t len) -> UringAwa
 // -----------------------------------------------------------------------------
 
 UringAwaitable::UringAwaitable(UringContext &context, std::unique_ptr<Operation> operation, bool multishot) noexcept
-    : context_(&context), unstarted_operation_(std::move(operation)) {
-  unstarted_operation_->multishot_ = multishot;
+    : context_(context), owned_operation_(std::move(operation)) {
+  owned_operation_->multishot_ = multishot;
 }
 
 UringAwaitable::~UringAwaitable() {
-  if (active_operation_ != nullptr) {
+  if (handed_off_operation_ != nullptr) {
     Abort("UringAwaitable destroyed while an I/O operation is pending");
   }
 }
@@ -182,41 +200,39 @@ UringAwaitable::~UringAwaitable() {
 auto UringAwaitable::await_ready() const noexcept -> bool { return false; }
 
 auto UringAwaitable::await_suspend(std::coroutine_handle<> continuation) -> bool {
-  if (context_ == nullptr) {
-    Abort("UringAwaitable suspended in an invalid or already-consumed state");
-  }
-
-  if (active_operation_ != nullptr) {
-    if (!active_operation_->multishot_ || active_operation_->continuation_) {
-      Abort("UringAwaitable suspended while its operation already has a waiting coroutine");
+  if (handed_off_operation_ != nullptr) {
+    if (!handed_off_operation_->multishot_) {
+      Abort("one-shot UringAwaitable awaited again while its operation is pending");
     }
-    active_operation_->continuation_ = continuation;
+    if (handed_off_operation_->continuation_) {
+      Abort("multishot UringAwaitable already has a waiting coroutine");
+    }
+    handed_off_operation_->continuation_ = continuation;
     return true;
   }
 
-  if (!unstarted_operation_) {
-    Abort("UringAwaitable suspended in an invalid or already-consumed state");
+  if (!owned_operation_) {
+    Abort("UringAwaitable awaited after its operation was consumed");
   }
-  Operation *operation = unstarted_operation_.get();
+  Operation *operation = owned_operation_.get();
   operation->awaitable_ = this;
-  if (!context_->TryStartOperation(unstarted_operation_, continuation)) {
+  if (!context_.TryStartOperation(owned_operation_, continuation)) {
+    // A rejected start resumes synchronously through the common result slot.
+    auto rejected_operation = std::move(owned_operation_);
+    result_ = std::move(rejected_operation->result_);
+    result_ready_ = true;
     return false;
   }
-  active_operation_ = operation;
+  handed_off_operation_ = operation;
   return true;
 }
 
 auto UringAwaitable::await_resume() -> IoResult {
-  if (result_ready_) {
-    result_ready_ = false;
-    return std::exchange(result_, {});
+  if (!result_ready_) {
+    Abort("UringAwaitable resumed without an operation result");
   }
-  if (unstarted_operation_) {
-    IoResult result = std::move(unstarted_operation_->result_);
-    unstarted_operation_.reset();
-    return result;
-  }
-  Abort("UringAwaitable resumed without an operation result");
+  result_ready_ = false;
+  return std::exchange(result_, {});
 }
 
 // -----------------------------------------------------------------------------
@@ -454,7 +470,7 @@ void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) 
   awaitable->result_ = std::move(operation.result_);
   awaitable->result_ready_ = true;
   if (is_final) {
-    awaitable->active_operation_ = nullptr;
+    awaitable->handed_off_operation_ = nullptr;
   }
 
   std::coroutine_handle<> continuation = std::exchange(operation.continuation_, {});
