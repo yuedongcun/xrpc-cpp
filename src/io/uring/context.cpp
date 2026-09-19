@@ -664,7 +664,8 @@ auto UringContext::SnapshotStats(bool start_window) -> UringStatsSnapshot {
 
 // -----------------------------------------------------------------------------
 // Event loop
-// Process a bounded CQE batch, then flush staged SQEs until shutdown has drained.
+// Process bounded CQE batches and submit staged SQEs between turns.
+// After stop is requested, continue until all operations reach final CQEs.
 // -----------------------------------------------------------------------------
 
 void UringContext::Run() noexcept {
