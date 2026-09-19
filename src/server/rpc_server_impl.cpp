@@ -226,10 +226,10 @@ auto RpcServer::Impl::AcceptLoop() -> runtime::Task<void> {
       auto accept = accept_context_.AcceptMultishot(listen_socket_.fd());
       // Stop closes admission immediately, but successful CQEs may already be
       // queued. Keep awaiting until this request's final CQE arrives.
-      bool has_more = true;
-      while (has_more) {
+      bool is_final = false;
+      while (!is_final) {
         const io::IoResult accept_result = co_await accept;
-        has_more = accept_result.has_more_;
+        is_final = accept_result.is_final_;
         if (accept_result.result_ < 0) {
           if (!accept_stopped_) {
             StopAcceptingOnContext();
@@ -245,7 +245,7 @@ auto RpcServer::Impl::AcceptLoop() -> runtime::Task<void> {
             }
           }
           // A late successful accept after stop is closed by Socket's destructor.
-          if (!has_more && !accept_stopped_) {
+          if (is_final && !accept_stopped_) {
             LOG(WARNING) << "multishot accept ended after a successful completion; resubmitting listen_fd="
                          << listen_socket_.fd();
           }

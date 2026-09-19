@@ -93,9 +93,8 @@ struct IoResult {
   int result_ = 0;
   int error_code_ = 0;
   std::size_t bytes_transferred_ = 0;
-  // True while this multishot operation remains active. Check even on success;
-  // false means a final result (also for one-shot and pre-submission cancellation).
-  bool has_more_ = false;
+  // False only for an intermediate multishot result that must be awaited again.
+  bool is_final_ = true;
   // Identifies the provided-buffer group for submitted RecvProvided completions,
   // including failures where the kernel selected no buffer.
   std::uint16_t buffer_group_ = 0;
@@ -189,7 +188,7 @@ class UringContext final {
   [[nodiscard]] auto TakeOperation(Operation &operation) -> std::unique_ptr<Operation>;
   void SubmitStagedSqes();
   void ProcessCqe(io_uring_cqe *cqe);
-  void ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe);
+  void ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe, bool is_final);
   void ProcessCancelCqe(io_uring_cqe *cqe);
   static auto MakeCancelledResult(const Operation &operation) -> IoResult;
   void SubmitCancelFd(int fd);

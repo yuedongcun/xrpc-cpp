@@ -259,6 +259,12 @@ void UringContext::StageOperation(std::unique_ptr<Operation> operation) noexcept
   ++staged_sqe_count_;
 }
 
+/**
+ * @brief Removes an operation from the context and returns its ownership.
+ *
+ * Fills the vacated slot with the last unique_ptr and updates its index. Moving
+ * the unique_ptr does not change the heap address borrowed by io_uring.
+ */
 auto UringContext::TakeOperation(Operation &operation) -> std::unique_ptr<Operation> {
   const std::size_t index = operation.owner_index_;
   auto completed = std::move(operations_[index]);
@@ -270,6 +276,7 @@ auto UringContext::TakeOperation(Operation &operation) -> std::unique_ptr<Operat
   return completed;
 }
 
+/** @brief Submits all staged SQEs, retrying interruptions and partial submissions. */
 void UringContext::SubmitStagedSqes() {
   while (staged_sqe_count_ != 0) {
     int ret = 0;
@@ -351,12 +358,12 @@ void UringContext::ProcessCqe(io_uring_cqe *cqe) {
   auto *raw_operation = static_cast<Operation *>(io_uring_cqe_get_data(cqe));
   if (raw_operation == nullptr) {
     io_uring_cqe_seen(&uring_.Get(), cqe);
-    return;
+    Abort("UringContext received a CQE without operation data");
   }
 
   Operation *operation = raw_operation;
-  const bool has_more = (cqe->flags & IORING_CQE_F_MORE) != 0;
-  const bool is_final = !operation->multishot_ || !has_more;
+  const bool cqe_has_more = (cqe->flags & IORING_CQE_F_MORE) != 0;
+  const bool is_final = !operation->multishot_ || !cqe_has_more;
   if (operation->owner_index_ >= operations_.size() || operations_[operation->owner_index_].get() != operation) {
     Abort("UringContext received a CQE for an untracked operation");
   }
@@ -367,50 +374,42 @@ void UringContext::ProcessCqe(io_uring_cqe *cqe) {
   }
   switch (operation->completion_category_) {
     case Operation::CompletionCategory::Awaitable:
-      ProcessAwaitableCqe(*operation, cqe);
+      ProcessAwaitableCqe(*operation, cqe, is_final);
       return;
     case Operation::CompletionCategory::Cancel:
       ProcessCancelCqe(cqe);
       return;
     case Operation::CompletionCategory::Wakeup:
-      ProcessWakeupCqe(cqe, has_more);
+      ProcessWakeupCqe(cqe, cqe_has_more);
       return;
   }
 }
 
-void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) {
+void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe, bool is_final) {
   UringAwaitable *awaitable = operation.awaitable_;
   if (awaitable == nullptr) {
     Abort("UringContext completed an operation without an awaitable");
   }
+
   IoResult &result = awaitable->result_;
-  const bool is_multishot = operation.multishot_;
-  const bool has_more = (cqe->flags & IORING_CQE_F_MORE) != 0;
-  const bool is_final = !is_multishot || !has_more;
   if (operation.type_ == OperationType::RecvProvided && cqe->res == -ENOBUFS) {
     ++counters_.provided_buffer_enobufs_;
   }
+
   result.type_ = operation.type_;
   result.fd_ = operation.fd_;
   result.result_ = cqe->res;
   result.error_code_ = cqe->res < 0 ? -cqe->res : 0;
-  result.has_more_ = is_multishot && has_more;
+  result.is_final_ = is_final;
   if (operation.type_ == OperationType::Recv || operation.type_ == OperationType::RecvProvided ||
       operation.type_ == OperationType::Send) {
     result.bytes_transferred_ = cqe->res > 0 ? static_cast<std::size_t>(cqe->res) : 0;
   }
+
   if (operation.type_ == OperationType::RecvProvided) {
     result.buffer_group_ = provided_buffer_pool_->GroupId();
-    const bool has_selected_buffer = (cqe->flags & IORING_CQE_F_BUFFER) != 0;
-    if (cqe->res > 0 && !has_selected_buffer) {
-      io_uring_cqe_seen(&uring_.Get(), cqe);
-      Abort("io_uring completed a provided-buffer receive without selecting a buffer");
-    }
-    if (has_selected_buffer) {
-      if (!provided_buffer_pool_) {
-        io_uring_cqe_seen(&uring_.Get(), cqe);
-        Abort("io_uring selected a buffer after its provided-buffer pool was destroyed");
-      }
+    // Error completions may not have selected a buffer to return.
+    if ((cqe->flags & IORING_CQE_F_BUFFER) != 0) {
       const auto buffer_id = static_cast<std::uint16_t>(cqe->flags >> IORING_CQE_BUFFER_SHIFT);
       result.buffer_ = provided_buffer_pool_->Acquire(buffer_id, result.bytes_transferred_);
     }
@@ -419,6 +418,8 @@ void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) 
   io_uring_cqe_seen(&uring_.Get(), cqe);
   awaitable->result_ready_ = true;
   if (is_final) {
+    // The context has taken back the final Operation. Clear the borrowed pointer
+    // before resume so it no longer marks the awaitable as having pending I/O.
     awaitable->handed_off_operation_ = nullptr;
   }
 
@@ -427,8 +428,14 @@ void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe) 
     Abort("UringContext completed an awaitable operation without a continuation");
   }
   continuation.resume();
-  // A final completion may destroy the awaitable during resume.
-  if (!is_final && !awaitable->continuation_) {
+
+  // The final resume may destroy the awaitable, so do not access it again.
+  if (is_final) {
+    return;
+  }
+
+  // A non-final multishot completion must install the next waiter before yielding.
+  if (!awaitable->continuation_) {
     Abort("multishot consumer must await the operation again before yielding");
   }
 }

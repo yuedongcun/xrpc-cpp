@@ -63,7 +63,7 @@ auto WaitTaskWithContext(xrpc::runtime::Task<T> task, xrpc::io::UringContext &co
 auto ReadOne(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<xrpc::io::IoResult> {
   auto read_buffer = std::make_shared<std::array<char, 64>>();
   xrpc::io::IoResult result = co_await context.Recv(fd, read_buffer->data(), read_buffer->size());
-  EXPECT_FALSE(result.has_more_);
+  EXPECT_TRUE(result.is_final_);
   co_return result;
 }
 
@@ -150,23 +150,23 @@ auto AcceptMultishotTwiceAndCancel(xrpc::io::UringContext &context, int listen_f
     EXPECT_EQ(result.type_, xrpc::io::OperationType::Accept);
     EXPECT_EQ(result.error_code_, 0);
     EXPECT_GE(result.result_, 0);
-    EXPECT_TRUE(result.has_more_);
+    EXPECT_FALSE(result.is_final_);
     xrpc::io::Socket client_socket(result.result_);
   }
 
   context.CancelFd(listen_fd);
   const xrpc::io::IoResult cancelled = co_await accept;
   EXPECT_EQ(cancelled.error_code_, ECANCELED);
-  EXPECT_FALSE(cancelled.has_more_);
+  EXPECT_TRUE(cancelled.is_final_);
 }
 
 auto ExhaustProvidedRecv(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<void> {
   auto first = co_await context.RecvProvided(fd);
   EXPECT_EQ(first.result_, 4);
-  EXPECT_FALSE(first.has_more_);
+  EXPECT_TRUE(first.is_final_);
   auto exhausted = co_await context.RecvProvided(fd);
   EXPECT_EQ(exhausted.error_code_, ENOBUFS);
-  EXPECT_FALSE(exhausted.has_more_);
+  EXPECT_TRUE(exhausted.is_final_);
   const auto pressure = context.SnapshotStats();
   EXPECT_EQ(pressure.counters_.provided_buffer_enobufs_, 1U);
   EXPECT_TRUE(exhausted.buffer_.Empty());
@@ -193,12 +193,12 @@ auto CheckProvidedRecvErrors(xrpc::io::UringContext &context) -> xrpc::runtime::
   auto invalid = context.RecvProvided(-1);
   auto error = co_await invalid;
   EXPECT_EQ(error.error_code_, EBADF);
-  EXPECT_FALSE(error.has_more_);
+  EXPECT_TRUE(error.is_final_);
   auto stopped = context.RecvProvided(-1);
   context.RequestStop();
   auto after_stop = co_await stopped;
   EXPECT_EQ(after_stop.error_code_, ECANCELED);
-  EXPECT_FALSE(after_stop.has_more_);
+  EXPECT_TRUE(after_stop.is_final_);
 }
 
 // Resume from a final CQE, then grow the context's owner storage while that
@@ -432,18 +432,18 @@ auto CancelAcceptWithQueuedConnections(xrpc::io::UringContext &context, int fd) 
   auto accept = context.AcceptMultishot(fd);
   auto result = co_await accept;
   EXPECT_GE(result.result_, 0);
-  EXPECT_TRUE(result.has_more_);
+  EXPECT_FALSE(result.is_final_);
   xrpc::io::Socket first(result.result_);
   context.CancelFd(fd);
   // Cancellation can race with successful completions already in the CQ.
   // Every returned descriptor is owned even though admission is now closed.
-  while (result.has_more_) {
+  while (!result.is_final_) {
     result = co_await accept;
     if (result.result_ >= 0) {
       xrpc::io::Socket late_connection(result.result_);
     } else {
       EXPECT_EQ(result.error_code_, ECANCELED);
-      EXPECT_FALSE(result.has_more_);
+      EXPECT_TRUE(result.is_final_);
     }
   }
   EXPECT_EQ(result.error_code_, ECANCELED);
@@ -471,6 +471,6 @@ TEST(IoUringAwaitableTest, CompletionCanGrowOperationStorageAndDrainBeyondRingSi
     ASSERT_TRUE(task.WaitFor(WaitTimeout));
     const auto result = task.Result();
     EXPECT_EQ(result.error_code_, EBADF);
-    EXPECT_FALSE(result.has_more_);
+    EXPECT_TRUE(result.is_final_);
   }
 }
