@@ -26,7 +26,6 @@
 
 #include <cerrno>
 #include <chrono>
-#include <exception>
 #include <string>
 #include <string_view>
 #include <utility>
