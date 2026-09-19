@@ -31,6 +31,12 @@
 
 namespace xrpc::io {
 
+namespace {
+
+constexpr pid_t FINISHED_RUN_THREAD_ID = -1;
+
+}  // namespace
+
 // -----------------------------------------------------------------------------
 // Operation state
 //
@@ -66,6 +72,21 @@ struct Operation {
 // Initialize ring/pool/eventfd; only the Run thread submits and completes I/O.
 // -----------------------------------------------------------------------------
 
+/** Holds the Run-thread claim for one Run() scope. */
+class UringContext::RunOwnershipGuard final {
+ public:
+  explicit RunOwnershipGuard(UringContext &context) : context_(context) { context_.AcquireRunOwnership(); }
+  ~RunOwnershipGuard() { context_.ReleaseRunOwnership(); }
+
+  RunOwnershipGuard(const RunOwnershipGuard &) = delete;
+  auto operator=(const RunOwnershipGuard &) -> RunOwnershipGuard & = delete;
+  RunOwnershipGuard(RunOwnershipGuard &&) = delete;
+  auto operator=(RunOwnershipGuard &&) -> RunOwnershipGuard & = delete;
+
+ private:
+  UringContext &context_;
+};
+
 UringInstance::UringInstance(std::uint32_t entries) {
   const int result = io_uring_queue_init(entries, &ring_, 0);  // Use the default setup flags.
   if (result < 0) {
@@ -85,7 +106,7 @@ WakeupEventFd::WakeupEventFd() {
 WakeupEventFd::~WakeupEventFd() { (void)::close(fd_); }
 
 UringContext::UringContext(std::uint32_t entries, std::optional<UringBufferPoolConfig> buffer_pool_config)
-    : uring_(entries), completion_batch_limit_(entries) {
+    : uring_(entries) {
   operations_.reserve(entries);
 
   if (buffer_pool_config.has_value()) {
@@ -113,11 +134,14 @@ auto UringContext::CurrentThreadId() -> pid_t {
 void UringContext::AcquireRunOwnership() {
   pid_t expected = 0;
   if (!run_thread_id_.compare_exchange_strong(expected, CurrentThreadId())) {
+    if (expected == FINISHED_RUN_THREAD_ID) {
+      Abort("UringContext::Run called more than once");
+    }
     Abort("UringContext::Run called while another Run thread owns the context");
   }
 }
 
-void UringContext::ReleaseRunOwnership() { run_thread_id_.store(0); }
+void UringContext::ReleaseRunOwnership() { run_thread_id_.store(FINISHED_RUN_THREAD_ID); }
 
 void UringContext::AssertRunThread(std::string_view action) const {
   if (run_thread_id_.load() != CurrentThreadId()) {
@@ -125,7 +149,7 @@ void UringContext::AssertRunThread(std::string_view action) const {
   }
 }
 
-auto UringContext::IsRunning() const -> bool { return run_thread_id_.load() != 0; }
+auto UringContext::IsRunning() const -> bool { return run_thread_id_.load() > 0; }
 
 // -----------------------------------------------------------------------------
 // Deferred I/O APIs
@@ -643,44 +667,44 @@ auto UringContext::SnapshotStats(bool start_window) -> UringStatsSnapshot {
 // Process a bounded CQE batch, then flush staged SQEs until shutdown has drained.
 // -----------------------------------------------------------------------------
 
-void UringContext::Run() {
-  AcquireRunOwnership();
-  struct RunOwnership final {
-    UringContext &context_;
-    ~RunOwnership() { context_.ReleaseRunOwnership(); }
-  } run_ownership{*this};
+void UringContext::Run() noexcept {
+  RunOwnershipGuard ownership_guard{*this};
+  const auto completion_batch_limit = static_cast<std::size_t>(uring_.Get().sq.ring_entries);
 
-  StageWakeupPoll();
-  SubmitStagedSqes();
+  try {
+    StageWakeupPoll();
+    SubmitStagedSqes();
 
-  while (!stop_requested_.load() || !operations_.empty()) {
-    // No operation may remain staged while the event loop blocks.
-    assert(staged_sqe_count_ == 0);
-    io_uring_cqe *cqe = nullptr;
-    const int ret = io_uring_wait_cqe(&uring_.Get(), &cqe);
-    if (ret < 0) {
-      if (ret == -EINTR) {
-        continue;
+    // Run until stop is requested, then keep draining operations through their final CQEs.
+    while (!stop_requested_.load() || !operations_.empty()) {
+      // Blocking with staged SQEs could wait for I/O that the kernel has not received.
+      if (staged_sqe_count_ != 0) {
+        Abort("UringContext attempted to wait with staged SQEs");
       }
-      throw InternalException(MakeSystemErrorMessage("io_uring_wait_cqe", -ret));
-    }
 
-    // Bound one event-loop turn so newly staged Recv/Send/Accept operations
-    // cannot be starved by a continuously replenished completion queue.
-    const std::size_t completion_budget = completion_batch_limit_;
-    std::size_t processed_cqes = 0;
-    try {
-      ProcessCqe(cqe);
-      ++processed_cqes;
-      while (processed_cqes < completion_budget && io_uring_peek_cqe(&uring_.Get(), &cqe) == 0) {
+      io_uring_cqe *cqe = nullptr;
+      const int ret = io_uring_wait_cqe(&uring_.Get(), &cqe);
+      if (ret < 0) {
+        if (ret == -EINTR) {
+          continue;
+        }
+        throw InternalException(MakeSystemErrorMessage("io_uring_wait_cqe", -ret));
+      }
+
+      // Multishot requests can replenish the CQ while it is being drained.
+      // Bound the batch so staged SQEs are submitted between completion bursts.
+      std::size_t processed_cqes = 0;
+      do {
         ProcessCqe(cqe);
         ++processed_cqes;
-      }
-    } catch (const std::exception &) {  // XRPC_EXCEPTION_GUARD: flush staged SQEs before propagation
+      } while (processed_cqes < completion_batch_limit && io_uring_peek_cqe(&uring_.Get(), &cqe) == 0);
+
       SubmitStagedSqes();
-      throw;
     }
-    SubmitStagedSqes();
+  } catch (const std::exception &error) {  // XRPC_EXCEPTION_GUARD: event-loop failure is terminal
+    Abort(error.what());
+  } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: event-loop failure is terminal
+    Abort("UringContext event loop failed with a non-standard exception");
   }
 }
 

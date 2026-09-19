@@ -128,10 +128,11 @@ class UringContext final {
   /**
    * @brief Runs the event loop on the calling thread.
    *
-   * Returns after stop has been requested and all submitted operations and the
-   * wakeup poll have produced their completion events.
+   * Can be called at most once. After RequestStop(), continues until every
+   * submitted operation reaches its final CQE. An unhandled runtime failure
+   * aborts the process.
    */
-  void Run();
+  void Run() noexcept;
 
   /**
    * @brief Thread-safely requests event-loop shutdown without waiting.
@@ -172,6 +173,8 @@ class UringContext final {
   [[nodiscard]] auto SnapshotStats(bool start_window = false) -> UringStatsSnapshot;
 
  private:
+  class RunOwnershipGuard;
+
   friend class UringAwaitable;
 
   // Resource lifetime and ownership of the Run thread.
@@ -204,7 +207,7 @@ class UringContext final {
   WakeupEventFd wakeup_;
 
   // --- Cross-thread control: atomic access, independent of post_mutex_. ---
-  // Linux thread ID of the Run owner; zero means Run() has no owner.
+  // Linux thread ID while running; zero means never run and -1 means finished.
   std::atomic<pid_t> run_thread_id_{0};
   // RequestStop() sets this; Run() observes it and drains outstanding work.
   std::atomic<bool> stop_requested_{false};
@@ -214,8 +217,6 @@ class UringContext final {
   std::vector<std::unique_ptr<Operation>> operations_;
   // Prepared SQEs not yet submitted.
   std::size_t staged_sqe_count_ = 0;
-  // Fixed per-turn CQE budget, independent of operation storage growth.
-  const std::size_t completion_batch_limit_;
 
   // --- eventfd multishot poll lifecycle: Run thread only. ---
   // True after submitting cancellation until the poll's final CQE.

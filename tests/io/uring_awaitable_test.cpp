@@ -428,6 +428,13 @@ TEST(IoUringMultishotTest, WakeupPollSurvivesRepeatedPostsAndStops) {
   thread.join();
 }
 
+TEST(IoUringLifecycleTest, RunIsSingleUse) {
+  xrpc::io::UringContext context(8);
+  context.RequestStop();
+  context.Run();
+  EXPECT_DEATH(context.Run(), "UringContext::Run called more than once");
+}
+
 auto CancelAcceptWithQueuedConnections(xrpc::io::UringContext &context, int fd) -> xrpc::runtime::Task<void> {
   auto accept = context.AcceptMultishot(fd);
   auto result = co_await accept;
