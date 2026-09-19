@@ -470,8 +470,6 @@ void UringContext::ProcessCancelCqe(io_uring_cqe *cqe) {
  * and its final CQE releases the operation.
  */
 void UringContext::ProcessWakeupCqe(io_uring_cqe *cqe, bool has_more) {
-  wakeup_poll_pending_ = has_more;
-
   const int result = cqe->res;
   const int error_code = result < 0 ? -result : 0;
   io_uring_cqe_seen(&uring_.Get(), cqe);
@@ -488,15 +486,16 @@ void UringContext::ProcessWakeupCqe(io_uring_cqe *cqe, bool has_more) {
     throw InternalException("eventfd poll completed without POLLIN");
   }
 
-  DrainWakeupCounter();
-  DrainPosted();
+  ConsumeWakeupSignal();
+  RunPostedCallbacks();
+
   if (stop_requested_.load()) {
     if (has_more && !wakeup_poll_cancel_submitted_) {
       wakeup_poll_cancel_submitted_ = true;
       CancelFd(wakeup_.Get());
     }
   } else if (!has_more) {
-    SubmitWakeupPoll();
+    StageWakeupPoll();
   }
 }
 
@@ -539,7 +538,7 @@ void UringContext::Post(std::function<void()> fn) {
       return;
     }
     should_wake = posted_callbacks_.empty();
-    posted_callbacks_.emplace(std::move(fn));
+    posted_callbacks_.emplace_back(std::move(fn));
   }
 
   if (should_wake) {
@@ -560,33 +559,23 @@ void UringContext::RequestStop() {
   SignalWakeup();
 }
 
-void UringContext::DrainPosted() {
-  std::queue<std::function<void()>> callbacks;
+void UringContext::RunPostedCallbacks() {
+  std::deque<std::function<void()>> callbacks;
   {
     std::lock_guard<std::mutex> lock(post_mutex_);
 
+    // Detach the current batch and make the next post responsible for waking us.
     std::swap(callbacks, posted_callbacks_);
   }
 
-  while (!callbacks.empty()) {
-    std::function<void()> &callback = callbacks.front();
+  for (std::function<void()> &callback : callbacks) {
     callback();
-    callbacks.pop();
   }
 }
 
-/**
- * @brief Arms the eventfd poll used to wake the io_uring event loop.
- *
- * One multishot wakeup poll remains pending while the context runs. Its
- * operation stays owned by the context across each CQE carrying
- * MORE; shutdown explicitly cancels it to obtain the final CQE.
- */
-void UringContext::SubmitWakeupPoll() {
-  AssertRunThread("wakeup poll submission attempted outside the owning Run thread");
-  if (wakeup_poll_pending_) {
-    Abort("UringContext attempted to arm a second wakeup poll");
-  }
+/** @brief Stages the single multishot poll that wakes the event loop. */
+void UringContext::StageWakeupPoll() {
+  AssertRunThread("wakeup poll staging attempted outside the owning Run thread");
 
   auto operation = std::make_unique<Operation>();
   operation->completion_category_ = Operation::CompletionCategory::Wakeup;
@@ -596,41 +585,37 @@ void UringContext::SubmitWakeupPoll() {
   io_uring_sqe *sqe = AcquireSqe();
 
   io_uring_prep_poll_multishot(sqe, wakeup_.Get(), POLLIN);
-  Operation *raw_operation = operation.get();
-  io_uring_sqe_set_data(sqe, raw_operation);
+  io_uring_sqe_set_data(sqe, operation.get());
 
   StageOperation(std::move(operation));
-  wakeup_poll_pending_ = true;
 }
 
 void UringContext::SignalWakeup() const {
-  constexpr std::uint64_t value = 1;
+  constexpr std::uint64_t wakeup_increment = 1;
   while (true) {
-    const ssize_t written = ::write(wakeup_.Get(), &value, sizeof(value));
-    if (std::cmp_equal(written, sizeof(value))) {
+    if (::write(wakeup_.Get(), &wakeup_increment, sizeof(wakeup_increment)) != -1) {
       return;
     }
-    if (written < 0 && errno == EINTR) {
+    if (errno == EINTR) {
       continue;
     }
-    if (written < 0 && errno == EAGAIN) {
+    if (errno == EAGAIN) {
       return;
     }
     throw InternalException(MakeSystemErrorMessage("eventfd write", errno));
   }
 }
 
-void UringContext::DrainWakeupCounter() const {
-  std::uint64_t value = 0;
+void UringContext::ConsumeWakeupSignal() const {
+  std::uint64_t wakeup_count = 0;
   while (true) {
-    const ssize_t read_size = ::read(wakeup_.Get(), &value, sizeof(value));
-    if (std::cmp_equal(read_size, sizeof(value))) {
+    if (::read(wakeup_.Get(), &wakeup_count, sizeof(wakeup_count)) != -1) {
       return;
     }
-    if (read_size < 0 && errno == EINTR) {
+    if (errno == EINTR) {
       continue;
     }
-    if (read_size < 0 && errno == EAGAIN) {
+    if (errno == EAGAIN) {
       return;
     }
     throw InternalException(MakeSystemErrorMessage("eventfd read", errno));
@@ -665,7 +650,7 @@ void UringContext::Run() {
     ~RunOwnership() { context_.ReleaseRunOwnership(); }
   } run_ownership{*this};
 
-  SubmitWakeupPoll();
+  StageWakeupPoll();
   SubmitStagedSqes();
 
   while (!stop_requested_.load() || !operations_.empty()) {

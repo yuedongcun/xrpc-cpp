@@ -10,8 +10,8 @@ def snapshot(enobufs=0, leases=0, lease_peak=0):
                        'gauges': {'buffer_capacity': 8, 'buffer_size': 4096,
                                   'buffer_outstanding_leases': leases}}],
             'worker_pool': {'window_id': 1, 'pending_logical_jobs': 0,
-                            'queues': [{'worker_id': 0, 'gauges': {'queued_batches': 0},
-                                        'peaks': {'queued_batches': 2}}]}}
+                            'queues': [{'worker_id': 0, 'gauges': {'queued_logical_jobs': 0},
+                                        'peaks': {'queued_logical_jobs': 2}}]}}
 
 
 class IoStatsIntervalTest(unittest.TestCase):
@@ -44,9 +44,9 @@ class IoStatsIntervalTest(unittest.TestCase):
     def test_worker_peaks_and_gauges_are_preserved(self):
         before = snapshot()['worker_pool']
         after = snapshot()['worker_pool']
-        after['queues'][0]['peaks']['queued_batches'] = 1
+        after['queues'][0]['peaks']['queued_logical_jobs'] = 1
         result = worker_stats_interval(before, after)
-        self.assertEqual(result['queues'][0]['peaks']['queued_batches'], 1)
+        self.assertEqual(result['queues'][0]['peaks']['queued_logical_jobs'], 1)
         self.assertEqual(result['pending_logical_jobs_after'], 0)
         after['window_id'] = 2
         with self.assertRaisesRegex(RuntimeError, 'worker peak window changed'):

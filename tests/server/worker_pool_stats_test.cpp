@@ -5,7 +5,7 @@
 
 #include "server/worker_pool.h"
 
-TEST(WorkerPoolStatsTest, DistinguishesQueuedBatchesFromLogicalJobsAndResetsPeaks) {
+TEST(WorkerPoolStatsTest, TracksLogicalJobsAndResetsPeaks) {
   std::promise<void> started;
   auto started_future = started.get_future();
   std::promise<void> release;
@@ -25,11 +25,8 @@ TEST(WorkerPoolStatsTest, DistinguishesQueuedBatchesFromLogicalJobsAndResetsPeak
 
   const auto held = pool.SnapshotStats(true);
   EXPECT_EQ(held.pending_logical_jobs_, 10U);  // 3 executing + 7 queued.
-  EXPECT_EQ(held.queues_[0].pending_batches_, 3U);
   EXPECT_EQ(held.queues_[0].pending_logical_jobs_, 10U);
-  EXPECT_EQ(held.queues_[0].queued_batches_, 2U);
   EXPECT_EQ(held.queues_[0].queued_logical_jobs_, 7U);
-  EXPECT_EQ(held.queues_[0].queued_batches_peak_, 2U);
   EXPECT_EQ(held.queues_[0].queued_logical_jobs_peak_, 7U);
 
   // Release before fatal assertions or pool destruction, even if expectations fail.
@@ -37,15 +34,11 @@ TEST(WorkerPoolStatsTest, DistinguishesQueuedBatchesFromLogicalJobsAndResetsPeak
   pool.DrainAndJoin();
   const auto drained = pool.SnapshotStats();
   EXPECT_EQ(drained.pending_logical_jobs_, 0U);
-  EXPECT_EQ(drained.queues_[0].queued_batches_, 0U);
   EXPECT_EQ(drained.queues_[0].queued_logical_jobs_, 0U);
-  EXPECT_EQ(drained.queues_[0].pending_batches_, 0U);
   EXPECT_EQ(drained.queues_[0].pending_logical_jobs_, 0U);
-  EXPECT_EQ(drained.queues_[0].queued_batches_peak_, 2U);
   EXPECT_EQ(drained.queues_[0].queued_logical_jobs_peak_, 7U);
   const auto reset = pool.SnapshotStats(true);
   EXPECT_EQ(reset.window_id_, held.window_id_ + 1);
-  EXPECT_EQ(reset.queues_[0].queued_batches_peak_, 0U);
   EXPECT_EQ(reset.queues_[0].queued_logical_jobs_peak_, 0U);
 }
 
@@ -83,8 +76,8 @@ TEST(WorkerPoolStatsTest, SchedulesByPendingLogicalJobsInsteadOfBatchCount) {
   // Both workers have one running batch, but worker 1 has fewer logical RPCs.
   EXPECT_TRUE(pool.TrySubmitBatch([]() {}, 1));
   const auto snapshot = pool.SnapshotStats();
-  EXPECT_EQ(snapshot.queues_[0].queued_batches_, 0U);
-  EXPECT_EQ(snapshot.queues_[1].queued_batches_, 1U);
+  EXPECT_EQ(snapshot.queues_[0].queued_logical_jobs_, 0U);
+  EXPECT_EQ(snapshot.queues_[1].queued_logical_jobs_, 1U);
   EXPECT_EQ(snapshot.queues_[0].pending_logical_jobs_, 10U);
   EXPECT_EQ(snapshot.queues_[1].pending_logical_jobs_, 2U);
 

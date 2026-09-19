@@ -14,7 +14,7 @@ def collect_io_snapshot(server, path, start_window=False):
             snapshot = json.loads(path.read_text())
             if "error" in snapshot:
                 raise RuntimeError("I/O statistics: " + snapshot["error"])
-            if snapshot.get("schema_version") != 5 or snapshot.get("scope") != "server_runtime":
+            if snapshot.get("schema_version") != 6 or snapshot.get("scope") != "server_runtime":
                 raise RuntimeError("unsupported I/O statistics schema")
             return snapshot
         if server.poll() is not None:

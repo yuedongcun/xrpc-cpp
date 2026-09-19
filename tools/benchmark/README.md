@@ -142,11 +142,11 @@ runner 为 benchmark server 提供临时 `--stats_file`，通过 `SIGUSR1` 请�
 
 `before` 在预热客户端退出后采集，并在每个 loop 上将峰值重置为当时的当前值；已有的 buffer 租约也计入新窗口。累计计数不重置。`after` 在测量客户端退出后采集，同一 loop 的 `window_id` 必须相同，否则拒绝本次结果。窗口包含测量连接的建立、请求处理及关闭，也包含边界采集的唤醒开销；不是仅有业务处理的精确时间窗口。各 loop 独立采样，accept loop 不计入本阶段统计。
 
-输出包含原始 `before/after`、逐 loop 的 `provided_buffer_enobufs` 差值、边界当前值和窗口峰值。当前值不取差值，峰值不跨 loop 相加。统计 JSON 的 `schema_version` 为 5，runner 与启用统计的服务端应使用匹配版本。
+输出包含原始 `before/after`、逐 loop 的 `provided_buffer_enobufs` 差值、边界当前值和窗口峰值。当前值不取差值，峰值不跨 loop 相加。统计 JSON 的 `schema_version` 为 6，runner 与启用统计的服务端应使用匹配版本。
 
 逐 loop 输出 buffer 容量、大小、当前及窗口峰值租约数，以及 `pending_write_bytes` 当前值和窗口峰值。租约数只包括用户态已领取的 buffer，不能用容量减租约数推算内核空闲容量。`pending_write_bytes` 包含已预留、排队和正在发送的响应字节。
 
-`worker_pool` 独立输出已有 admission 总数 `pending_logical_jobs`（包含容量预留、排队和执行中 RPC），以及逐 worker 的 `queued_batches`、`queued_logical_jobs`、`pending_batches` 当前值和排队窗口峰值。一个 batch 可包含多个 RPC。采集复用既有队列锁，逐 worker 采样不构成全局原子快照；峰值也不跨 worker 求和。总快照 scope 为 `server_runtime`，I/O 计数汇总仍只包含 Connection I/O loops。
+`worker_pool` 独立输出已有 admission 总数 `pending_logical_jobs`（包含容量预留、排队和执行中 RPC），以及逐 worker 的 `queued_logical_jobs`、`pending_logical_jobs` 当前值和排队窗口峰值。采集复用既有队列锁，逐 worker 采样不构成全局原子快照；峰值也不跨 worker 求和。总快照 scope 为 `server_runtime`，I/O 计数汇总仍只包含 Connection I/O loops。
 
 ### Buffer 容量与耗尽关闭的压测入口
 

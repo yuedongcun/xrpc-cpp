@@ -65,10 +65,8 @@ auto WorkerPool::TrySubmitBatch(std::function<void()> job, std::size_t logical_j
       return false;
     }
     queue.jobs_.push(WorkerJob{.run_ = std::move(job), .logical_jobs_ = logical_jobs});
-    queue.pending_entries_.fetch_add(1);
     queue.pending_logical_jobs_.fetch_add(logical_jobs);
     queue.queued_logical_jobs_ += logical_jobs;
-    queue.queued_batches_peak_ = std::max(queue.queued_batches_peak_, queue.jobs_.size());
     queue.queued_logical_jobs_peak_ = std::max(queue.queued_logical_jobs_peak_, queue.queued_logical_jobs_);
   } catch (const std::exception &) {  // XRPC_EXCEPTION_GUARD: roll back reserved capacity
     ReleasePendingJobs(logical_jobs);
@@ -95,14 +93,10 @@ auto WorkerPool::SnapshotStats(bool start_window) -> WorkerPoolStatsSnapshot {
   for (const auto &queue : worker_queues_) {
     std::lock_guard lock(queue->mutex_);
     if (start_window) {
-      queue->queued_batches_peak_ = queue->jobs_.size();
       queue->queued_logical_jobs_peak_ = queue->queued_logical_jobs_;
     }
-    snapshot.queues_.push_back({.queued_batches_ = queue->jobs_.size(),
-                                .queued_logical_jobs_ = queue->queued_logical_jobs_,
-                                .pending_batches_ = queue->pending_entries_.load(),
+    snapshot.queues_.push_back({.queued_logical_jobs_ = queue->queued_logical_jobs_,
                                 .pending_logical_jobs_ = queue->pending_logical_jobs_.load(),
-                                .queued_batches_peak_ = queue->queued_batches_peak_,
                                 .queued_logical_jobs_peak_ = queue->queued_logical_jobs_peak_});
   }
   return snapshot;
@@ -178,7 +172,6 @@ void WorkerPool::WorkerLoop(WorkerQueue &queue) {
     }
 
     job.run_();
-    queue.pending_entries_.fetch_sub(1);
     queue.pending_logical_jobs_.fetch_sub(job.logical_jobs_);
     ReleasePendingJobs(job.logical_jobs_);
   }

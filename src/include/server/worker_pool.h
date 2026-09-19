@@ -105,11 +105,8 @@ class WorkerPool final {
     std::condition_variable cv_;
     std::queue<WorkerJob> jobs_;
     std::size_t queued_logical_jobs_ = 0;
-    std::size_t queued_batches_peak_ = 0;
     std::size_t queued_logical_jobs_peak_ = 0;
 
-    // Number of WorkerJob entries queued or currently executing on this worker.
-    std::atomic<std::size_t> pending_entries_{0};
     // Logical RPCs queued or executing; used as the worker-selection load.
     std::atomic<std::size_t> pending_logical_jobs_{0};
   };

@@ -19,11 +19,11 @@
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <queue>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -192,11 +192,11 @@ class UringContext final {
   void ProcessCancelCqe(io_uring_cqe *cqe);
 
   // Cross-thread control enters through Post() and RequestStop().
-  void DrainPosted();
-  void SubmitWakeupPoll();
+  void RunPostedCallbacks();
+  void StageWakeupPoll();
   void ProcessWakeupCqe(io_uring_cqe *cqe, bool has_more);
   void SignalWakeup() const;
-  void DrainWakeupCounter() const;
+  void ConsumeWakeupSignal() const;
 
   // --- Context resources: declaration order preserves pool-before-ring destruction. ---
   UringInstance uring_;
@@ -218,8 +218,6 @@ class UringContext final {
   const std::size_t completion_batch_limit_;
 
   // --- eventfd multishot poll lifecycle: Run thread only. ---
-  // True from staging the poll until its final CQE; prevents duplicate arming.
-  bool wakeup_poll_pending_ = false;
   // True after submitting cancellation until the poll's final CQE.
   bool wakeup_poll_cancel_submitted_ = false;
 
@@ -233,7 +231,7 @@ class UringContext final {
   // RequestStop() closes admission under the same lock used by Post().
   bool accepting_posts_ = true;
   // Producers enqueue under the lock; Run() takes a batch and executes unlocked.
-  std::queue<std::function<void()>> posted_callbacks_;
+  std::deque<std::function<void()>> posted_callbacks_;
 };
 
 /**
