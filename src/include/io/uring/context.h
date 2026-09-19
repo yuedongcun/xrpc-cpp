@@ -190,8 +190,6 @@ class UringContext final {
   void ProcessCqe(io_uring_cqe *cqe);
   void ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe, bool is_final);
   void ProcessCancelCqe(io_uring_cqe *cqe);
-  static auto MakeCancelledResult(const Operation &operation) -> IoResult;
-  void SubmitCancelFd(int fd);
 
   // Cross-thread control enters through Post() and RequestStop().
   void DrainPosted();
@@ -222,8 +220,8 @@ class UringContext final {
   // --- eventfd multishot poll lifecycle: Run thread only. ---
   // True from staging the poll until its final CQE; prevents duplicate arming.
   bool wakeup_poll_pending_ = false;
-  // Prevents duplicate poll cancellation while shutdown CQEs are being drained.
-  bool wakeup_poll_cancel_requested_ = false;
+  // True after submitting cancellation until the poll's final CQE.
+  bool wakeup_poll_cancel_submitted_ = false;
 
   // --- Statistics: Run thread only. ---
   UringCounters counters_;

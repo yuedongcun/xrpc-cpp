@@ -175,9 +175,22 @@ auto UringContext::Send(int fd, const void *buffer, std::size_t len) -> UringAwa
 }
 
 // -----------------------------------------------------------------------------
-// Coroutine handoff: await_suspend -> completion -> await_resume
-// An Operation survives until its final CQE; every result returns through its awaitable.
+// Coroutine handoff and result delivery
+// Rejected starts complete synchronously; submitted operations complete through CQEs.
 // -----------------------------------------------------------------------------
+
+namespace {
+
+auto MakeCancelledResult(const Operation &operation) -> IoResult {
+  IoResult result;
+  result.type_ = operation.type_;
+  result.fd_ = operation.fd_;
+  result.result_ = -ECANCELED;
+  result.error_code_ = ECANCELED;
+  return result;
+}
+
+}  // namespace
 
 UringAwaitable::UringAwaitable(UringContext &context, std::unique_ptr<Operation> operation, bool multishot) noexcept
     : context_(context), owned_operation_(std::move(operation)) {
@@ -212,7 +225,7 @@ auto UringAwaitable::await_suspend(std::coroutine_handle<> continuation) -> bool
   if (!context_.TryStartOperation(owned_operation_)) {
     // A rejected start resumes synchronously through the common result slot.
     auto rejected_operation = std::move(owned_operation_);
-    result_ = UringContext::MakeCancelledResult(*rejected_operation);
+    result_ = MakeCancelledResult(*rejected_operation);
     result_ready_ = true;
     return false;
   }
@@ -441,24 +454,50 @@ void UringContext::ProcessAwaitableCqe(Operation &operation, io_uring_cqe *cqe, 
 }
 
 void UringContext::ProcessCancelCqe(io_uring_cqe *cqe) {
-  IoResult result;
-  result.result_ = cqe->res;
-  result.error_code_ = cqe->res < 0 ? -cqe->res : 0;
+  const int result = cqe->res;
+  const int error_code = result < 0 ? -result : 0;
   io_uring_cqe_seen(&uring_.Get(), cqe);
-  if (result.result_ < 0 && result.error_code_ != ENOENT && result.error_code_ != EALREADY &&
-      result.error_code_ != ECANCELED) {
-    throw InternalException(MakeSystemErrorMessage("io_uring cancel", result.error_code_));
+  if (result < 0 && error_code != ENOENT && error_code != EALREADY && error_code != ECANCELED) {
+    throw InternalException(MakeSystemErrorMessage("io_uring cancel", error_code));
   }
 }
 
-auto UringContext::MakeCancelledResult(const Operation &operation) -> IoResult {
-  IoResult result;
-  result.type_ = operation.type_;
-  result.fd_ = operation.fd_;
-  result.result_ = -ECANCELED;
-  result.error_code_ = ECANCELED;
-  result.bytes_transferred_ = 0;
-  return result;
+/**
+ * @brief Handles completion of the eventfd wakeup poll.
+ *
+ * The wakeup counter and posted callbacks are drained first. The multishot
+ * request stays armed during normal operation. During shutdown it is cancelled
+ * and its final CQE releases the operation.
+ */
+void UringContext::ProcessWakeupCqe(io_uring_cqe *cqe, bool has_more) {
+  wakeup_poll_pending_ = has_more;
+
+  const int result = cqe->res;
+  const int error_code = result < 0 ? -result : 0;
+  io_uring_cqe_seen(&uring_.Get(), cqe);
+
+  if (result < 0) {
+    if (stop_requested_.load() && error_code == ECANCELED && !has_more) {
+      wakeup_poll_cancel_submitted_ = false;
+      return;
+    }
+    throw InternalException(MakeSystemErrorMessage("eventfd poll", error_code));
+  }
+
+  if ((result & POLLIN) == 0) {
+    throw InternalException("eventfd poll completed without POLLIN");
+  }
+
+  DrainWakeupCounter();
+  DrainPosted();
+  if (stop_requested_.load()) {
+    if (has_more && !wakeup_poll_cancel_submitted_) {
+      wakeup_poll_cancel_submitted_ = true;
+      CancelFd(wakeup_.Get());
+    }
+  } else if (!has_more) {
+    SubmitWakeupPoll();
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -466,7 +505,11 @@ auto UringContext::MakeCancelledResult(const Operation &operation) -> IoResult {
 // ProcessCancelCqe() acknowledges requests; ProcessAwaitableCqe() completes the original I/O.
 // -----------------------------------------------------------------------------
 
-void UringContext::SubmitCancelFd(int fd) {
+void UringContext::CancelFd(int fd) {
+  if (fd < 0 || !IsRunning()) {
+    return;
+  }
+
   AssertRunThread("UringContext::CancelFd called outside the owning Run thread");
 
   auto operation = std::make_unique<Operation>();
@@ -474,23 +517,13 @@ void UringContext::SubmitCancelFd(int fd) {
   operation->fd_ = fd;
 
   io_uring_sqe *sqe = AcquireSqe();
-
   io_uring_prep_cancel_fd(sqe, fd, IORING_ASYNC_CANCEL_ALL);
-  Operation *raw_operation = operation.get();
-  io_uring_sqe_set_data(sqe, raw_operation);
-
+  io_uring_sqe_set_data(sqe, operation.get());
   StageOperation(std::move(operation));
 
   // Callers close the descriptor immediately after CancelFd() returns. Publish
   // the cancellation before that close instead of waiting for the turn boundary.
   SubmitStagedSqes();
-}
-
-void UringContext::CancelFd(int fd) {
-  if (fd < 0 || !IsRunning()) {
-    return;
-  }
-  SubmitCancelFd(fd);
 }
 
 // -----------------------------------------------------------------------------
@@ -568,43 +601,6 @@ void UringContext::SubmitWakeupPoll() {
 
   StageOperation(std::move(operation));
   wakeup_poll_pending_ = true;
-}
-
-/**
- * @brief Handles completion of the eventfd wakeup poll.
- *
- * The wakeup counter and posted callbacks are drained first. The multishot
- * request stays armed during normal operation. During shutdown it is cancelled
- * and its final CQE releases the operation.
- */
-void UringContext::ProcessWakeupCqe(io_uring_cqe *cqe, bool has_more) {
-  wakeup_poll_pending_ = has_more;
-
-  const int result = cqe->res;
-  const int error_code = result < 0 ? -result : 0;
-  io_uring_cqe_seen(&uring_.Get(), cqe);
-
-  if (result < 0) {
-    if (stop_requested_.load() && error_code == ECANCELED && !has_more) {
-      wakeup_poll_cancel_requested_ = false;
-      return;
-    }
-    throw InternalException(MakeSystemErrorMessage("eventfd poll", error_code));
-  }
-  if ((result & POLLIN) == 0) {
-    throw InternalException("eventfd poll completed without POLLIN");
-  }
-
-  DrainWakeupCounter();
-  DrainPosted();
-  if (stop_requested_.load()) {
-    if (has_more && !wakeup_poll_cancel_requested_) {
-      wakeup_poll_cancel_requested_ = true;
-      SubmitCancelFd(wakeup_.Get());
-    }
-  } else if (!has_more) {
-    SubmitWakeupPoll();
-  }
 }
 
 void UringContext::SignalWakeup() const {
