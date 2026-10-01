@@ -23,8 +23,13 @@
 namespace xrpc {
 
 ConnectionIoLoop::ConnectionIoLoop(ServiceRegistry &registry, WorkerPool &worker_pool, ServerConnectionConfig config,
-                                   io::UringBufferPoolConfig buffer_pool_config)
-    : context_(256, buffer_pool_config), registry_(registry), worker_pool_(worker_pool), config_(config) {}
+                                   io::UringBufferPoolConfig buffer_pool_config,
+                                   std::size_t worker_result_queue_capacity)
+    : context_(256, buffer_pool_config),
+      worker_results_(worker_result_queue_capacity),
+      registry_(registry),
+      worker_pool_(worker_pool),
+      config_(config) {}
 
 ConnectionIoLoop::~ConnectionIoLoop() { StopImmediately(); }
 
@@ -182,7 +187,57 @@ void ConnectionIoLoop::BeginDrainOnContext() {
 }
 
 void ConnectionIoLoop::PostWorkerResult(WorkerResult result) {
-  context_.Post([this, result = std::move(result)]() mutable -> void { HandleWorkerResult(std::move(result)); });
+  if (!worker_results_.TryPush(std::move(result))) {
+    worker_result_overflow_fallbacks_.fetch_add(1, std::memory_order_relaxed);
+    context_.Post([this, result = std::move(result)]() mutable -> void {
+      HandleWorkerResult(std::move(result));
+      CollectClosedConnections();
+    });
+    return;
+  }
+
+  worker_results_enqueued_.fetch_add(1, std::memory_order_relaxed);
+  ScheduleWorkerResultDrain();
+}
+
+void ConnectionIoLoop::ScheduleWorkerResultDrain() {
+  if (!worker_result_drain_scheduled_.exchange(true, std::memory_order_acq_rel)) {
+    context_.Post([this]() -> void { DrainWorkerResults(); });
+  }
+}
+
+void ConnectionIoLoop::DrainWorkerResults() {
+  ++worker_result_drain_callbacks_;
+
+  while (true) {
+    std::size_t drained = 0;
+    WorkerResult result;
+    while (drained < MAX_WORKER_RESULTS_PER_DRAIN && worker_results_.TryPop(result)) {
+      HandleWorkerResult(std::move(result));
+      ++drained;
+      ++worker_results_drained_;
+    }
+    CollectClosedConnections();
+
+    if (drained == MAX_WORKER_RESULTS_PER_DRAIN) {
+      // Keep ownership of the scheduled drain while yielding to the next
+      // event-loop turn so control callbacks and CQEs cannot starve.
+      context_.Post([this]() -> void { DrainWorkerResults(); });
+      return;
+    }
+
+    worker_result_drain_scheduled_.store(false, std::memory_order_release);
+
+    // Close the empty-to-idle race: a producer may have observed the old true
+    // flag immediately before it was cleared and therefore skipped posting.
+    if (!worker_results_.TryPop(result)) {
+      return;
+    }
+
+    (void)worker_result_drain_scheduled_.exchange(true, std::memory_order_acq_rel);
+    HandleWorkerResult(std::move(result));
+    ++worker_results_drained_;
+  }
 }
 
 auto ConnectionIoLoop::RequestStats(bool start_window) -> std::future<ConnectionLoopStatsSnapshot> {
@@ -196,10 +251,15 @@ auto ConnectionIoLoop::RequestStats(bool start_window) -> std::future<Connection
     if (start_window) {
       pending_write_bytes_peak_ = pending_write_bytes_;
     }
-    promise->set_value({.uring_ = context_.SnapshotStats(start_window),
-                        .live_connections_ = live_connections_,
-                        .pending_write_bytes_ = pending_write_bytes_,
-                        .pending_write_bytes_peak_ = pending_write_bytes_peak_});
+    promise->set_value(
+        {.uring_ = context_.SnapshotStats(start_window),
+         .live_connections_ = live_connections_,
+         .pending_write_bytes_ = pending_write_bytes_,
+         .pending_write_bytes_peak_ = pending_write_bytes_peak_,
+         .worker_results_enqueued_ = worker_results_enqueued_.load(std::memory_order_relaxed),
+         .worker_results_drained_ = worker_results_drained_,
+         .worker_result_drain_callbacks_ = worker_result_drain_callbacks_,
+         .worker_result_overflow_fallbacks_ = worker_result_overflow_fallbacks_.load(std::memory_order_relaxed)});
   });
   return future;
 }
@@ -221,7 +281,6 @@ void ConnectionIoLoop::HandleWorkerResult(WorkerResult result) {
   } else {
     connection->second->OnResponsesEncoded(std::move(result.response_bytes_), result.released_requests_);
   }
-  CollectClosedConnections();
 }
 
 void ConnectionIoLoop::OnConnectionClosed() {

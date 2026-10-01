@@ -186,6 +186,42 @@ TEST(ServerConnectionTest, SingleBufferReceivesLargeRequestsWithoutClosingTheCon
   ExpectPeerClosed(pair.client_socket_);
 }
 
+TEST(ServerConnectionTest, WorkerResultsShareOneTypedDataChannelDrain) {
+  xrpc::WorkerPool worker_pool(MakeWorkerConfig(1));
+  xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
+  xrpc::ConnectionIoLoop loop(registry, worker_pool, MakeConnectionConfig());
+
+  for (std::uint64_t id = 1; id <= 5; ++id) {
+    loop.PostWorkerResult(xrpc::WorkerResult{.connection_id_ = id});
+  }
+
+  loop.Start();
+  const auto snapshot = loop.RequestStats().get();
+  EXPECT_EQ(snapshot.worker_results_enqueued_, 5U);
+  EXPECT_EQ(snapshot.worker_results_drained_, 5U);
+  EXPECT_EQ(snapshot.worker_result_drain_callbacks_, 1U);
+  EXPECT_EQ(snapshot.worker_result_overflow_fallbacks_, 0U);
+  EXPECT_TRUE(loop.FinishDrain().ok());
+}
+
+TEST(ServerConnectionTest, FullWorkerResultDataChannelFallsBackWithoutDroppingResults) {
+  xrpc::WorkerPool worker_pool(MakeWorkerConfig(1));
+  xrpc::ServiceRegistry registry = MakeRegistry(MakeEchoHandler());
+  xrpc::ConnectionIoLoop loop(registry, worker_pool, MakeConnectionConfig(), {}, 1);
+
+  for (std::uint64_t id = 1; id <= 3; ++id) {
+    loop.PostWorkerResult(xrpc::WorkerResult{.connection_id_ = id});
+  }
+
+  loop.Start();
+  const auto snapshot = loop.RequestStats().get();
+  EXPECT_EQ(snapshot.worker_results_enqueued_, 1U);
+  EXPECT_EQ(snapshot.worker_results_drained_, 1U);
+  EXPECT_EQ(snapshot.worker_result_drain_callbacks_, 1U);
+  EXPECT_EQ(snapshot.worker_result_overflow_fallbacks_, 2U);
+  EXPECT_TRUE(loop.FinishDrain().ok());
+}
+
 TEST(ServerConnectionTest, EchoesSingleFrameAndClosesAfterPeerShutdown) {
   ConnectedPair pair = MakeConnectedPair();
   xrpc::WorkerPool worker_pool(MakeWorkerConfig(1));

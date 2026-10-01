@@ -37,10 +37,8 @@ auto ToJson(const WorkerPoolStatsSnapshot &pool) -> nlohmann::json {
     worker["queues"].push_back(
         {{"worker_id", index},
          {"gauges",
-          {{"queued_logical_jobs", q.queued_logical_jobs_},
-           {"pending_logical_jobs", q.pending_logical_jobs_}}},
-         {"peaks",
-          {{"queued_logical_jobs", q.queued_logical_jobs_peak_}}}});
+          {{"queued_logical_jobs", q.queued_logical_jobs_}, {"pending_logical_jobs", q.pending_logical_jobs_}}},
+         {"peaks", {{"queued_logical_jobs", q.queued_logical_jobs_peak_}}}});
   }
   return worker;
 }
@@ -61,6 +59,10 @@ auto WriteStatsSnapshot(RpcServer &server, const std::string &path, bool start_w
         auto encoded = ToJson(loop.uring_, index);
         encoded["gauges"]["live_connections"] = loop.live_connections_;
         encoded["gauges"]["pending_write_bytes"] = loop.pending_write_bytes_;
+        encoded["counters"]["worker_results_enqueued"] = loop.worker_results_enqueued_;
+        encoded["counters"]["worker_results_drained"] = loop.worker_results_drained_;
+        encoded["counters"]["worker_result_drain_callbacks"] = loop.worker_result_drain_callbacks_;
+        encoded["counters"]["worker_result_overflow_fallbacks"] = loop.worker_result_overflow_fallbacks_;
         encoded["peaks"]["pending_write_bytes"] = loop.pending_write_bytes_peak_;
         output["loops"].push_back(std::move(encoded));
       }

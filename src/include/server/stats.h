@@ -27,6 +27,10 @@ struct ConnectionLoopStatsSnapshot {
   // Includes responses queued or currently sending; excludes encoded worker output in transit.
   std::size_t pending_write_bytes_ = 0;
   std::size_t pending_write_bytes_peak_ = 0;  // Exact simultaneous sum within this loop.
+  std::uint64_t worker_results_enqueued_ = 0;
+  std::uint64_t worker_results_drained_ = 0;
+  std::uint64_t worker_result_drain_callbacks_ = 0;
+  std::uint64_t worker_result_overflow_fallbacks_ = 0;
 };
 
 struct ServerStatsSnapshot {

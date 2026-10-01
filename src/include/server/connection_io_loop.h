@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -19,6 +20,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "common/mpsc_queue.h"
 #include "io/socket.h"
 #include "io/uring/context.h"
 #include "server/connection_config.h"
@@ -56,7 +58,8 @@ struct WorkerResult final {
 class ConnectionIoLoop final {
  public:
   ConnectionIoLoop(ServiceRegistry &registry, WorkerPool &worker_pool, ServerConnectionConfig config,
-                   io::UringBufferPoolConfig buffer_pool_config = {});
+                   io::UringBufferPoolConfig buffer_pool_config = {},
+                   std::size_t worker_result_queue_capacity = DEFAULT_WORKER_RESULT_QUEUE_CAPACITY);
 
   ~ConnectionIoLoop();
 
@@ -78,7 +81,8 @@ class ConnectionIoLoop final {
   // Accept-thread command. Posts connection creation to the I/O thread.
   void PostStartConnection(io::Socket client_socket);
 
-  // Worker-thread command. Posts a worker result to this loop's I/O thread.
+  // Worker-thread command. Enqueues a result on the typed data channel and
+  // schedules the I/O thread to drain it.
   void PostWorkerResult(WorkerResult result);
 
   // Control-thread-only; copy statistics on the context thread via Post().
@@ -110,6 +114,10 @@ class ConnectionIoLoop final {
 
   void HandleWorkerResult(WorkerResult result);
 
+  void ScheduleWorkerResultDrain();
+
+  void DrainWorkerResults();
+
   // I/O-context-thread-only drain operation.
   void BeginDrainOnContext();
 
@@ -117,6 +125,12 @@ class ConnectionIoLoop final {
   void OnConnectionClosed();
 
   io::UringContext context_;
+  MpscQueue<WorkerResult> worker_results_;
+  std::atomic<bool> worker_result_drain_scheduled_{false};
+  std::atomic<std::uint64_t> worker_results_enqueued_{0};
+  std::atomic<std::uint64_t> worker_result_overflow_fallbacks_{0};
+  std::uint64_t worker_results_drained_ = 0;
+  std::uint64_t worker_result_drain_callbacks_ = 0;
   ServiceRegistry &registry_;
   WorkerPool &worker_pool_;
   ServerConnectionConfig config_;
@@ -131,6 +145,9 @@ class ConnectionIoLoop final {
   std::condition_variable drain_cv_;
   std::size_t live_connections_ = 0;
   State state_ = State::Created;
+
+  static constexpr std::size_t DEFAULT_WORKER_RESULT_QUEUE_CAPACITY = 4096;
+  static constexpr std::size_t MAX_WORKER_RESULTS_PER_DRAIN = 256;
 };
 
 }  // namespace xrpc
