@@ -61,6 +61,7 @@ endfunction()
 
 xrpc_add_test(common_task_test common/task_test.cpp TIMEOUT ${XRPC_TEST_UNIT_TIMEOUT})
 xrpc_add_test(common_log_test common/log_test.cpp TIMEOUT ${XRPC_TEST_UNIT_TIMEOUT})
+xrpc_add_test(common_mpsc_queue_test common/mpsc_queue_test.cpp TIMEOUT ${XRPC_TEST_UNIT_TIMEOUT})
 xrpc_add_test(io_uring_awaitable_test io/uring_awaitable_test.cpp TIMEOUT ${XRPC_TEST_INTEGRATION_TIMEOUT})
 xrpc_add_test(protocol_test protocol/protocol_test.cpp TIMEOUT ${XRPC_TEST_UNIT_TIMEOUT})
 xrpc_add_test(server_connection_io_uring_test server/server_connection_io_uring_test.cpp TIMEOUT ${XRPC_TEST_INTEGRATION_TIMEOUT})
