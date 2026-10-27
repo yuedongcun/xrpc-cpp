@@ -96,7 +96,6 @@ auto SendAll(int fd, std::string_view frame, const EffectiveCallOptions &options
       }
     }
 
-    retrying = false;
     const ssize_t sent = ::send(fd, frame.data() + written, frame.size() - written, MSG_NOSIGNAL);
     if (sent > 0) {
       written += static_cast<std::size_t>(sent);

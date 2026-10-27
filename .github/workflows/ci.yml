@@ -27,8 +27,8 @@ jobs:
           sudo apt-get install --no-install-recommends \
             build-essential \
             clang-format-20 \
-            clang-tidy \
-            clang-tools \
+            clang-tidy-20 \
+            clang-tools-20 \
             cmake \
             python3
 
@@ -42,7 +42,7 @@ jobs:
         run: make
 
       - name: Check clang-tidy
-        run: make check-tidy
+        run: make check-tidy CLANG_TIDY=clang-tidy-20 RUN_CLANG_TIDY=run-clang-tidy-20
 
       - name: Test
         run: ctest --test-dir build/tests --output-on-failure -LE external

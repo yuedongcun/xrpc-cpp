@@ -100,6 +100,9 @@ class ServerConnection final {
 
   void ReleaseWriteBytes(std::size_t bytes);
 
+  /** Takes the first queued write and coalesces adjacent writes up to the batch limit. */
+  [[nodiscard]] auto TakeWriteBatch() -> std::string;
+
   /**
    * @brief Waits for and sends responses until the connection closes.
    *

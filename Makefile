@@ -2,6 +2,8 @@ BUILD_DIR ?= build
 RELEASE_BUILD_DIR ?= build-release
 CMAKE_ARGS ?=
 CLANG_FORMAT ?= clang-format-20
+CLANG_TIDY ?= clang-tidy-20
+RUN_CLANG_TIDY ?= run-clang-tidy-20
 INSTALL_PREFIX ?= /usr/local
 
 .DEFAULT_GOAL := all
@@ -60,15 +62,20 @@ check-exceptions:
 	@python3 tools/check_exception_boundaries.py
 
 check-tidy:
-	@command -v run-clang-tidy >/dev/null 2>&1 || { \
-		echo "error: run-clang-tidy not found"; \
+	@command -v $(CLANG_TIDY) >/dev/null 2>&1 || { \
+		echo "error: $(CLANG_TIDY) not found"; \
+		exit 1; \
+	}
+	@command -v $(RUN_CLANG_TIDY) >/dev/null 2>&1 || { \
+		echo "error: $(RUN_CLANG_TIDY) not found"; \
 		exit 1; \
 	}
 	@test -f "$(BUILD_DIR)/compile_commands.json" || { \
 		echo "error: $(BUILD_DIR)/compile_commands.json not found; run 'make' first"; \
 		exit 1; \
 	}
-	@run-clang-tidy \
+	@$(RUN_CLANG_TIDY) \
+		-clang-tidy-binary="$(CLANG_TIDY)" \
 		-p "$(BUILD_DIR)" \
 		-config-file="$(CURDIR)/.clang-tidy" \
 		-quiet \

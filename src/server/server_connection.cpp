@@ -239,40 +239,46 @@ void ServerConnection::ReleaseWriteBytes(std::size_t bytes) {
   owner_loop_.RecordWriteBytesChange(before, pending_write_bytes_);
 }
 
+auto ServerConnection::TakeWriteBatch() -> std::string {
+  std::string write_batch = std::move(write_queue_.front().bytes_);
+  write_queue_.pop_front();
+
+  if (!write_queue_.empty()) {
+    write_batch.reserve(std::min(pending_write_bytes_, MAX_WRITE_BATCH_BYTES));
+    while (!write_queue_.empty() && write_batch.size() + write_queue_.front().bytes_.size() <= MAX_WRITE_BATCH_BYTES) {
+      write_batch.append(write_queue_.front().bytes_);
+      write_queue_.pop_front();
+    }
+  }
+
+  return write_batch;
+}
+
 auto ServerConnection::WriteLoop() -> runtime::Task<void> {
   while (state_ != State::Closed) {
     co_await WriteQueueAwaiter(*this);
 
     while (state_ != State::Closed && !write_queue_.empty()) {
-      PendingWrite pending_write = std::move(write_queue_.front());
-      write_queue_.pop_front();
-      std::string frame = std::move(pending_write.bytes_);
-      std::size_t frame_size = frame.size();
-      if (!write_queue_.empty()) {
-        frame.reserve(std::min(pending_write_bytes_, MAX_WRITE_BATCH_BYTES));
-        while (!write_queue_.empty() && frame.size() + write_queue_.front().bytes_.size() <= MAX_WRITE_BATCH_BYTES) {
-          frame_size += write_queue_.front().bytes_.size();
-          frame.append(write_queue_.front().bytes_);
-          write_queue_.pop_front();
-        }
-      }
+      const std::string write_batch = TakeWriteBatch();
+      const std::size_t batch_bytes = write_batch.size();
 
       std::size_t offset = 0;
-      while (state_ != State::Closed && offset < frame.size()) {
-        const std::string_view remaining(frame.data() + offset, frame.size() - offset);
+      while (state_ != State::Closed && offset < batch_bytes) {
+        const std::string_view remaining(write_batch.data() + offset, batch_bytes - offset);
         const io::IoResult send_result = co_await context_.Send(socket_.fd(), remaining.data(), remaining.size());
         if (state_ == State::Closed) {
           co_return;
         }
         if (send_result.result_ <= 0) {
-          ReleaseWriteBytes(frame_size);
+          ReleaseWriteBytes(batch_bytes);
           Close();
           co_return;
         }
 
         offset += send_result.bytes_transferred_;
       }
-      ReleaseWriteBytes(frame_size);
+      // Dequeued bytes still count against backpressure until the batch is sent.
+      ReleaseWriteBytes(batch_bytes);
     }
 
     TryFinishDrain();

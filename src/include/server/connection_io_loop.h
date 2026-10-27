@@ -124,9 +124,8 @@ class ConnectionIoLoop final {
   // Invoked on the I/O context thread when a connection reaches Closed.
   void OnConnectionClosed();
 
-  io::UringContext context_;
   MpscQueue<WorkerResult> worker_results_;
-  std::atomic<bool> worker_result_drain_scheduled_{false};
+  io::UringContext context_;
   std::atomic<std::uint64_t> worker_results_enqueued_{0};
   std::atomic<std::uint64_t> worker_result_overflow_fallbacks_{0};
   std::uint64_t worker_results_drained_ = 0;
@@ -144,6 +143,7 @@ class ConnectionIoLoop final {
   std::mutex drain_mutex_;
   std::condition_variable drain_cv_;
   std::size_t live_connections_ = 0;
+  std::atomic<bool> worker_result_drain_scheduled_{false};
   State state_ = State::Created;
 
   static constexpr std::size_t DEFAULT_WORKER_RESULT_QUEUE_CAPACITY = 4096;

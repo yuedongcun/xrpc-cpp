@@ -25,8 +25,8 @@ namespace xrpc {
 ConnectionIoLoop::ConnectionIoLoop(ServiceRegistry &registry, WorkerPool &worker_pool, ServerConnectionConfig config,
                                    io::UringBufferPoolConfig buffer_pool_config,
                                    std::size_t worker_result_queue_capacity)
-    : context_(256, buffer_pool_config),
-      worker_results_(worker_result_queue_capacity),
+    : worker_results_(worker_result_queue_capacity),
+      context_(256, buffer_pool_config),
       registry_(registry),
       worker_pool_(worker_pool),
       config_(config) {}
@@ -190,6 +190,8 @@ void ConnectionIoLoop::BeginDrainOnContext() {
 void ConnectionIoLoop::PostWorkerResult(WorkerResult result) {
   if (!worker_results_.TryPush(std::move(result))) {
     worker_result_overflow_fallbacks_.fetch_add(1, std::memory_order_relaxed);
+    // TryPush guarantees that a full queue leaves its argument untouched.
+    // NOLINTNEXTLINE(bugprone-use-after-move)
     context_.Post([this, result = std::move(result)]() mutable -> void {
       HandleWorkerResult(std::move(result));
       CollectClosedConnections();

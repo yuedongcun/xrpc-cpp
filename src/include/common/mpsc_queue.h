@@ -139,12 +139,11 @@ class MpscQueue final {
     return capacity;
   }
 
-  const std::size_t capacity_;
-  std::unique_ptr<Slot[]> slots_;
-
   // Producers contend on this cache line. The single consumer advances its
   // position on a separate cache line to avoid false sharing between the two.
   alignas(64) std::atomic<std::size_t> enqueue_position_{0};
+  const std::size_t capacity_;
+  std::unique_ptr<Slot[]> slots_;
   alignas(64) std::atomic<std::size_t> dequeue_position_{0};
 };
 
