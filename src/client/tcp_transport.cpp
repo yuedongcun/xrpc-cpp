@@ -165,8 +165,7 @@ auto TcpTransport::Call(const RequestEnvelope &request, const EffectiveCallOptio
                            RequestCommitState::NotSent);
   }
 
-  if (std::optional<CallFailure> write_failure =
-          TryWriteRequestFrame(request.request_id_, request_frame, options)) {
+  if (std::optional<CallFailure> write_failure = TryWriteRequestFrame(request.request_id_, request_frame, options)) {
     return CallAttemptResult(std::move(*write_failure));
   }
 

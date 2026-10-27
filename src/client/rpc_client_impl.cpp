@@ -174,9 +174,8 @@ auto RpcClient::Impl::CallWithFailover(const RequestEnvelope &request, const Eff
   const std::shared_ptr<const RoutingSnapshot> snapshot = std::move(snapshot_result).value();
 
   const std::size_t endpoint_count = snapshot->transports_.size();
-  const std::size_t start =
-      options.sticky_key_.empty() ? next_endpoint_index_.fetch_add(1) % endpoint_count
-                                  : SelectStickyStart(options.sticky_key_, snapshot->hash_ring_);
+  const std::size_t start = options.sticky_key_.empty() ? next_endpoint_index_.fetch_add(1) % endpoint_count
+                                                        : SelectStickyStart(options.sticky_key_, snapshot->hash_ring_);
 
   for (std::size_t offset = 0; offset < endpoint_count; ++offset) {
     const std::size_t index = (start + offset) % endpoint_count;
