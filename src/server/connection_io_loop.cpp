@@ -40,6 +40,7 @@ void ConnectionIoLoop::Start() {
   }
   thread_ = std::jthread([this]() -> void {
     try {
+      // Block in the I/O event loop until stop is requested and outstanding operations are drained.
       context_.Run();
     } catch (...) {  // XRPC_EXTERNAL_EXCEPTION_BOUNDARY: thread entry
       error_ = CaughtExceptionToStatus("connection I/O loop failed");

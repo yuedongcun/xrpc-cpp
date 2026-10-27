@@ -6,7 +6,6 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -60,6 +59,7 @@ class RpcServer::Impl final {
 
   void DispatchAcceptedConnection(io::Socket socket);
 
+  [[nodiscard]] auto StartComponents() -> Status;
   void StartConnectionLoops();
   void BeginConnectionDrain();
   [[nodiscard]] auto FinishConnectionDrain() -> Status;
@@ -78,7 +78,7 @@ class RpcServer::Impl final {
 
   io::UringContext accept_context_;
   std::vector<std::unique_ptr<ConnectionIoLoop>> connection_io_loops_;
-  std::optional<runtime::Task<void>> accept_task_;
+  runtime::Task<void> accept_task_;
   io::Socket listen_socket_;
 
   std::mutex lifecycle_mutex_;

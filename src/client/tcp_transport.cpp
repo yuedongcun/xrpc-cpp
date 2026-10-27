@@ -81,18 +81,33 @@ auto SetSendTimeout(int fd, std::chrono::milliseconds timeout) -> std::optional<
   return std::nullopt;
 }
 
-auto SendAll(int fd, std::string_view frame) -> std::optional<Status> {
+auto SendAll(int fd, std::string_view frame, const EffectiveCallOptions &options) -> std::optional<Status> {
   std::size_t written = 0;
+  bool retrying = false;
   while (written < frame.size()) {
+    // The first send uses the timeout configured by TryWriteRequestFrame().
+    // Partial writes and EINTR retries refresh it from the same absolute deadline.
+    if (retrying && options.deadline_.has_value()) {
+      if (DeadlineExpired(options)) {
+        return TimeoutStatus("send");
+      }
+      if (std::optional<Status> timeout_status = SetSendTimeout(fd, RemainingTimeout(options))) {
+        return timeout_status;
+      }
+    }
+
+    retrying = false;
     const ssize_t sent = ::send(fd, frame.data() + written, frame.size() - written, MSG_NOSIGNAL);
     if (sent > 0) {
       written += static_cast<std::size_t>(sent);
+      retrying = written < frame.size();
       continue;
     }
     if (sent == 0) {
       return PeerClosedStatus("send");
     }
     if (errno == EINTR) {
+      retrying = true;
       continue;
     }
     return IoStatus("send", errno);
@@ -125,36 +140,34 @@ TcpTransport::TcpTransport(std::string host, std::uint16_t port, ProtocolLimits 
 TcpTransport::~TcpTransport() { Close(); }
 
 auto TcpTransport::Call(const RequestEnvelope &request, const EffectiveCallOptions &options) -> CallAttemptResult {
-  auto fail = [&request](Status status, RequestCommitState state) -> CallAttemptResult {
-    return MakeCallFailure(std::move(status), state);
-  };
-
   FrameCodec codec(protocol_limits_);
+
   StatusOr<std::string> encoded = codec.Encode(request);
   if (!encoded.ok()) {
-    return fail(encoded.status(), RequestCommitState::NotSent);
+    return MakeCallFailure(encoded.status(), RequestCommitState::NotSent);
   }
   std::string request_frame = std::move(encoded).value();
 
   if (DeadlineExpired(options)) {
-    return fail({StatusCode::DeadlineExceeded, "RPC deadline exceeded"}, RequestCommitState::NotSent);
+    return MakeCallFailure({StatusCode::DeadlineExceeded, "RPC deadline exceeded"}, RequestCommitState::NotSent);
   }
 
   const Status connect_status = EnsureConnectedWithTimeout(RemainingTimeout(options));
   if (!connect_status.ok()) {
-    return fail(connect_status, RequestCommitState::NotSent);
+    return MakeCallFailure(connect_status, RequestCommitState::NotSent);
   }
 
   auto pending = std::make_shared<PendingCall>();
   // Register before writing so a fast response cannot arrive before the request
   // becomes visible to the reader thread.
   if (!TryRegisterPending(request.request_id_, pending)) {
-    return fail({StatusCode::ResourceExhausted, "client max in-flight per endpoint exceeded"},
-                RequestCommitState::NotSent);
+    return MakeCallFailure({StatusCode::ResourceExhausted, "client max in-flight per endpoint exceeded"},
+                           RequestCommitState::NotSent);
   }
 
-  if (std::optional<CallAttemptResult> write_failure = WriteRequestFrame(request.request_id_, request_frame, options)) {
-    return std::move(*write_failure);
+  if (std::optional<CallFailure> write_failure =
+          TryWriteRequestFrame(request.request_id_, request_frame, options)) {
+    return CallAttemptResult(std::move(*write_failure));
   }
 
   return WaitForResult(pending, request.request_id_, options);
@@ -166,7 +179,18 @@ auto TcpTransport::EnsureConnectedWithTimeout(std::chrono::milliseconds timeout)
     return Status::Ok();
   }
 
-  JoinReaderIfStopped(lock);
+  if (reader_thread_.joinable() && reader_thread_.get_id() != std::this_thread::get_id()) {
+    std::jthread previous_reader = std::exchange(reader_thread_, std::jthread{});
+    lock.unlock();
+    previous_reader.join();
+    lock.lock();
+  }
+
+  // Joining may release state_mutex_, so another caller may have established
+  // the next connection generation while this caller waited.
+  if (socket_.valid()) {
+    return Status::Ok();
+  }
 
   io::Socket socket;
   Status status = socket.Connect(host_, port_, timeout);
@@ -182,20 +206,6 @@ auto TcpTransport::EnsureConnectedWithTimeout(std::chrono::milliseconds timeout)
 auto TcpTransport::ConnectedFd() const -> int {
   std::lock_guard lock(state_mutex_);
   return socket_.valid() ? socket_.fd() : -1;
-}
-
-void TcpTransport::JoinReaderIfStopped(std::unique_lock<std::mutex> &lock) {
-  if (!reader_thread_.joinable()) {
-    return;
-  }
-  if (reader_thread_.get_id() == std::this_thread::get_id()) {
-    return;
-  }
-
-  std::jthread reader = std::exchange(reader_thread_, std::jthread{});
-  lock.unlock();
-  reader.join();
-  lock.lock();
 }
 
 void TcpTransport::Close() {
@@ -284,7 +294,7 @@ auto TcpTransport::TryRegisterPending(std::uint64_t request_id, std::shared_ptr<
   return true;
 }
 
-auto TcpTransport::RemovePending(std::uint64_t request_id) -> bool {
+auto TcpTransport::TryUnregisterPending(std::uint64_t request_id) -> bool {
   std::lock_guard lock(pending_mutex_);
   return pending_calls_.erase(request_id) > 0;
 }
@@ -333,47 +343,56 @@ auto TcpTransport::WaitForResult(const std::shared_ptr<PendingCall> &pending, st
   std::unique_lock lock(pending->mutex_);
   const auto has_result = [&pending]() -> bool { return pending->result_.has_value(); };
 
-  if (options.deadline_.has_value()) {
-    if (!pending->cv_.wait_until(lock, *options.deadline_, has_result)) {
-      if (RemovePending(request_id)) {
-        return MakeCallFailure({StatusCode::DeadlineExceeded, "RPC deadline exceeded"}, RequestCommitState::MaybeSent);
-      }
-      pending->cv_.wait(lock, has_result);
-    }
-  } else {
+  if (!options.deadline_.has_value()) {
     pending->cv_.wait(lock, has_result);
+    return std::move(*pending->result_);
   }
 
+  if (pending->cv_.wait_until(lock, *options.deadline_, has_result)) {
+    return std::move(*pending->result_);
+  }
+
+  // Successful unregistration means the deadline won the completion race. A
+  // later response will no longer find this PendingCall.
+  if (TryUnregisterPending(request_id)) {
+    return MakeCallFailure({StatusCode::DeadlineExceeded, "RPC deadline exceeded"}, RequestCommitState::MaybeSent);
+  }
+
+  // Another path already removed the request and owns completion. Waiting
+  // releases pending->mutex_ so that path can publish and notify the result.
+  pending->cv_.wait(lock, has_result);
   return std::move(*pending->result_);
 }
 
-auto TcpTransport::WriteRequestFrame(std::uint64_t request_id, std::string_view frame,
-                                     const EffectiveCallOptions &options) -> std::optional<CallAttemptResult> {
+auto TcpTransport::TryWriteRequestFrame(std::uint64_t request_id, std::string_view frame,
+                                        const EffectiveCallOptions &options) -> std::optional<CallFailure> {
   std::lock_guard write_lock(write_mutex_);
 
   if (DeadlineExpired(options)) {
-    (void)RemovePending(request_id);
-    return MakeCallFailure({StatusCode::DeadlineExceeded, "RPC deadline exceeded"}, RequestCommitState::NotSent);
+    (void)TryUnregisterPending(request_id);
+    return CallFailure{.status_ = {StatusCode::DeadlineExceeded, "RPC deadline exceeded"},
+                       .commit_state_ = RequestCommitState::NotSent};
   }
 
   const int fd = ConnectedFd();
   if (fd < 0) {
-    (void)RemovePending(request_id);
-    return MakeCallFailure({StatusCode::Unavailable, "transport not connected"}, RequestCommitState::NotSent);
+    (void)TryUnregisterPending(request_id);
+    return CallFailure{.status_ = {StatusCode::Unavailable, "transport not connected"},
+                       .commit_state_ = RequestCommitState::NotSent};
   }
 
   if (std::optional<Status> timeout_status = SetSendTimeout(fd, RemainingTimeout(options))) {
-    (void)RemovePending(request_id);
-    return MakeCallFailure(std::move(*timeout_status), RequestCommitState::NotSent);
+    (void)TryUnregisterPending(request_id);
+    return CallFailure{.status_ = std::move(*timeout_status), .commit_state_ = RequestCommitState::NotSent};
   }
 
-  if (std::optional<Status> send_status = SendAll(fd, frame)) {
-    (void)RemovePending(request_id);
+  if (std::optional<Status> send_status = SendAll(fd, frame, options)) {
+    (void)TryUnregisterPending(request_id);
     Close();
 
     // send() may have committed a frame prefix before reporting failure, so
     // failover could execute a non-idempotent request twice.
-    return MakeCallFailure(std::move(*send_status), RequestCommitState::MaybeSent);
+    return CallFailure{.status_ = std::move(*send_status), .commit_state_ = RequestCommitState::MaybeSent};
   }
 
   return std::nullopt;

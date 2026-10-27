@@ -26,13 +26,13 @@ enum class StatusCode : std::uint8_t {
   InvalidArgument = 2,
   /** The client-side deadline expired before a response was received. */
   DeadlineExceeded = 3,
-  /** The requested service does not exist on the server. */
+  /** The requested service does not exist in the service registry. */
   NotFound = 4,
   /** A configured concurrency, queue, or protocol-size limit was reached. */
   ResourceExhausted = 7,
   /** The API was called in an invalid lifecycle state. */
   FailedPrecondition = 8,
-  /** The requested method does not exist on the selected service. */
+  /** The service exists, but the requested method is not implemented. */
   Unimplemented = 9,
   /** An unexpected local or handler failure occurred. */
   Internal = 10,

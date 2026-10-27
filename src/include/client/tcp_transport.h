@@ -15,6 +15,7 @@
 #include <thread>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 
 #include <xrpc/status.h>
 
@@ -54,32 +55,34 @@ struct CallFailure {
 /**
  * @brief Contains either a response or a failure from one endpoint attempt.
  *
- * Exactly one of `response_` and `failure_` is populated.
+ * The variant stores exactly one response or transport failure.
  */
-struct CallAttemptResult {
-  explicit CallAttemptResult(ResponseEnvelope response) : response_(std::move(response)) {}
+class CallAttemptResult final {
+ public:
+  explicit CallAttemptResult(ResponseEnvelope response) : value_(std::move(response)) {}
 
-  explicit CallAttemptResult(CallFailure failure) : failure_(std::move(failure)) {}
+  explicit CallAttemptResult(CallFailure failure) : value_(std::move(failure)) {}
 
-  std::optional<ResponseEnvelope> response_;
+  [[nodiscard]] auto HasResponse() const -> bool { return std::holds_alternative<ResponseEnvelope>(value_); }
 
-  std::optional<CallFailure> failure_;
-
-  [[nodiscard]] auto HasResponse() const -> bool { return response_.has_value(); }
-
-  [[nodiscard]] auto HasFailure() const -> bool { return failure_.has_value(); }
+  [[nodiscard]] auto HasFailure() const -> bool { return std::holds_alternative<CallFailure>(value_); }
 
   [[nodiscard]] auto CanRetryWithoutDuplicateRequest() const -> bool {
-    return HasFailure() && failure().commit_state_ == RequestCommitState::NotSent;
+    const CallFailure *call_failure = failure();
+    return call_failure != nullptr && call_failure->commit_state_ == RequestCommitState::NotSent;
   }
 
   [[nodiscard]] auto MustStopRetryToAvoidDuplicateRequest() const -> bool {
-    return HasFailure() && failure().commit_state_ == RequestCommitState::MaybeSent;
+    const CallFailure *call_failure = failure();
+    return call_failure != nullptr && call_failure->commit_state_ == RequestCommitState::MaybeSent;
   }
 
-  [[nodiscard]] auto response() const -> const ResponseEnvelope & { return *response_; }
+  [[nodiscard]] auto response() const -> const ResponseEnvelope * { return std::get_if<ResponseEnvelope>(&value_); }
 
-  [[nodiscard]] auto failure() const -> const CallFailure & { return *failure_; }
+  [[nodiscard]] auto failure() const -> const CallFailure * { return std::get_if<CallFailure>(&value_); }
+
+ private:
+  std::variant<ResponseEnvelope, CallFailure> value_;
 };
 
 [[nodiscard]] inline auto MakeCallFailure(Status status, RequestCommitState commit_state) -> CallAttemptResult {
@@ -131,8 +134,6 @@ class TcpTransport final {
 
   [[nodiscard]] auto ConnectedFd() const -> int;
 
-  void JoinReaderIfStopped(std::unique_lock<std::mutex> &lock);
-
   /** Reads and matches all responses for the current socket generation. */
   void ReaderLoop(int fd);
 
@@ -143,7 +144,7 @@ class TcpTransport final {
 
   [[nodiscard]] auto TryRegisterPending(std::uint64_t request_id, std::shared_ptr<PendingCall> pending) -> bool;
 
-  [[nodiscard]] auto RemovePending(std::uint64_t request_id) -> bool;
+  [[nodiscard]] auto TryUnregisterPending(std::uint64_t request_id) -> bool;
 
   void CompletePending(std::uint64_t request_id, CallAttemptResult result);
 
@@ -154,9 +155,9 @@ class TcpTransport final {
   [[nodiscard]] auto WaitForResult(const std::shared_ptr<PendingCall> &pending, std::uint64_t request_id,
                                    const EffectiveCallOptions &options) -> CallAttemptResult;
 
-  /** Writes one frame and classifies failures by whether bytes may have reached the peer. */
-  [[nodiscard]] auto WriteRequestFrame(std::uint64_t request_id, std::string_view frame,
-                                       const EffectiveCallOptions &options) -> std::optional<CallAttemptResult>;
+  /** Tries to write one frame and classifies any failure by whether bytes may have reached the peer. */
+  [[nodiscard]] auto TryWriteRequestFrame(std::uint64_t request_id, std::string_view frame,
+                                          const EffectiveCallOptions &options) -> std::optional<CallFailure>;
 
   std::string host_;
 

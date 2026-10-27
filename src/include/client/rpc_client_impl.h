@@ -86,7 +86,7 @@ class RpcClient::Impl final {
   [[nodiscard]] static auto BuildHashRing(const std::vector<Endpoint> &endpoints) -> std::vector<HashRingEntry>;
 
   [[nodiscard]] static auto SelectStickyStart(std::string_view sticky_key, const std::vector<HashRingEntry> &hash_ring)
-      -> std::optional<std::size_t>;
+      -> std::size_t;
 
   [[nodiscard]] static auto Fnv1a64(std::string_view value) -> std::uint64_t;
 

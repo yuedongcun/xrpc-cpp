@@ -9,8 +9,8 @@
 #include "client/rpc_client_impl.h"
 
 #include <algorithm>
+#include <cassert>
 #include <memory>
-#include <optional>
 #include <string>
 #include <utility>
 
@@ -101,15 +101,14 @@ auto RpcClient::Impl::Call(std::string service_name, std::string method_name, st
   request.payload_ = std::move(payload);
 
   CallAttemptResult result = CallWithFailover(request, effective_options);
-  if (!result.HasResponse()) {
-    return StatusOr<std::string>(result.failure().status_);
+  if (const ResponseEnvelope *response = result.response()) {
+    if (!response->status_.ok()) {
+      return StatusOr<std::string>(response->status_);
+    }
+    return StatusOr<std::string>(response->payload_);
   }
 
-  const ResponseEnvelope &response = result.response();
-  if (!response.status_.ok()) {
-    return StatusOr<std::string>(response.status_);
-  }
-  return StatusOr<std::string>(response.payload_);
+  return StatusOr<std::string>(result.failure()->status_);
 }
 
 auto RpcClient::Impl::ResolveRoutingSnapshot() -> StatusOr<std::shared_ptr<const RoutingSnapshot>> {
@@ -175,10 +174,9 @@ auto RpcClient::Impl::CallWithFailover(const RequestEnvelope &request, const Eff
   const std::shared_ptr<const RoutingSnapshot> snapshot = std::move(snapshot_result).value();
 
   const std::size_t endpoint_count = snapshot->transports_.size();
-  const std::optional<std::size_t> sticky_start =
-      options.sticky_key_.empty() ? std::nullopt : SelectStickyStart(options.sticky_key_, snapshot->hash_ring_);
   const std::size_t start =
-      sticky_start.has_value() ? *sticky_start : next_endpoint_index_.fetch_add(1) % endpoint_count;
+      options.sticky_key_.empty() ? next_endpoint_index_.fetch_add(1) % endpoint_count
+                                  : SelectStickyStart(options.sticky_key_, snapshot->hash_ring_);
 
   for (std::size_t offset = 0; offset < endpoint_count; ++offset) {
     const std::size_t index = (start + offset) % endpoint_count;
@@ -230,10 +228,9 @@ auto RpcClient::Impl::BuildHashRing(const std::vector<Endpoint> &endpoints) -> s
 }
 
 auto RpcClient::Impl::SelectStickyStart(std::string_view sticky_key, const std::vector<HashRingEntry> &hash_ring)
-    -> std::optional<std::size_t> {
-  if (sticky_key.empty() || hash_ring.empty()) {
-    return std::nullopt;
-  }
+    -> std::size_t {
+  assert(!sticky_key.empty());
+  assert(!hash_ring.empty());
 
   const std::uint64_t key_hash = Fnv1a64(sticky_key);
   const auto entry = std::ranges::lower_bound(hash_ring, key_hash, {},
